@@ -4,9 +4,6 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.api.Log
-
-private const val TAG = "OppaDrama-Trace"
 
 class OppaDramaProvider : MainAPI() {
     override var name = "OPPADRAMA"
@@ -32,6 +29,7 @@ class OppaDramaProvider : MainAPI() {
     // Adopsi penuh susunan daftar kategori terlengkap dari WordPress Dramastream Engine
     override val mainPage = mainPageOf(
         Pair("${mainUrl}/series/?status=&type=&order=update", "Latest Update"),
+        Pair("${mainUrl}/series/?status=Ongoing&type=&order=update", "Ongoing"),
         Pair("${mainUrl}/series/?status=Completed&type=Drama&order=update", "Completed Drama"),
         Pair("${mainUrl}/series/?country%5B%5D=china&type=Drama&order=update", "Drama China"),
         Pair("${mainUrl}/series/?country%5B%5D=japan&type=Drama&order=update", "Drama Jepang"),
@@ -75,7 +73,6 @@ class OppaDramaProvider : MainAPI() {
         val html = app.get(targetUrl, headers = desktopBypassHeaders).text
         val document = Jsoup.parse(html)
         val items = mutableListOf<SearchResponse>()
-        Log.d(TAG, "getMainPage() fetched '$targetUrl' -> article.bs count=${document.select("article.bs").size}")
 
         for (element in document.select("article.bs")) {
             val anchor = element.select("div.bsx a").first()
@@ -109,7 +106,6 @@ class OppaDramaProvider : MainAPI() {
         val html = app.get(searchUrl, headers = desktopBypassHeaders).text
         val document = Jsoup.parse(html)
         val items = mutableListOf<SearchResponse>()
-        Log.d(TAG, "search('$query') -> article.bs count=${document.select("article.bs").size}")
 
         for (element in document.select("article.bs")) {
             val anchor = element.select("div.bsx a").first()
@@ -135,7 +131,6 @@ class OppaDramaProvider : MainAPI() {
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
     override suspend fun load(url: String): LoadResponse? {
-        Log.d(TAG, "load() dipanggil dengan url='$url'")
         val html = app.get(url, headers = desktopBypassHeaders).text
         val document = Jsoup.parse(html)
 
@@ -169,7 +164,6 @@ class OppaDramaProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
         val episodeAnchors = document.select("div.eplister ul li a")
-        Log.d(TAG, "loadSeries('$url') -> episode anchor count=${episodeAnchors.size}")
         val reversedAnchors = episodeAnchors.toList().reversed()
         
         for (i in reversedAnchors.indices) {
@@ -251,51 +245,20 @@ class OppaDramaProvider : MainAPI() {
     }
 
     private suspend fun parseEmbeds(doc: org.jsoup.nodes.Document, dataUrl: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        // TRACE #1: konfirmasi elemen apa saja yang benar-benar ketemu di halaman ini.
-        // Kalau count = 0 di semua tiga baris ini, artinya masalahnya BUKAN di extractor
-        // sama sekali, tapi selector HTML (div.player-embed / select.mirror / div.dlbox)
-        // sudah tidak cocok lagi dengan markup situs saat ini -> URL video hilang di sini,
-        // sebelum sempat sampai ke loadExtractor().
-        val iframeCount = doc.select("div.player-embed iframe").size
-        val mirrorCount = doc.select("select.mirror option[value]:not([disabled])").size
-        val dlboxCount = doc.select("div.dlbox li span.e a[href]").size
-        Log.d(TAG, "parseEmbeds($dataUrl) -> iframe=$iframeCount mirrorOptions=$mirrorCount dlboxLinks=$dlboxCount")
-
         doc.select("div.player-embed iframe").first()?.let { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-            Log.d(TAG, "  [iframe] raw src/data-src = '$src'")
             if (src.isNotBlank()) {
                 val httpsSrc = httpsify(src)
-                Log.d(TAG, "  [iframe] httpsify -> '$httpsSrc'")
-                // TRACE #2: hasil loadExtractor() yang SEBENARNYA dipanggil oleh core,
-                // bukan asumsi berdasarkan nama domain.
-                val handled = loadExtractor(httpsSrc, dataUrl, subtitleCallback, callback)
-                Log.d(TAG, "  [iframe] loadExtractor(core) handled=$handled")
-                if (!handled) {
-                    when {
-                        httpsSrc.contains("minochinos.com") -> {
-                            Log.d(TAG, "  [iframe] fallback manual -> MinochinosExtractor")
-                            MinochinosExtractor().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
-                        }
-                        httpsSrc.contains("abyss.to") || httpsSrc.contains("abyssplayer.com") -> {
-                            Log.d(TAG, "  [iframe] fallback manual -> AbyssExtractor")
-                            AbyssExtractor().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
-                        }
-                        httpsSrc.contains("buzzheavier.com") -> {
-                            Log.d(TAG, "  [iframe] fallback manual -> BuzzServer")
-                            BuzzServer().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
-                        }
-                        httpsSrc.contains("emturbovid.com") || httpsSrc.contains("turbovidhls.com") -> {
-                            // emturbovid.com sekarang 301-redirect ke turbovidhls.com (terverifikasi
-                            // dari header respons asli), fallback ini menjamin kedua domain tertangani.
-                            Log.d(TAG, "  [iframe] fallback manual -> Emturbovid")
-                            Emturbovid().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
-                        }
-                        else -> Log.w(TAG, "  [iframe] TIDAK ADA extractor (core maupun manual) yang cocok untuk '$httpsSrc'")
+                // Interseptor Manual untuk Custom Extractor Minochinos & Abyss jika tidak terdaftar di core[span_5](start_span)[span_5](end_span)[span_6](start_span)[span_6](end_span)
+                if (!loadExtractor(httpsSrc, dataUrl, subtitleCallback, callback)) {
+                    if (httpsSrc.contains("minochinos.com")) {
+                        MinochinosExtractor().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
+                    } else if (httpsSrc.contains("abyss.to") || httpsSrc.contains("abyssplayer.com")) {
+                        AbyssExtractor().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
                     }
                 }
             }
-        } ?: Log.d(TAG, "  [iframe] div.player-embed iframe tidak ditemukan di halaman ini")
+        }
 
         val mirrors = doc.select("select.mirror option[value]:not([disabled])")
         for (option in mirrors) {
@@ -306,64 +269,26 @@ class OppaDramaProvider : MainAPI() {
                 val mirrorSrc = Jsoup.parse(decoded).select("iframe").first()?.let { el ->
                     el.attr("src").ifBlank { el.attr("data-src") }
                 }
-                Log.d(TAG, "  [mirror] decoded option -> iframe src = '$mirrorSrc'")
                 if (!mirrorSrc.isNullOrBlank()) {
                     val httpsMirror = httpsify(mirrorSrc)
-                    val handled = loadExtractor(httpsMirror, dataUrl, subtitleCallback, callback)
-                    Log.d(TAG, "  [mirror] '$httpsMirror' -> loadExtractor(core) handled=$handled")
-                    if (!handled) {
-                        when {
-                            httpsMirror.contains("minochinos.com") -> {
-                                Log.d(TAG, "  [mirror] fallback manual -> MinochinosExtractor")
-                                MinochinosExtractor().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
-                            }
-                            httpsMirror.contains("abyss.to") || httpsMirror.contains("abyssplayer.com") -> {
-                                Log.d(TAG, "  [mirror] fallback manual -> AbyssExtractor")
-                                AbyssExtractor().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
-                            }
-                            httpsMirror.contains("buzzheavier.com") -> {
-                                Log.d(TAG, "  [mirror] fallback manual -> BuzzServer")
-                                BuzzServer().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
-                            }
-                            httpsMirror.contains("emturbovid.com") || httpsMirror.contains("turbovidhls.com") -> {
-                                Log.d(TAG, "  [mirror] fallback manual -> Emturbovid")
-                                Emturbovid().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
-                            }
-                            else -> Log.w(TAG, "  [mirror] TIDAK ADA extractor yang cocok untuk '$httpsMirror'")
+                    if (!loadExtractor(httpsMirror, dataUrl, subtitleCallback, callback)) {
+                        if (httpsMirror.contains("minochinos.com")) {
+                            MinochinosExtractor().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
+                        } else if (httpsMirror.contains("abyss.to") || httpsMirror.contains("abyssplayer.com")) {
+                            AbyssExtractor().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
                         }
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "  [mirror] gagal decode/parse option: ${e.message}")
-            }
+            } catch (_: Exception) {}
         }
 
         for (a in doc.select("div.dlbox li span.e a[href]")) {
             val href = a.attr("href").trim()
             if (href.isNotBlank()) {
                 val httpsDl = httpsify(href)
-                Log.d(TAG, "  [dlbox] href='$href' -> httpsify='$httpsDl'")
-                val handled = loadExtractor(httpsDl, dataUrl, subtitleCallback, callback)
-                Log.d(TAG, "  [dlbox] loadExtractor(core) handled=$handled")
-                if (!handled) {
-                    when {
-                        httpsDl.contains("minochinos.com") -> {
-                            Log.d(TAG, "  [dlbox] fallback manual -> MinochinosExtractor")
-                            MinochinosExtractor().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
-                        }
-                        httpsDl.contains("buzzheavier.com") -> {
-                            Log.d(TAG, "  [dlbox] fallback manual -> BuzzServer")
-                            BuzzServer().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
-                        }
-                        httpsDl.contains("abyss.to") || httpsDl.contains("abyssplayer.com") -> {
-                            Log.d(TAG, "  [dlbox] fallback manual -> AbyssExtractor")
-                            AbyssExtractor().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
-                        }
-                        httpsDl.contains("emturbovid.com") || httpsDl.contains("turbovidhls.com") -> {
-                            Log.d(TAG, "  [dlbox] fallback manual -> Emturbovid")
-                            Emturbovid().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
-                        }
-                        else -> Log.w(TAG, "  [dlbox] TIDAK ADA extractor yang cocok untuk '$httpsDl'")
+                if (!loadExtractor(httpsDl, dataUrl, subtitleCallback, callback)) {
+                    if (httpsDl.contains("minochinos.com")) {
+                        MinochinosExtractor().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
                     }
                 }
             }
@@ -376,7 +301,6 @@ class OppaDramaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.d(TAG, "loadLinks() dipanggil dengan data='$data'")
         val html = app.get(data, headers = desktopBypassHeaders).text
         val document = Jsoup.parse(html)
 
@@ -389,11 +313,9 @@ class OppaDramaProvider : MainAPI() {
                 }
             }
         }
-        Log.d(TAG, "loadLinks() isMovie=$isMovie")
 
         if (isMovie) {
             val pseudoEpisodes = document.select("div.eplister ul li a")
-            Log.d(TAG, "loadLinks() movie pseudoEpisodes count=${pseudoEpisodes.size}")
             if (pseudoEpisodes.isNotEmpty()) {
                 for (anchor in pseudoEpisodes) {
                     val href = anchor.attr("href")
