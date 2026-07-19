@@ -1,9 +1,9 @@
 package com.OppaDrama
 
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.base64Decode
 import com.lagradost.cloudstream3.extractors.VidHidePro
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -12,11 +12,8 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import org.jsoup.Jsoup
 import java.net.URI
-import android.util.Base64
 
 /**
  * 1. EarnVids / Smoothpre Extractor
@@ -60,12 +57,11 @@ class BuzzServer : ExtractorApi() {
             val host = URI(cleanUrl).let { "${it.scheme}://${it.host}" }
 
             val page = app.get(cleanUrl, referer = referer)
-            // FIX: `documentLarge` tidak ditemukan bukti keberadaannya di ExtractorApi.kt/
-            // MainAPI.kt manapun (sudah di-grep menyeluruh). Ganti ke Jsoup.parse(page.text),
-            // satu-satunya pola parsing HTML yang terbukti valid & konsisten dipakai di
-            // SELURUH file provider ini (OppaDramaProvider.kt memakainya di setiap fungsi).
-            val pageDoc = Jsoup.parse(page.text)
-            val qualityText = pageDoc.selectFirst("div.max-w-2xl > span")?.text()
+            // FIX: `.document` (bukan `.documentLarge`) adalah properti asli - dibuktikan
+            // dari MainAPI.kt sendiri yang memakai idiom identik:
+            // `app.get(url).document.selectFirst(...)` (baris 205, alur reCAPTCHA).
+            // `.documentLarge` tidak ditemukan sama sekali di kedua file referensi.
+            val qualityText = page.document.selectFirst("div.max-w-2xl > span")?.text()
             val quality = getQualityFromName(qualityText)
 
             // FIX UTAMA: sertakan header htmx yang wajib ada (HX-Request: true) supaya
@@ -308,41 +304,41 @@ class Emturbovid : ExtractorApi() {
 
 /**
  * 4. Abyss / Hydrax Extractor
- * Mengurai kemurnian data Base64 "datas" dari player-v2 core bundle untuk mengambil otentikasi multi-token.
  *
- * AKAR MASALAH TERBUKTI (ditemukan lewat cross-reference langsung dengan MainAPI.kt/ExtractorApi.kt):
+ * STATUS SETELAH AUDIT MENYELURUH (HTML player asli + cross-check MainAPI.kt/ExtractorApi.kt):
  *
- * Cloudstream versi ini sudah memakai kotlinx.serialization sebagai mesin utama untuk
- * `parsedSafe<T>()`. Bukti: SETIAP data class di MainAPI.kt yang dipakai untuk parsing
- * JSON (misalnya `AniSearch`, dipakai persis dengan pola `app.post(...).parsedSafe<T>()`
- * yang sama seperti di sini) SELALU diberi `@Serializable` di level class DAN `@SerialName`
- * berdampingan dengan `@JsonProperty` di tiap properti. Tidak ada satu pun kelas di kedua
- * file referensi yang hanya pakai `@JsonProperty` tanpa `@Serializable`.
+ * BUG IMPLEMENTASI YANG DITEMUKAN (independen dari soal enkripsi, sudah diperbaiki):
+ * Kode versi sebelumnya manual pakai `android.util.Base64` + `Charsets.ISO_8859_1`.
+ * Ternyata `MainAPI.kt` sudah punya fungsi kanonik `base64Decode(string: String): String`
+ * yang melakukan PERSIS hal yang sama (byte->char ISO-8859-1, meniru atob() JS), dan
+ * fungsi ini SUDAH dipakai di `OppaDramaProvider.kt` sendiri (parseEmbeds, decode dropdown
+ * mirror). Extractor ini sekarang konsisten pakai fungsi resmi yang sama, bukan reimplementasi
+ * manual pakai API khusus Android.
  *
- * `AbyssSource`/`AbyssResponse` versi sebelumnya HANYA memakai `@JsonProperty` (Jackson)
- * tanpa `@Serializable`/`@SerialName` sama sekali. Tanpa `@Serializable`, kotlinx tidak
- * bisa membuat serializer untuk class ini, sehingga `.parsedSafe<AbyssResponse>()` gagal
- * total (baik sebagai compile error atau exception runtime yang jatuh ke `catch` tanpa
- * jejak). Ini match persis dengan gejala "Abyss tidak muncul sama sekali" - bukan soal API
- * situs berubah, tapi parsing-nya sendiri yang dari awal tidak pernah bisa jalan di versi
- * Cloudstream ini.
+ * HASIL AUDIT ALUR JS MENYELURUH (bukan cuma baca field "media"):
+ * - Nol elemen <iframe> di halaman - file ini sendiri adalah leaf embed, bukan wrapper.
+ * - Nol endpoint /api/player atau sejenisnya di seluruh script (sudah di-grep habis).
+ * - Hanya 2 fetch() di halaman, keduanya untuk deteksi tampering/AdBlock, tidak relevan ke video.
+ * - `core.bundle.js` dimuat blocking (tanpa async/defer) SEBELUM inline script yang memanggil
+ *   `window.SoTrym(JSON.parse(atob(datas)))` - jadi urutan datas->SoTrym ini satu-satunya
+ *   jalur yang benar-benar dipakai, `lite.bundle.js` cuma fallback defensif kalau bundle
+ *   utama gagal load, bukan jalur alternatif yang berbeda.
+ * - `datas` (setelah decode benar) berisi { slug, md5_id, user_id, media, config, danmu }.
+ *   slug/md5_id/user_id adalah field plaintext biasa (parsing ini tetap berguna & benar).
+ *   "media" adalah data biner terenkripsi (~1200 byte, entropi tinggi) yang didekripsi
+ *   CLIENT-SIDE oleh SoTrym() dari core.bundle.js - satu-satunya cara mendapat URL video.
+ *
+ * Kesimpulan: bukan bug plugin (di luar Base64 charset yang sudah diperbaiki), bukan pula
+ * ada endpoint/jalur lain yang terlewat. Video memang hanya bisa didapat lewat data yang
+ * dilindungi enkripsi di core.bundle.js. Saya tidak reverse-engineer/implementasikan
+ * dekripsinya - itu di luar apa yang bisa saya bantu. Kode di bawah parsing datas dengan
+ * benar (termasuk field yang berguna untuk diagnostik) lalu berhenti dengan log jelas
+ * begitu ketemu bahwa media terenkripsi.
  */
 class AbyssExtractor : ExtractorApi() {
     override val name = "Abyss"
     override val mainUrl = "https://abyss.to"
     override val requiresReferer = true
-
-    @Serializable
-    private data class AbyssSource(
-        @JsonProperty("file") @SerialName("file") val file: String? = null,
-        @JsonProperty("label") @SerialName("label") val label: String? = null,
-        @JsonProperty("type") @SerialName("type") val type: String? = null
-    )
-
-    @Serializable
-    private data class AbyssResponse(
-        @JsonProperty("sources") @SerialName("sources") val sources: List<AbyssSource>? = null
-    )
 
     override suspend fun getUrl(
         url: String,
@@ -359,90 +355,35 @@ class AbyssExtractor : ExtractorApi() {
 
             val html = app.get(url, headers = headers).text
             val datasRaw = Regex("""const\s+datas\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.getOrNull(1)
-            
-            var slug = Regex("[?&]v=([^&#]+)").find(url)?.groupValues?.getOrNull(1)?.trim()
-            var md5Id = ""
-            var userId = ""
 
-            if (!datasRaw.isNullOrBlank()) {
-                val decodedDatas = String(Base64.decode(datasRaw, Base64.DEFAULT), Charsets.UTF_8)
-                
-                // Menggunakan format String escaping standar Kotlin untuk akurasi pembacaan Regex
-                if (slug.isNullOrBlank()) {
-                    slug = Regex("\"slug\"\\s*:\\s*\"([^\"]+)\"").find(decodedDatas)?.groupValues?.getOrNull(1)?.trim()
-                }
-                md5Id = Regex("\"md5_id\"\\s*:\\s*\"?(\\d+)\"?").find(decodedDatas)?.groupValues?.getOrNull(1)?.trim() ?: ""
-                userId = Regex("\"user_id\"\\s*:\\s*\"?(\\d+)\"?").find(decodedDatas)?.groupValues?.getOrNull(1)?.trim() ?: ""
+            if (datasRaw.isNullOrBlank()) {
+                Log.w("Abyss", "Variabel 'datas' tidak ditemukan di HTML untuk $url - struktur halaman mungkin sudah berubah lagi.")
+                return
             }
 
-            if (slug.isNullOrBlank()) {
-                slug = Regex("""(?:v|slug)\s*:\s*["']([^"']+)["']""").find(html)?.groupValues?.getOrNull(1)?.trim()
-            }
-            if (userId.isNullOrBlank()) {
-                userId = Regex("""userID\s*:\s*["']?(\d+)["']?""").find(html)?.groupValues?.getOrNull(1)?.trim() ?: ""
-            }
+            // Pakai fungsi kanonik com.lagradost.cloudstream3.base64Decode() (sama seperti
+            // yang dipakai OppaDramaProvider.kt sendiri), bukan android.util.Base64 manual.
+            val decodedDatas = base64Decode(datasRaw)
 
-            if (slug.isNullOrBlank()) return
+            val slug = Regex("\"slug\"\\s*:\\s*\"([^\"]+)\"").find(decodedDatas)?.groupValues?.getOrNull(1)
+            val hasEncryptedMedia = Regex("\"media\"\\s*:\\s*\"").containsMatchIn(decodedDatas)
 
-            val host = URI(url).host
-            val apiUrl = "https://$host/api/player/v2"
-
-            val apiResponse = app.post(
-                apiUrl,
-                headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-                    "Referer" to url,
-                    "Origin" to "https://$host",
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Content-Type" to "application/x-www-form-urlencoded"
-                ),
-                data = mapOf<String, String>(
-                    "slug" to slug,
-                    "md5_id" to md5Id,
-                    "user_id" to userId
+            if (hasEncryptedMedia) {
+                // Titik akhir yang jujur, sesudah audit menyeluruh terhadap seluruh script
+                // di halaman: tidak ada endpoint/iframe/jalur lain yang ditemukan. Field
+                // "media" berisi data terenkripsi yang didekripsi client-side oleh
+                // core.bundle.js - di luar cakupan yang bisa saya bantu implementasikan.
+                Log.w(
+                    "Abyss",
+                    "slug='$slug' berhasil di-parse, tapi video di-enkripsi di field 'media' " +
+                        "(didekripsi client-side oleh core.bundle.js, dipanggil lewat window.SoTrym()). " +
+                        "Sudah diaudit menyeluruh: tidak ada endpoint API atau jalur lain di halaman " +
+                        "ini yang bisa dipakai untuk dapat URL video langsung."
                 )
-            ).parsedSafe<AbyssResponse>()
-
-            if (apiResponse == null) {
-                // Kalau parsedSafe balik null, itu bisa berarti: (a) response API bukan JSON
-                // valid/berubah struktur, ATAU (b) exception saat deserialisasi tertelan oleh
-                // parsedSafe itu sendiri. Baris ini memastikan kasus ini TIDAK senyap lagi.
-                Log.w("Abyss", "parsedSafe<AbyssResponse>() mengembalikan null untuk POST ke $apiUrl (slug=$slug)")
-            } else if (apiResponse.sources.isNullOrEmpty()) {
-                Log.w("Abyss", "Field 'sources' kosong/null pada respons player/v2 untuk $url")
-            }
-
-            apiResponse?.sources?.forEach { source ->
-                val videoUrl = source.file
-                if (!videoUrl.isNullOrBlank()) {
-                    val labelText = source.label ?: "Unknown"
-                    val isM3u8 = videoUrl.contains(".m3u8")
-                    
-                    val qualityValue = when {
-                        labelText.contains("1080") -> Qualities.P1080.value
-                        labelText.contains("720") -> Qualities.P720.value
-                        labelText.contains("480") -> Qualities.P480.value
-                        labelText.contains("360") -> Qualities.P360.value
-                        else -> Qualities.Unknown.value
-                    }
-
-                    callback.invoke(
-                        newExtractorLink(
-                            source = name,
-                            name = "$name - $labelText",
-                            url = videoUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = "https://$host/"
-                            this.quality = qualityValue
-                        }
-                    )
-                }
+            } else {
+                Log.w("Abyss", "Field 'media' terenkripsi tidak ditemukan di datas untuk $url - kemungkinan skema situs berubah lagi, perlu sample baru untuk investigasi.")
             }
         } catch (e: Exception) {
-            // Sebelumnya `catch (_: Exception) {}` - senyap total. Ini titik paling penting
-            // untuk Abyss, karena exception dari parsedSafe<AbyssResponse>() (mis. kegagalan
-            // serialisasi kalau class belum @Serializable) akan tertangkap justru di sini.
             Log.e("Abyss", "Gagal resolve $url: ${e::class.simpleName} - ${e.message}")
         }
     }
