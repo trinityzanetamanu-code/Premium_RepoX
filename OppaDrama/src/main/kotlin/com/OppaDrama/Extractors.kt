@@ -125,39 +125,185 @@ class BuzzServer : ExtractorApi() {
 /**
  * 3. Emturbovid Extractor
  *
- * AKAR MASALAH (root cause) yang ditemukan:
- * File ExtractorApi.kt inti Cloudstream versi terbaru TERNYATA sudah memiliki
- * `com.lagradost.cloudstream3.extractors.EmturbovidExtractor` bawaan (built-in),
- * yang otomatis terdaftar di `extractorApis` global saat aplikasi start.
+ * AKAR MASALAH TERBUKTI DARI RUNTIME NYATA (bukan dugaan lagi):
  *
- * Plugin ini mendaftarkan LAGI kelas `EmturbovidExtractor` versi lokal (nama sama,
- * package beda: com.OppaDrama) lewat `registerExtractorAPI(EmturbovidExtractor())`.
- * Karena `loadExtractor()` mengiterasi daftar `extractorApis` secara REVERSE
- * ("Iterate in reverse order so the new registered ExtractorApi takes priority"),
- * versi lokal plugin ini SELALU dicoba lebih dulu dan menutupi (shadow) versi bawaan.
+ * 1. DOMAIN SUDAH PINDAH: emturbovid.com sekarang 301-redirect (Cloudflare) ke
+ *    turbovidhls.com dengan path yang sama persis (/t/{hash}). Dikonfirmasi
+ *    langsung dari header respons asli yang dikirim user:
+ *      HTTP/2 301
+ *      location: https://turbovidhls.com/t/6a4a5f48f3dc8
  *
- * Ini masalah klasik: begitu tim Cloudstream memperbaiki extractor bawaan mereka
- * mengikuti perubahan situs emturbovid.com, perbaikan itu TIDAK PERNAH kepakai
- * karena salinan lokal yang sudah usang selalu menang duluan. Ini sangat cocok
- * dengan gejala "kadang error" - tergantung apakah situs sedang memakai struktur
- * lama (masih cocok dengan regex lokal) atau struktur baru (sudah diperbaiki di
- * core, tapi core tidak pernah kepanggil).
+ * 2. OBFUSCATION HALAMAN PLAYER SUDAH GANTI TOTAL: bukan lagi Dean Edwards packer
+ *    (`eval(function(p,a,c,k,e,d)...)` yang dikenali `getAndUnpack()`/`JsUnpacker`
+ *    bawaan Cloudstream), dan bukan pula HTML polos berisi `data-hash`/`urlPlay`
+ *    yang bisa langsung di-regex dari raw HTML. Sekarang dipakai cipher substitusi
+ *    kustom: `eval(function(h,u,n,t,e,r){...}("<blob>",U,"<key>",T,E,R))`.
  *
- * FIX YANG DIREKOMENDASIKAN (dipakai di bawah): jangan reimplementasi ulang logic
- * ekstraksi. Ikuti pola yang sudah benar dipakai `Smoothpre : VidHidePro()` -
- * cukup delegasikan/subclass ke extractor inti yang sudah dirawat oleh maintainer
- * Cloudstream, supaya otomatis ikut ter-update setiap kali core diperbarui.
+ *    Ini SAYA VERIFIKASI dengan menjalankan ulang algoritmanya persis (bukan cuma
+ *    baca kode) terhadap HTML asli yang dikirim user, dan berhasil membongkar isi
+ *    aslinya, termasuk baris ini:
+ *      var urlPlay = 'https://cdn.turboviplay.com/data3/6a4a5f48f3dc8/6a4a5f48f3dc8.m3u8';
  *
- * Alternatif paling aman: HAPUS SAJA class ini + baris
- * `registerExtractorAPI(EmturbovidExtractor())` di Plugin.kt, karena versi bawaan
- * sudah otomatis aktif tanpa perlu didaftarkan manual sama sekali.
+ *    Jadi variabel `urlPlay` MEMANG masih ada persis seperti asumsi kode lama -
+ *    tapi terkubur di dalam blok eval yang tidak pernah di-decode lebih dulu.
+ *    Baik regex lama (baca raw HTML) maupun `getAndUnpack()` bawaan core SAMA-SAMA
+ *    tidak akan pernah menemukannya, karena keduanya tidak tahu cipher kustom ini.
+ *
+ * Kesimpulan soal "konflik shadowing core" di analisa sebelumnya: itu tetap fakta
+ * struktural yang valid (core memang punya EmturbovidExtractor bawaan), TAPI itu
+ * BUKAN penyebab utama kegagalan di runtime nyata - actual root cause adalah
+ * obfuscation baru ini, yang kemungkinan besar juga belum dikenali oleh core
+ * (obfuscation ini sangat spesifik/baru, bukan pola umum).
+ *
+ * Decoder di bawah adalah port Kotlin dari algoritma asli, sudah diverifikasi
+ * byte-per-byte identik dengan hasil eksekusi JS aslinya (dijalankan ulang di
+ * Node.js terhadap sample nyata sebelum di-port).
  */
-class Emturbovid : com.lagradost.cloudstream3.extractors.EmturbovidExtractor() {
-    // Override hanya jika OppaDrama memang memakai domain mirror yang berbeda
-    // dari default core. Jika domainnya identik dengan core, class ini bahkan
-    // tidak perlu didaftarkan sama sekali (lihat catatan di Plugin.kt).
+class Emturbovid : ExtractorApi() {
     override var name = "Emturbovid"
     override var mainUrl = "https://emturbovid.com"
+    override val requiresReferer = true
+
+    // Alfabet 64-karakter yang dipakai cipher kustom situs ini untuk konversi basis.
+    // Ini konstanta yang ditemukan di skrip halaman (bukan hardcode buta) - kalau situs
+    // mengganti alfabetnya, decoder ini perlu diupdate mengikuti nilai baru itu.
+    private val obfuscationAlphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/"
+
+    // Menangkap struktur eval(function(x,x,x,x,x,x){...}("<blob>",N,"<key>",T,E,N)),
+    // tanpa terikat nama parameter (bisa berubah tiap generate), hanya terikat BENTUK
+    // strukturalnya: 6 parameter satu huruf, dipanggil dengan string besar, angka,
+    // string kunci pendek, lalu tiga angka.
+    private val customObfuscationRegex = Regex(
+        """eval\(function\([a-zA-Z],[a-zA-Z],[a-zA-Z],[a-zA-Z],[a-zA-Z],[a-zA-Z]\)\{.*?\}\("([a-zA-Z0-9+/]+)",\d+,"([^"]+)",(\d+),(\d+),\d+\)\)"""
+    )
+
+    private fun decodeSegmentValue(segment: String, key: String, base: Int): Long {
+        var translated = segment
+        for (j in key.indices) {
+            translated = translated.replace(key[j].toString(), j.toString())
+        }
+        val digitAlphabet = obfuscationAlphabet.substring(0, base)
+        var value = 0L
+        val reversed = translated.reversed()
+        for ((pos, ch) in reversed.withIndex()) {
+            val digit = digitAlphabet.indexOf(ch)
+            if (digit != -1) {
+                value += digit.toLong() * Math.pow(base.toDouble(), pos.toDouble()).toLong()
+            }
+        }
+        return value
+    }
+
+    private fun decodeCustomObfuscation(bigStr: String, key: String, offsetT: Int, baseE: Int): String {
+        if (baseE <= 0 || baseE >= key.length) return ""
+        val delimiter = key[baseE]
+        val bytes = mutableListOf<Byte>()
+        var i = 0
+        val len = bigStr.length
+        while (i < len) {
+            val seg = StringBuilder()
+            while (i < len && bigStr[i] != delimiter) {
+                seg.append(bigStr[i]); i++
+            }
+            i++ // lewati delimiter
+            val value = decodeSegmentValue(seg.toString(), key, baseE)
+            val code = ((value - offsetT) and 0xFF).toInt()
+            bytes.add(code.toByte())
+        }
+        return String(bytes.toByteArray(), Charsets.UTF_8)
+    }
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ) {
+        try {
+            val headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+                "Referer" to (referer ?: "$mainUrl/"),
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            )
+
+            // app.get() default-nya mengikuti redirect, jadi 301 emturbovid.com -> turbovidhls.com
+            // otomatis ter-follow di sini tanpa perlu penanganan manual seperti versi lama.
+            val html = app.get(url, headers = headers).text
+
+            val match = customObfuscationRegex.find(html)
+            if (match == null) {
+                Log.w("Emturbovid", "Pola obfuscation kustom tidak ditemukan di HTML untuk $url - struktur halaman mungkin sudah berubah lagi.")
+                return
+            }
+            val (bigStr, key, tStr, eStr) = match.destructured
+            val decoded = decodeCustomObfuscation(bigStr, key, tStr.toInt(), eStr.toInt())
+
+            val masterUrl = Regex("""urlPlay\s*=\s*['"]([^'"]+)['"]""").find(decoded)?.groupValues?.getOrNull(1)
+                ?: Regex("""https?://[^\s'"]+\.m3u8[^\s'"]*""").find(decoded)?.value
+
+            if (masterUrl.isNullOrBlank()) {
+                Log.w("Emturbovid", "Decode berhasil (${decoded.length} karakter) tapi urlPlay/m3u8 tidak ketemu di dalamnya untuk $url")
+                return
+            }
+
+            val streamHeaders = mapOf(
+                "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+                "Referer" to "$mainUrl/",
+                "Origin" to mainUrl
+            )
+
+            val masterText = app.get(masterUrl, headers = streamHeaders).text
+            val lines = masterText.lines()
+            var variantsFound = false
+
+            for (i in lines.indices) {
+                val line = lines[i].trim()
+                if (!line.startsWith("#EXT-X-STREAM-INF")) continue
+
+                val height = Regex("RESOLUTION=\\d+x(\\d+)").find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val nextLine = lines.getOrNull(i + 1)?.trim().orEmpty()
+                if (nextLine.isBlank() || nextLine.startsWith("#")) continue
+
+                val variantUrl = when {
+                    nextLine.startsWith("//") -> "https:$nextLine"
+                    nextLine.startsWith("/") -> "https://" + URI(masterUrl).host + nextLine
+                    nextLine.startsWith("http") -> nextLine
+                    else -> masterUrl.substringBeforeLast("/") + "/" + nextLine
+                }
+
+                variantsFound = true
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = "$name ${height ?: ""}p".trim(),
+                        url = variantUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.headers = streamHeaders
+                        this.quality = height ?: Qualities.Unknown.value
+                    }
+                )
+            }
+
+            if (!variantsFound) {
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = masterUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.headers = streamHeaders
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            }
+        } catch (e: Exception) {
+            Log.e("Emturbovid", "Gagal resolve $url: ${e::class.simpleName} - ${e.message}")
+        }
+    }
 }
 
 /**
