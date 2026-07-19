@@ -13,11 +13,7 @@ class OppaDramaPlugin: Plugin() {
         // 2. Mendaftarkan seluruh Kluster Custom Extractors ke registry Cloudstream[span_4](start_span)[span_4](end_span)
         registerExtractorAPI(Smoothpre())
         registerExtractorAPI(BuzzServer())
-        // NB: Emturbovid() BUKAN lagi subclass extractor core - situs sudah pakai obfuscation
-        // JS kustom (bukan format packer standar) dan domain sudah pindah ke turbovidhls.com
-        // (via 301 redirect dari emturbovid.com, terverifikasi dari header respons asli).
-        // Class ini WAJIB didaftarkan karena berisi decoder khusus untuk obfuscation tersebut.
-        registerExtractorAPI(Emturbovid())
+        registerExtractorAPI(EmturbovidExtractor())
         registerExtractorAPI(AbyssExtractor())
         registerExtractorAPI(MinochinosExtractor())
     }
