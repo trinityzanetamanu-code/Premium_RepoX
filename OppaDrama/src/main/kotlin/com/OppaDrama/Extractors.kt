@@ -255,7 +255,7 @@ class AbyssExtractor : ExtractorApi() {
                 Log.w(
                     "Abyss",
                     "Server ini sudah migrasi ke skema segment/token terenkripsi " +
-                        "(sessionId=${apiResponse.sessionId}, domain=${apiResponse.domain}); " +
+                        "(sessionId=${apiResponse?.sessionId}, domain=${apiResponse?.domain}); " +
                         "field 'file' langsung sudah tidak tersedia sehingga tidak ada link yang " +
                         "bisa diambil tanpa reverse-engineering lebih lanjut terhadap protokol baru."
                 )
