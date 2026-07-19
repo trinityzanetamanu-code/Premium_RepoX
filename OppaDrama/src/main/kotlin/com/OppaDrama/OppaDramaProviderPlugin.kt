@@ -13,7 +13,12 @@ class OppaDramaPlugin: Plugin() {
         // 2. Mendaftarkan seluruh Kluster Custom Extractors ke registry Cloudstream[span_4](start_span)[span_4](end_span)
         registerExtractorAPI(Smoothpre())
         registerExtractorAPI(BuzzServer())
-        registerExtractorAPI(EmturbovidExtractor())
+        // NB: EmturbovidExtractor() sekarang bernama Emturbovid() dan hanya men-subclass
+        // extractor bawaan core (com.lagradost.cloudstream3.extractors.EmturbovidExtractor).
+        // Bawaan core SUDAH otomatis aktif tanpa perlu didaftarkan sama sekali - baris ini
+        // hanya diperlukan jika mainUrl OppaDrama berbeda dari default core. Jika sama persis,
+        // baris ini boleh dihapus total.
+        registerExtractorAPI(Emturbovid())
         registerExtractorAPI(AbyssExtractor())
         registerExtractorAPI(MinochinosExtractor())
     }
