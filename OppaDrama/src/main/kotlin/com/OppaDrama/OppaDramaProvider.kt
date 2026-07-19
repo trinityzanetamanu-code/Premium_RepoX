@@ -254,6 +254,14 @@ class OppaDramaProvider : MainAPI() {
                         MinochinosExtractor().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
                     } else if (httpsSrc.contains("abyss.to") || httpsSrc.contains("abyssplayer.com")) {
                         AbyssExtractor().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
+                    } else if (httpsSrc.contains("buzzheavier.com")) {
+                        // FIX: loadExtractor() mencocokkan domain dengan `startsWith` terhadap
+                        // mainUrl BuzzServer ("https://buzzheavier.com"). Jika situs memakai
+                        // subdomain (mis. embed.buzzheavier.com), startsWith akan GAGAL cocok
+                        // walau Levenshtein fallback kadang masih menangkapnya - inilah salah
+                        // satu sumber sifat "kadang error" pada BuzzServer. Panggilan manual di
+                        // sini menjamin BuzzServer tetap dicoba walau auto-match gagal.
+                        BuzzServer().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
                     }
                 }
             }
@@ -275,6 +283,8 @@ class OppaDramaProvider : MainAPI() {
                             MinochinosExtractor().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
                         } else if (httpsMirror.contains("abyss.to") || httpsMirror.contains("abyssplayer.com")) {
                             AbyssExtractor().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
+                        } else if (httpsMirror.contains("buzzheavier.com")) {
+                            BuzzServer().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
                         }
                     }
                 }
@@ -288,6 +298,10 @@ class OppaDramaProvider : MainAPI() {
                 if (!loadExtractor(httpsDl, dataUrl, subtitleCallback, callback)) {
                     if (httpsDl.contains("minochinos.com")) {
                         MinochinosExtractor().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
+                    } else if (httpsDl.contains("buzzheavier.com")) {
+                        BuzzServer().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
+                    } else if (httpsDl.contains("abyss.to") || httpsDl.contains("abyssplayer.com")) {
+                        AbyssExtractor().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
                     }
                 }
             }
