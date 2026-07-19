@@ -285,6 +285,12 @@ class OppaDramaProvider : MainAPI() {
                             Log.d(TAG, "  [iframe] fallback manual -> BuzzServer")
                             BuzzServer().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
                         }
+                        httpsSrc.contains("emturbovid.com") || httpsSrc.contains("turbovidhls.com") -> {
+                            // emturbovid.com sekarang 301-redirect ke turbovidhls.com (terverifikasi
+                            // dari header respons asli), fallback ini menjamin kedua domain tertangani.
+                            Log.d(TAG, "  [iframe] fallback manual -> Emturbovid")
+                            Emturbovid().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
+                        }
                         else -> Log.w(TAG, "  [iframe] TIDAK ADA extractor (core maupun manual) yang cocok untuk '$httpsSrc'")
                     }
                 }
@@ -319,6 +325,10 @@ class OppaDramaProvider : MainAPI() {
                                 Log.d(TAG, "  [mirror] fallback manual -> BuzzServer")
                                 BuzzServer().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
                             }
+                            httpsMirror.contains("emturbovid.com") || httpsMirror.contains("turbovidhls.com") -> {
+                                Log.d(TAG, "  [mirror] fallback manual -> Emturbovid")
+                                Emturbovid().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
+                            }
                             else -> Log.w(TAG, "  [mirror] TIDAK ADA extractor yang cocok untuk '$httpsMirror'")
                         }
                     }
@@ -348,6 +358,10 @@ class OppaDramaProvider : MainAPI() {
                         httpsDl.contains("abyss.to") || httpsDl.contains("abyssplayer.com") -> {
                             Log.d(TAG, "  [dlbox] fallback manual -> AbyssExtractor")
                             AbyssExtractor().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
+                        }
+                        httpsDl.contains("emturbovid.com") || httpsDl.contains("turbovidhls.com") -> {
+                            Log.d(TAG, "  [dlbox] fallback manual -> Emturbovid")
+                            Emturbovid().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
                         }
                         else -> Log.w(TAG, "  [dlbox] TIDAK ADA extractor yang cocok untuk '$httpsDl'")
                     }
