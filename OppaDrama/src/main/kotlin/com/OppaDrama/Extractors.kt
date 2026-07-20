@@ -117,6 +117,22 @@ class BuzzServer : ExtractorApi() {
 
             val redirectUrl = resolveUrl(raw.trim(), host)            // (a)
 
+            // GUARD (dibuktikan logcat): buzzheavier kadang membalas redirect yang
+            // menunjuk BALIK ke halaman slug (bukan file). Kalau URL hasil sama
+            // dengan halaman, atau bukan konten media, JANGAN emit link bohong —
+            // ExoPlayer akan gagal dgn ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED.
+            if (redirectUrl.trimEnd('/') == cleanUrl.trimEnd('/')) {
+                Log.w("BuzzServer", "Redirect points back to landing page, skipping: $redirectUrl")
+                return
+            }
+            val ctype = runCatching {
+                app.head(redirectUrl, referer = "$host/").headers["Content-Type"].orEmpty()
+            }.getOrDefault("")
+            if (ctype.startsWith("text/") || ctype.contains("html")) {
+                Log.w("BuzzServer", "Resolved URL is HTML ($ctype), not a media file: $redirectUrl")
+                return
+            }
+
             callback.invoke(
                 newExtractorLink(
                     source = name,
