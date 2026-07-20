@@ -263,7 +263,12 @@ open class EmturbovidExtractor : ExtractorApi() {
  */
 class AbyssExtractor : ExtractorApi() {
     override val name = "Abyss"
-    override val mainUrl = "https://abyss.to"
+    // PENTING (dibuktikan audit): embed nyata memakai host `abyssplayer.com`,
+    // BUKAN `abyss.to`. loadExtractor() mencocokkan via startsWith(mainUrl)
+    // (schema di-strip), jadi mainUrl HARUS berupa prefix host embed yang asli,
+    // kalau tidak extractor ini tidak akan pernah dipilih oleh loadExtractor().
+    // Varian lain (abyss.to / short.icu) tetap ditangani manual di parseEmbeds.
+    override val mainUrl = "https://abyssplayer.com"
     override val requiresReferer = true
 
     private data class AbyssContent(
