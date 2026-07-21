@@ -5,6 +5,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
+import com.lagradost.api.Log
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
 import kotlin.coroutines.cancellation.CancellationException
@@ -259,7 +260,7 @@ class OppaDramaProvider : MainAPI() {
             } catch (e: Exception) {
                 // Jangan menelan CancellationException (mekanisme timeout core)
                 if (e is CancellationException) throw e
-                logError(e)
+                Log.e("OppaDrama", "Mirror decode/extract gagal: ${e.message}")
             }
         }
 
