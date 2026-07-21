@@ -1,9 +1,13 @@
 package com.OppaDrama
 
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
+import kotlin.coroutines.cancellation.CancellationException
 
 class OppaDramaProvider : MainAPI() {
     override var name = "OPPADRAMA"
@@ -16,7 +20,7 @@ class OppaDramaProvider : MainAPI() {
     override var sequentialMainPage = true
     override var sequentialMainPageDelay = 1500L
 
-    // Injeksi Headers & Cookie mutlak hasil sniffing lalu lintas paket data browser desktop
+    // Injeksi Headers & Cookie hasil sniffing lalu lintas paket data browser desktop
     private val desktopBypassHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
         "Cookie" to "user_is_human=true",
@@ -28,24 +32,24 @@ class OppaDramaProvider : MainAPI() {
 
     // Adopsi penuh susunan daftar kategori terlengkap dari WordPress Dramastream Engine
     override val mainPage = mainPageOf(
-        Pair("${mainUrl}/series/?status=&type=&order=update", "Latest Update"),
-        Pair("${mainUrl}/series/?status=Completed&type=Drama&order=update", "Completed Drama"),
-        Pair("${mainUrl}/series/?country%5B%5D=china&type=Drama&order=update", "Drama China"),
-        Pair("${mainUrl}/series/?country%5B%5D=japan&type=Drama&order=update", "Drama Jepang"),
-        Pair("${mainUrl}/series/?country%5B%5D=south-korea&status=&type=Drama&order=update", "Drama Korea"),
-        Pair("${mainUrl}/series/?country%5B%5D=philippines&type=Drama&order=update", "Drama Philippines"),
-        Pair("${mainUrl}/series/?country%5B%5D=taiwan&type=Drama&order=update", "Drama Taiwan"),
-        Pair("${mainUrl}/series/?country%5B%5D=thailand&type=Drama&order=update", "Drama Thailand"),
-        Pair("${mainUrl}/series/?country%5B%5D=usa&type=Drama&order=update", "Drama Western"),
-        Pair("${mainUrl}/series/?type=Movie&order=update", "All Movies"),
-        Pair("${mainUrl}/series/?country%5B%5D=south-korea&status=&type=Movie&order=update", "Korean Movie"),
-        Pair("${mainUrl}/series/?country%5B%5D=japan&type=Movie&order=update", "Japan Movie"),
-        Pair("${mainUrl}/series/?country%5B%5D=china&type=Movie&order=update", "Chinese Movie"),
-        Pair("${mainUrl}/series/?country%5B%5D=thailand&type=Movie&order=update", "Thailand Movie"),
-        Pair("${mainUrl}/series/?country%5B%5D=taiwan&type=Movie&order=update", "Taiwan Movie"),
-        Pair("${mainUrl}/series/?country%5B%5D=philippines&type=Movie&order=update", "Philippines Movie"),
-        Pair("${mainUrl}/series/?country%5B%5D=india&type=Movie&order=update", "India Movie"),
-        Pair("${mainUrl}/series/?country%5B%5D=united-states&type=Movie&order=update", "Western Movie")
+        "$mainUrl/series/?status=&type=&order=update" to "Latest Update",
+        "$mainUrl/series/?status=Completed&type=Drama&order=update" to "Completed Drama",
+        "$mainUrl/series/?country%5B%5D=china&type=Drama&order=update" to "Drama China",
+        "$mainUrl/series/?country%5B%5D=japan&type=Drama&order=update" to "Drama Jepang",
+        "$mainUrl/series/?country%5B%5D=south-korea&status=&type=Drama&order=update" to "Drama Korea",
+        "$mainUrl/series/?country%5B%5D=philippines&type=Drama&order=update" to "Drama Philippines",
+        "$mainUrl/series/?country%5B%5D=taiwan&type=Drama&order=update" to "Drama Taiwan",
+        "$mainUrl/series/?country%5B%5D=thailand&type=Drama&order=update" to "Drama Thailand",
+        "$mainUrl/series/?country%5B%5D=usa&type=Drama&order=update" to "Drama Western",
+        "$mainUrl/series/?type=Movie&order=update" to "All Movies",
+        "$mainUrl/series/?country%5B%5D=south-korea&status=&type=Movie&order=update" to "Korean Movie",
+        "$mainUrl/series/?country%5B%5D=japan&type=Movie&order=update" to "Japan Movie",
+        "$mainUrl/series/?country%5B%5D=china&type=Movie&order=update" to "Chinese Movie",
+        "$mainUrl/series/?country%5B%5D=thailand&type=Movie&order=update" to "Thailand Movie",
+        "$mainUrl/series/?country%5B%5D=taiwan&type=Movie&order=update" to "Taiwan Movie",
+        "$mainUrl/series/?country%5B%5D=philippines&type=Movie&order=update" to "Philippines Movie",
+        "$mainUrl/series/?country%5B%5D=india&type=Movie&order=update" to "India Movie",
+        "$mainUrl/series/?country%5B%5D=united-states&type=Movie&order=update" to "Western Movie"
     )
 
     private fun Element.extractPoster(): String? {
@@ -58,80 +62,60 @@ class OppaDramaProvider : MainAPI() {
         }
         if (rawUrl.isNullOrBlank()) return null
         return rawUrl.replace(Regex("[?&]resize=\\d+,\\d+"), "")
-                     .replace(Regex("[?&]quality=\\d+"), "")
+            .replace(Regex("[?&]quality=\\d+"), "")
+    }
+
+    private fun cleanTitle(title: String): String =
+        title.replace(Regex("\\s*(?:Episode|Ep|Eps)\\s*\\d+.*$", RegexOption.IGNORE_CASE), "").trim()
+
+    // Parser kartu hasil (dipakai bersama oleh getMainPage & search)
+    private fun Element.toCardSearchResponse(forceMovie: Boolean = false): SearchResponse? {
+        val anchor = this.select("div.bsx a").first()
+        val rawTitle = this.select("h2[itemprop=headline]").first()?.text() ?: anchor?.attr("title")
+        val link = fixUrlNull(anchor?.attr("href")) ?: return null
+        if (rawTitle.isNullOrEmpty()) return null
+
+        val poster = this.extractPoster()
+        val typeStr = this.select(".typez").first()?.text()
+        val title = cleanTitle(rawTitle)
+
+        val isMovie = forceMovie ||
+                typeStr?.contains("Movie", ignoreCase = true) == true ||
+                link.contains("/movie-")
+
+        return if (isMovie) {
+            newMovieSearchResponse(title, link, TvType.Movie) { this.posterUrl = poster }
+        } else {
+            newTvSeriesSearchResponse(title, link, TvType.AsianDrama) { this.posterUrl = poster }
+        }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        // Penanganan paginasi struktur tautan dinamis arsip kategori WordPress[span_2](start_span)[span_2](end_span)
+        // Penanganan paginasi struktur tautan dinamis arsip kategori WordPress
         val targetUrl = if (page > 1) {
             request.data.replace("/series/?", "/series/page/$page/?")
         } else {
             request.data
         }
 
-        val html = app.get(targetUrl, headers = desktopBypassHeaders).text
-        val document = Jsoup.parse(html)
-        val items = mutableListOf<SearchResponse>()
-
-        for (element in document.select("article.bs")) {
-            val anchor = element.select("div.bsx a").first()
-            val title = element.select("h2[itemprop=headline]").first()?.text() ?: anchor?.attr("title")
-            val link = anchor?.attr("href")
-            val poster = element.extractPoster()
-            val typeStr = element.select(".typez").first()?.text()
-
-            if (!link.isNullOrEmpty() && !title.isNullOrEmpty()) {
-                // Pembersihan judul mutlak dari deretan nomor episode atau sub teks tambahan[span_3](start_span)[span_3](end_span)
-                val cleanTitle = title.replace(Regex("\\s*(?:Episode|Ep|Eps)\\s*\\d+.*$", RegexOption.IGNORE_CASE), "").trim()
-
-                val isMovie = request.data.contains("type=Movie") || typeStr?.contains("Movie", ignoreCase = true) == true || link.contains("/movie-")
-                if (isMovie) {
-                    items.add(newMovieSearchResponse(cleanTitle, link, TvType.Movie) {
-                        this.posterUrl = poster
-                    })
-                } else {
-                    items.add(newTvSeriesSearchResponse(cleanTitle, link, TvType.AsianDrama) {
-                        this.posterUrl = poster
-                    })
-                }
-            }
-        }
+        // Idiomatik NiceHttp: .document langsung, tanpa Jsoup.parse manual
+        val document = app.get(targetUrl, headers = desktopBypassHeaders).document
+        val forceMovie = request.data.contains("type=Movie")
+        val items = document.select("article.bs")
+            .mapNotNull { it.toCardSearchResponse(forceMovie) }
 
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
     override suspend fun search(query: String): List<SearchResponse>? {
-        val searchUrl = "$mainUrl/?s=$query"
-        val html = app.get(searchUrl, headers = desktopBypassHeaders).text
-        val document = Jsoup.parse(html)
-        val items = mutableListOf<SearchResponse>()
-
-        for (element in document.select("article.bs")) {
-            val anchor = element.select("div.bsx a").first()
-            val title = element.select("h2[itemprop=headline]").first()?.text() ?: anchor?.attr("title")
-            val link = anchor?.attr("href")
-            val poster = element.extractPoster()
-            val typeStr = element.select(".typez").first()?.text()
-
-            if (!link.isNullOrEmpty() && !title.isNullOrEmpty()) {
-                val cleanTitle = title.replace(Regex("\\s*(?:Episode|Ep|Eps)\\s*\\d+.*$", RegexOption.IGNORE_CASE), "").trim()
-
-                val isMovie = typeStr?.contains("Movie", ignoreCase = true) == true || link.contains("/movie-")
-                if (isMovie) {
-                    items.add(newMovieSearchResponse(cleanTitle, link, TvType.Movie) { this.posterUrl = poster })
-                } else {
-                    items.add(newTvSeriesSearchResponse(cleanTitle, link, TvType.AsianDrama) { this.posterUrl = poster })
-                }
-            }
-        }
-        return items
+        val document = app.get("$mainUrl/?s=$query", headers = desktopBypassHeaders).document
+        return document.select("article.bs").mapNotNull { it.toCardSearchResponse() }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
     override suspend fun load(url: String): LoadResponse? {
-        val html = app.get(url, headers = desktopBypassHeaders).text
-        val document = Jsoup.parse(html)
+        val document = app.get(url, headers = desktopBypassHeaders).document
 
         var isMovie = url.contains("/movie-")
         for (span in document.select("div.spe span")) {
@@ -143,28 +127,28 @@ class OppaDramaProvider : MainAPI() {
             }
         }
 
-        // Jika ini halaman episode tunggal, ambil tautan bapak serialnya lewat indeks Breadcrumb kedua[span_4](start_span)[span_4](end_span)
+        // Jika ini halaman episode tunggal, ambil tautan bapak serialnya
+        // lewat indeks Breadcrumb kedua
         val breadcrumbs = document.select(".ts-breadcrumb ol li a")
         if (breadcrumbs.size >= 3 && !isMovie) {
-            val parentUrl = breadcrumbs[1].attr("href")
+            val parentUrl = fixUrlNull(breadcrumbs[1].attr("href"))
             if (!parentUrl.isNullOrBlank() && parentUrl != url) {
-                val parentHtml = app.get(parentUrl, headers = desktopBypassHeaders).text
-                return loadSeries(parentUrl, Jsoup.parse(parentHtml))
+                val parentDocument = app.get(parentUrl, headers = desktopBypassHeaders).document
+                return loadSeries(parentUrl, parentDocument)
             }
         }
 
         return if (isMovie) loadMovie(url, document) else loadSeries(url, document)
     }
 
-    private suspend fun loadSeries(url: String, document: org.jsoup.nodes.Document): LoadResponse? {
+    private suspend fun loadSeries(url: String, document: Document): LoadResponse? {
         val title = document.select("h1.entry-title").first()?.text()?.trim() ?: return null
         val poster = fixUrlNull(document.select("div.bigcontent img, div.thumb img").first()?.extractPoster())
         val info = parseInfo(document)
 
         val episodes = mutableListOf<Episode>()
-        val episodeAnchors = document.select("div.eplister ul li a")
-        val reversedAnchors = episodeAnchors.toList().reversed()
-        
+        val reversedAnchors = document.select("div.eplister ul li a").toList().reversed()
+
         for (i in reversedAnchors.indices) {
             val anchor = reversedAnchors[i]
             val href = anchor.attr("href")
@@ -179,14 +163,13 @@ class OppaDramaProvider : MainAPI() {
             })
         }
 
-        val recommendations = mutableListOf<SearchResponse>()
-        for (element in document.select("div.listupd article.bs")) {
-            element.toRecommendation()?.let { recommendations.add(it) }
-        }
+        val recommendations = document.select("div.listupd article.bs")
+            .mapNotNull { it.toRecommendation() }
 
         val tags = document.select("div.genxed a").map { it.text().trim() }.filter { it.isNotBlank() }
-        val actors = document.select("div.spe span:has(b:matchesOwn(^Artis\$)) a").map { it.text().trim() }.filter { it.isNotBlank() }
-        val trailer = document.select("div.bixbox.trailer iframe").first()?.attr("src")
+        val actorNames = document.select("div.spe span:has(b:matchesOwn(^Artis\$)) a")
+            .map { it.text().trim() }.filter { it.isNotBlank() }
+        val trailerUrl = document.select("div.bixbox.trailer iframe").first()?.attr("src")
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
@@ -197,24 +180,24 @@ class OppaDramaProvider : MainAPI() {
             this.tags = tags
             this.recommendations = recommendations
             info.rating?.let { this.score = Score.from(it, 10) }
-            if (actors.isNotEmpty()) this.actors = actors.map { ActorData(Actor(it)) }
-            if (!trailer.isNullOrBlank()) this.trailers.add(TrailerData(trailer, null, false))
+            // Helper standar: menghormati setting isTrailersEnabled milik pengguna
+            addActors(actorNames)
+            addTrailer(trailerUrl)
         }
     }
 
-    private suspend fun loadMovie(url: String, document: org.jsoup.nodes.Document): LoadResponse? {
+    private suspend fun loadMovie(url: String, document: Document): LoadResponse? {
         val title = document.select("h1.entry-title").first()?.text()?.trim() ?: return null
         val poster = fixUrlNull(document.select("div.bigcontent img, div.thumb img").first()?.extractPoster())
         val info = parseInfo(document)
 
-        val recommendations = mutableListOf<SearchResponse>()
-        for (element in document.select("div.listupd article.bs")) {
-            element.toRecommendation()?.let { recommendations.add(it) }
-        }
+        val recommendations = document.select("div.listupd article.bs")
+            .mapNotNull { it.toRecommendation() }
 
         val tags = document.select("div.genxed a").map { it.text().trim() }.filter { it.isNotBlank() }
-        val actors = document.select("div.spe span:has(b:matchesOwn(^Artis\$)) a").map { it.text().trim() }.filter { it.isNotBlank() }
-        val trailer = document.select("div.bixbox.trailer iframe").first()?.attr("src")
+        val actorNames = document.select("div.spe span:has(b:matchesOwn(^Artis\$)) a")
+            .map { it.text().trim() }.filter { it.isNotBlank() }
+        val trailerUrl = document.select("div.bixbox.trailer iframe").first()?.attr("src")
 
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
@@ -224,38 +207,40 @@ class OppaDramaProvider : MainAPI() {
             this.tags = tags
             this.recommendations = recommendations
             info.rating?.let { this.score = Score.from(it, 10) }
-            if (actors.isNotEmpty()) this.actors = actors.map { ActorData(Actor(it)) }
-            if (!trailer.isNullOrBlank()) this.trailers.add(TrailerData(trailer, null, false))
+            addActors(actorNames)
+            addTrailer(trailerUrl)
         }
     }
 
     private fun Element.toRecommendation(): SearchResponse? {
         val anchor = this.select("a").first() ?: return null
         val href = fixUrlNull(anchor.attr("href")) ?: return null
-        val title = anchor.attr("title").ifBlank { this.select("div.tt").first()?.text()?.trim() }?.takeIf { it.isNotBlank() } ?: return null
+        val title = anchor.attr("title")
+            .ifBlank { this.select("div.tt").first()?.text()?.trim() }
+            ?.takeIf { it.isNotBlank() } ?: return null
         val poster = fixUrlNull(this.select("img").first()?.extractPoster())
         val looksLikeEpisode = Regex("[-_]episode[-_]?\\d+", RegexOption.IGNORE_CASE).containsMatchIn(href)
         val type = if (looksLikeEpisode) TvType.TvSeries else TvType.Movie
-        val cleanTitle = title.replace(Regex("\\s*(?:Episode|Ep|Eps)\\s*\\d+.*$", RegexOption.IGNORE_CASE), "").trim()
-        
-        return newMovieSearchResponse(cleanTitle, href, type) {
+
+        return newMovieSearchResponse(cleanTitle(title), href, type) {
             this.posterUrl = poster
         }
     }
 
-    private suspend fun parseEmbeds(doc: org.jsoup.nodes.Document, dataUrl: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+    private suspend fun parseEmbeds(
+        doc: Document,
+        dataUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        // Semua extractor kustom (Minochinos, Abyss + alias AbyssPlayer, dll.)
+        // sudah terdaftar via registerExtractorAPI, sehingga loadExtractor()
+        // otomatis mencocokkannya berdasarkan prefix mainUrl / Levenshtein mirror.
+        // Fallback instansiasi manual tidak diperlukan lagi.
         doc.select("div.player-embed iframe").first()?.let { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
             if (src.isNotBlank()) {
-                val httpsSrc = httpsify(src)
-                // Interseptor Manual untuk Custom Extractor Minochinos & Abyss jika tidak terdaftar di core[span_5](start_span)[span_5](end_span)[span_6](start_span)[span_6](end_span)
-                if (!loadExtractor(httpsSrc, dataUrl, subtitleCallback, callback)) {
-                    if (httpsSrc.contains("minochinos.com")) {
-                        MinochinosExtractor().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
-                    } else if (httpsSrc.contains("abyss.to") || httpsSrc.contains("abyssplayer.com")) {
-                        AbyssExtractor().getUrl(httpsSrc, dataUrl, subtitleCallback, callback)
-                    }
-                }
+                loadExtractor(httpsify(src), dataUrl, subtitleCallback, callback)
             }
         }
 
@@ -269,27 +254,19 @@ class OppaDramaProvider : MainAPI() {
                     el.attr("src").ifBlank { el.attr("data-src") }
                 }
                 if (!mirrorSrc.isNullOrBlank()) {
-                    val httpsMirror = httpsify(mirrorSrc)
-                    if (!loadExtractor(httpsMirror, dataUrl, subtitleCallback, callback)) {
-                        if (httpsMirror.contains("minochinos.com")) {
-                            MinochinosExtractor().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
-                        } else if (httpsMirror.contains("abyss.to") || httpsMirror.contains("abyssplayer.com")) {
-                            AbyssExtractor().getUrl(httpsMirror, dataUrl, subtitleCallback, callback)
-                        }
-                    }
+                    loadExtractor(httpsify(mirrorSrc), dataUrl, subtitleCallback, callback)
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                // Jangan menelan CancellationException (mekanisme timeout core)
+                if (e is CancellationException) throw e
+                logError(e)
+            }
         }
 
         for (a in doc.select("div.dlbox li span.e a[href]")) {
             val href = a.attr("href").trim()
             if (href.isNotBlank()) {
-                val httpsDl = httpsify(href)
-                if (!loadExtractor(httpsDl, dataUrl, subtitleCallback, callback)) {
-                    if (httpsDl.contains("minochinos.com")) {
-                        MinochinosExtractor().getUrl(httpsDl, dataUrl, subtitleCallback, callback)
-                    }
-                }
+                loadExtractor(httpsify(href), dataUrl, subtitleCallback, callback)
             }
         }
     }
@@ -300,8 +277,7 @@ class OppaDramaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val html = app.get(data, headers = desktopBypassHeaders).text
-        val document = Jsoup.parse(html)
+        val document = app.get(data, headers = desktopBypassHeaders).document
 
         var isMovie = data.contains("/movie-")
         for (span in document.select("div.spe span")) {
@@ -319,8 +295,8 @@ class OppaDramaProvider : MainAPI() {
                 for (anchor in pseudoEpisodes) {
                     val href = anchor.attr("href")
                     if (!href.isNullOrBlank()) {
-                        val subHtml = app.get(href, headers = desktopBypassHeaders).text
-                        parseEmbeds(Jsoup.parse(subHtml), href, subtitleCallback, callback)
+                        val subDocument = app.get(href, headers = desktopBypassHeaders).document
+                        parseEmbeds(subDocument, href, subtitleCallback, callback)
                     }
                 }
                 return true
@@ -331,10 +307,17 @@ class OppaDramaProvider : MainAPI() {
         return true
     }
 
-    private data class SeriesInfo(val status: ShowStatus, val year: Int?, val plot: String?, val rating: Double?, val duration: Int?)
+    private data class SeriesInfo(
+        val status: ShowStatus,
+        val year: Int?,
+        val plot: String?,
+        val rating: Double?,
+        val duration: Int?
+    )
 
-    private fun parseInfo(document: org.jsoup.nodes.Document): SeriesInfo {
-        val plot = document.select("div.entry-content p, div.desc p").joinToString("\n") { it.text() }.trim().ifBlank { null }
+    private fun parseInfo(document: Document): SeriesInfo {
+        val plot = document.select("div.entry-content p, div.desc p")
+            .joinToString("\n") { it.text() }.trim().ifBlank { null }
         var status: ShowStatus = ShowStatus.Completed
         var year: Int? = null
         var duration: Int? = null
@@ -344,7 +327,7 @@ class OppaDramaProvider : MainAPI() {
             val labelElement = span.select("b").first() ?: continue
             val label = labelElement.text().trim().removeSuffix(":")
             val value = span.text().replace(labelElement.text(), "").trim()
-            
+
             when (label.lowercase()) {
                 "status" -> status = if (value.lowercase().contains("ongoing")) ShowStatus.Ongoing else ShowStatus.Completed
                 "dirilis" -> {
