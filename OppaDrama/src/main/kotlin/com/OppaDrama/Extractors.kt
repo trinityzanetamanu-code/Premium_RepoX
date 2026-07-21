@@ -4,21 +4,25 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.base64DecodeArray
 import com.lagradost.cloudstream3.extractors.VidHidePro
+import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.Jsoup
 import java.net.URI
-import android.util.Base64
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * 1. EarnVids / Smoothpre Extractor
- * Alias backend extractor: smoothpre.com menggunakan arsitektur yang sama dengan vidhidepro.com.
+ * Alias backend extractor: smoothpre.com menggunakan arsitektur yang sama
+ * dengan vidhidepro.com. (Pola alias resmi, sama seperti extractor bawaan core.)
  */
 class Smoothpre : VidHidePro() {
     override var name = "EarnVids"
@@ -27,7 +31,7 @@ class Smoothpre : VidHidePro() {
 
 /**
  * 2. BuzzServer Extractor (Local Plugin Overrider)
- * Memperbaiki kegagalan pembacaan hx-redirect statis huruf kecil pada core HubCloud.kt 
+ * Memperbaiki kegagalan pembacaan hx-redirect statis huruf kecil pada core HubCloud.kt
  * dengan menerapkan metode multi-headers fallback (hx-redirect, HX-Redirect, location, Location).
  */
 class BuzzServer : ExtractorApi() {
@@ -44,7 +48,7 @@ class BuzzServer : ExtractorApi() {
         try {
             // Bersihkan URL dari silsilah parameter /download ganda jika terlempar dari core
             val cleanUrl = if (url.endsWith("/download")) url.substringBeforeLast("/download") else url
-            
+
             val page = app.get(cleanUrl)
             val qualityText = page.documentLarge.selectFirst("div.max-w-2xl > span")?.text()
             val quality = getQualityFromName(qualityText)
@@ -55,8 +59,8 @@ class BuzzServer : ExtractorApi() {
                 referer = cleanUrl,
                 allowRedirects = false,
             )
-            
-            // SOLUSI MULTI-HEADERS OVERRIDE: Tangkap seluruh kemungkinan variasi nama header dari htmx engine
+
+            // MULTI-HEADERS OVERRIDE: tangkap seluruh variasi nama header dari htmx engine
             val redirectUrl = response.headers["hx-redirect"]
                 ?: response.headers["HX-Redirect"]
                 ?: response.headers["location"]
@@ -64,9 +68,11 @@ class BuzzServer : ExtractorApi() {
 
             if (!redirectUrl.isNullOrBlank()) {
                 callback.invoke(
+                    // Tanpa parameter `type` => INFER_TYPE: tipe media otomatis
+                    // disimpulkan dari URL (fallback ke VIDEO bila tak dikenali).
                     newExtractorLink(
                         source = name,
-                        name = "BuzzServer Direct",
+                        name = name, // konsisten dgn source (saran maintainer core)
                         url = redirectUrl,
                     ) {
                         this.quality = quality
@@ -77,13 +83,19 @@ class BuzzServer : ExtractorApi() {
                 Log.w("BuzzServer", "Bypass Failed: No valid redirect token found in response headers.")
             }
         } catch (e: Exception) {
-            Log.e("BuzzServer", "Failed to resolve $url: ${e.message}")
+            // WAJIB: jangan menelan CancellationException agar mekanisme
+            // timeout coroutine core tetap berfungsi (sesuai pola loadExtractor).
+            if (e is CancellationException) throw e
+            logError(e)
         }
     }
 }
 
 /**
  * 3. Emturbovid Extractor
+ * Ekstraksi varian kualitas HLS kini didelegasikan ke M3u8Helper.generateM3u8 —
+ * mekanisme standar core untuk mengurai master playlist (menggantikan parsing
+ * manual baris #EXT-X-STREAM-INF yang rapuh terhadap edge case URL relatif).
  */
 open class EmturbovidExtractor : ExtractorApi() {
     override var name = "Emturbovid"
@@ -114,84 +126,48 @@ open class EmturbovidExtractor : ExtractorApi() {
                 }
             }
 
-            val html = app.get(finalUrl, headers = headers).text
-            val document = Jsoup.parse(html)
+            val response = app.get(finalUrl, headers = headers)
+            val html = response.text
+            val document = response.document
 
-            val masterUrl = document.select("div#video_player").attr("data-hash").trim().takeIf { it.isNotBlank() }
-                ?: Regex("""var\s+urlPlay\s*=\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.getOrNull(1)?.trim()
+            val masterUrl = document.select("div#video_player").attr("data-hash").trim()
+                .takeIf { it.isNotBlank() }
+                ?: Regex("""var\s+urlPlay\s*=\s*['"]([^'"]+)['"]""")
+                    .find(html)?.groupValues?.getOrNull(1)?.trim()
 
             if (masterUrl.isNullOrBlank()) return
 
             val streamHeaders = mapOf(
                 "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-                "Referer" to "$mainUrl/",
                 "Origin" to mainUrl
             )
 
-            val masterText = app.get(masterUrl, headers = streamHeaders).text
-            val lines = masterText.lines()
-            var variantsFound = false
-
-            for (i in lines.indices) {
-                val line = lines[i].trim()
-                if (!line.startsWith("#EXT-X-STREAM-INF")) continue
-
-                val height = Regex("RESOLUTION=\\d+x(\\d+)")
-                    .find(line)
-                    ?.groupValues
-                    ?.getOrNull(1)
-                    ?.toIntOrNull()
-
-                val nextLine = lines.getOrNull(i + 1)?.trim().orEmpty()
-                if (nextLine.isBlank() || nextLine.startsWith("#")) continue
-
-                val variantUrl = when {
-                    nextLine.startsWith("//") -> "https:$nextLine"
-                    nextLine.startsWith("/") -> "https://" + URI(masterUrl).host + nextLine
-                    nextLine.startsWith("http") -> nextLine
-                    else -> masterUrl.substringBeforeLast("/") + "/" + nextLine
-                }
-
-                variantsFound = true
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = "$name ${height ?: ""}p".trim(),
-                        url = variantUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.headers = streamHeaders
-                        this.quality = height ?: Qualities.Unknown.value
-                    }
-                )
-            }
-
-            if (!variantsFound) {
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = masterUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.headers = streamHeaders
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-            }
-        } catch (_: Exception) {}
+            // Mekanisme standar: M3u8Helper mengurai master playlist, menghasilkan
+            // satu ExtractorLink per varian kualitas dengan resolusi URL relatif
+            // yang benar, dan otomatis memakai ExtractorLinkType.M3U8.
+            M3u8Helper.generateM3u8(
+                source = name,
+                streamUrl = masterUrl,
+                referer = "$mainUrl/",
+                headers = streamHeaders
+            ).forEach(callback)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            logError(e)
+        }
     }
 }
 
 /**
  * 4. Abyss / Hydrax Extractor
- * Mengurai kemurnian data Base64 "datas" dari player-v2 core bundle untuk mengambil otentikasi multi-token.
+ * Mengurai data Base64 "datas" dari player-v2 core bundle untuk mengambil
+ * otentikasi multi-token. Decoding memakai helper crossplatform core
+ * (base64DecodeArray + decodeToString/UTF-8), BUKAN android.util.Base64
+ * yang mengikat plugin ke platform Android.
  */
-class AbyssExtractor : ExtractorApi() {
+open class AbyssExtractor : ExtractorApi() {
     override val name = "Abyss"
-    override val mainUrl = "https://abyss.to"
+    open override val mainUrl = "https://abyss.to"
     override val requiresReferer = true
 
     private data class AbyssSource(
@@ -218,28 +194,34 @@ class AbyssExtractor : ExtractorApi() {
             )
 
             val html = app.get(url, headers = headers).text
-            val datasRaw = Regex("""const\s+datas\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.getOrNull(1)
-            
+            val datasRaw = Regex("""const\s+datas\s*=\s*["']([^"']+)["']""")
+                .find(html)?.groupValues?.getOrNull(1)
+
             var slug = Regex("[?&]v=([^&#]+)").find(url)?.groupValues?.getOrNull(1)?.trim()
             var md5Id = ""
             var userId = ""
 
             if (!datasRaw.isNullOrBlank()) {
-                val decodedDatas = String(Base64.decode(datasRaw, Base64.DEFAULT), Charsets.UTF_8)
-                
-                // Menggunakan format String escaping standar Kotlin untuk akurasi pembacaan Regex
+                // Helper crossplatform core; decodeToString() = UTF-8
+                val decodedDatas = base64DecodeArray(datasRaw).decodeToString()
+
                 if (slug.isNullOrBlank()) {
-                    slug = Regex("\"slug\"\\s*:\\s*\"([^\"]+)\"").find(decodedDatas)?.groupValues?.getOrNull(1)?.trim()
+                    slug = Regex("\"slug\"\\s*:\\s*\"([^\"]+)\"")
+                        .find(decodedDatas)?.groupValues?.getOrNull(1)?.trim()
                 }
-                md5Id = Regex("\"md5_id\"\\s*:\\s*\"?(\\d+)\"?").find(decodedDatas)?.groupValues?.getOrNull(1)?.trim() ?: ""
-                userId = Regex("\"user_id\"\\s*:\\s*\"?(\\d+)\"?").find(decodedDatas)?.groupValues?.getOrNull(1)?.trim() ?: ""
+                md5Id = Regex("\"md5_id\"\\s*:\\s*\"?(\\d+)\"?")
+                    .find(decodedDatas)?.groupValues?.getOrNull(1)?.trim() ?: ""
+                userId = Regex("\"user_id\"\\s*:\\s*\"?(\\d+)\"?")
+                    .find(decodedDatas)?.groupValues?.getOrNull(1)?.trim() ?: ""
             }
 
             if (slug.isNullOrBlank()) {
-                slug = Regex("""(?:v|slug)\s*:\s*["']([^"']+)["']""").find(html)?.groupValues?.getOrNull(1)?.trim()
+                slug = Regex("""(?:v|slug)\s*:\s*["']([^"']+)["']""")
+                    .find(html)?.groupValues?.getOrNull(1)?.trim()
             }
             if (userId.isNullOrBlank()) {
-                userId = Regex("""userID\s*:\s*["']?(\d+)["']?""").find(html)?.groupValues?.getOrNull(1)?.trim() ?: ""
+                userId = Regex("""userID\s*:\s*["']?(\d+)["']?""")
+                    .find(html)?.groupValues?.getOrNull(1)?.trim() ?: ""
             }
 
             if (slug.isNullOrBlank()) return
@@ -256,7 +238,7 @@ class AbyssExtractor : ExtractorApi() {
                     "X-Requested-With" to "XMLHttpRequest",
                     "Content-Type" to "application/x-www-form-urlencoded"
                 ),
-                data = mapOf<String, String>(
+                data = mapOf(
                     "slug" to slug,
                     "md5_id" to md5Id,
                     "user_id" to userId
@@ -267,31 +249,36 @@ class AbyssExtractor : ExtractorApi() {
                 val videoUrl = source.file
                 if (!videoUrl.isNullOrBlank()) {
                     val labelText = source.label ?: "Unknown"
-                    val isM3u8 = videoUrl.contains(".m3u8")
-                    
-                    val qualityValue = when {
-                        labelText.contains("1080") -> Qualities.P1080.value
-                        labelText.contains("720") -> Qualities.P720.value
-                        labelText.contains("480") -> Qualities.P480.value
-                        labelText.contains("360") -> Qualities.P360.value
-                        else -> Qualities.Unknown.value
-                    }
+                    val isHls = videoUrl.contains(".m3u8")
 
                     callback.invoke(
                         newExtractorLink(
                             source = name,
                             name = "$name - $labelText",
                             url = videoUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             this.referer = "https://$host/"
-                            this.quality = qualityValue
+                            // Helper standar core menggantikan mapping manual 1080/720/480/360
+                            this.quality = getQualityFromName(labelText)
                         }
                     )
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            logError(e)
+        }
     }
+}
+
+/**
+ * 4b. Alias domain mirror Abyss (abyssplayer.com).
+ * Pola alias standar (sama seperti Smoothpre) menggantikan fallback instansiasi
+ * manual di provider — loadExtractor() akan mencocokkannya secara otomatis.
+ */
+class AbyssPlayer : AbyssExtractor() {
+    override val mainUrl = "https://abyssplayer.com"
 }
 
 /**
@@ -317,9 +304,11 @@ class MinochinosExtractor : ExtractorApi() {
 
             val html = app.get(url, headers = headers).text
             val unpackedHtml = getAndUnpack(html)
-            
-            val streamUrl = Regex("""https?://[^\s"'`<>]+?\.m3u8[^\s"'`<>]*""").find(unpackedHtml)?.value
-                ?: Regex("""["'](https?://[^"']+\.mp4[^"']*)["']""").find(unpackedHtml)?.groupValues?.getOrNull(1)
+
+            val streamUrl = Regex("""https?://[^\s"'`<>]+?\.m3u8[^\s"'`<>]*""")
+                .find(unpackedHtml)?.value
+                ?: Regex("""["'](https?://[^"']+\.mp4[^"']*)["']""")
+                    .find(unpackedHtml)?.groupValues?.getOrNull(1)
 
             if (!streamUrl.isNullOrBlank()) {
                 callback.invoke(
@@ -334,6 +323,9 @@ class MinochinosExtractor : ExtractorApi() {
                     }
                 )
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            logError(e)
+        }
     }
 }
