@@ -102,8 +102,20 @@ class OppaDramaProvider : MainAPI() {
         // Idiomatik NiceHttp: .document langsung, tanpa Jsoup.parse manual
         val document = app.get(targetUrl, headers = desktopBypassHeaders).document
         val forceMovie = request.data.contains("type=Movie")
-        val items = document.select("article.bs")
+        var items = document.select("article.bs")
             .mapNotNull { it.toCardSearchResponse(forceMovie) }
+
+        // Fallback: sebagian konfigurasi WordPress menolak pola /series/page/N/
+        // dan hanya menerima query "&paged=N". Coba pola kedua bila kosong.
+        if (items.isEmpty() && page > 1) {
+            val altUrl = "${request.data}&paged=$page"
+            items = app.get(altUrl, headers = desktopBypassHeaders).document
+                .select("article.bs")
+                .mapNotNull { it.toCardSearchResponse(forceMovie) }
+            Log.d("OppaDrama", "mainPage p=$page fallback=$altUrl items=${items.size}")
+        } else {
+            Log.d("OppaDrama", "mainPage p=$page url=$targetUrl items=${items.size}")
+        }
 
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
@@ -228,6 +240,28 @@ class OppaDramaProvider : MainAPI() {
         }
     }
 
+    // Domain keluarga Abyss/Hydrax. Extractor core "ByseSX" mencocokkan domain ini
+    // LEBIH DULU (extractor plugin diproses setelah extractor core), lalu gagal
+    // parse API situs ini (MissingFieldException di logcat) tapi pencarian tetap
+    // dianggap selesai. Maka URL keluarga ini di-routing langsung ke AbyssExtractor
+    // sebelum menyentuh loadExtractor.
+    private val abyssHosts = listOf("abyss.to", "abyssplayer.com", "short.icu", "abysscdn.com")
+
+    private suspend fun dispatchEmbed(
+        url: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val fixed = httpsify(url)
+        val host = fixed.substringAfter("://").substringBefore("/").substringBefore(":").lowercase()
+        if (abyssHosts.any { host == it || host.endsWith(".$it") }) {
+            AbyssExtractor().getUrl(fixed, referer, subtitleCallback, callback)
+        } else {
+            loadExtractor(fixed, referer, subtitleCallback, callback)
+        }
+    }
+
     private suspend fun parseEmbeds(
         doc: Document,
         dataUrl: String,
@@ -241,7 +275,7 @@ class OppaDramaProvider : MainAPI() {
         doc.select("div.player-embed iframe").first()?.let { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
             if (src.isNotBlank()) {
-                loadExtractor(httpsify(src), dataUrl, subtitleCallback, callback)
+                dispatchEmbed(src, dataUrl, subtitleCallback, callback)
             }
         }
 
@@ -255,7 +289,7 @@ class OppaDramaProvider : MainAPI() {
                     el.attr("src").ifBlank { el.attr("data-src") }
                 }
                 if (!mirrorSrc.isNullOrBlank()) {
-                    loadExtractor(httpsify(mirrorSrc), dataUrl, subtitleCallback, callback)
+                    dispatchEmbed(mirrorSrc, dataUrl, subtitleCallback, callback)
                 }
             } catch (e: Exception) {
                 // Jangan menelan CancellationException (mekanisme timeout core)
@@ -267,7 +301,7 @@ class OppaDramaProvider : MainAPI() {
         for (a in doc.select("div.dlbox li span.e a[href]")) {
             val href = a.attr("href").trim()
             if (href.isNotBlank()) {
-                loadExtractor(httpsify(href), dataUrl, subtitleCallback, callback)
+                dispatchEmbed(href, dataUrl, subtitleCallback, callback)
             }
         }
     }
