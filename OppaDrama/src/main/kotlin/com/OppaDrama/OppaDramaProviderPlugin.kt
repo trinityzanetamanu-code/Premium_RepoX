@@ -1,20 +1,26 @@
 package com.OppaDrama
 
+import com.lagradost.cloudstream3.plugins.BasePlugin
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
-import com.lagradost.cloudstream3.plugins.Plugin
-import android.content.Context
 
 @CloudstreamPlugin
-class OppaDramaPlugin: Plugin() {
-    override fun load(context: Context) {
-        // 1. Mendaftarkan API utama OppaDrama agar muncul di beranda aplikasi[span_3](start_span)[span_3](end_span)
+class OppaDramaPlugin : BasePlugin() {
+    // Standar terbaru (pasca migrasi crossplatform PR #1527):
+    // BasePlugin + load() TANPA Context. Kelas Plugin(context) hanya untuk
+    // plugin yang benar-benar membutuhkan Android Context.
+    override fun load() {
+        // 1. Mendaftarkan API utama OppaDrama agar muncul di beranda aplikasi
         registerMainAPI(OppaDramaProvider())
 
-        // 2. Mendaftarkan seluruh Kluster Custom Extractors ke registry Cloudstream[span_4](start_span)[span_4](end_span)
+        // 2. Mendaftarkan seluruh kluster custom extractor ke registry Cloudstream.
+        //    Setelah terdaftar, loadExtractor() otomatis mencocokkan URL embed
+        //    berdasarkan prefix mainUrl (plus Levenshtein untuk domain mirror),
+        //    sehingga TIDAK perlu instansiasi manual di provider.
         registerExtractorAPI(Smoothpre())
         registerExtractorAPI(BuzzServer())
         registerExtractorAPI(EmturbovidExtractor())
         registerExtractorAPI(AbyssExtractor())
+        registerExtractorAPI(AbyssPlayer())      // alias domain abyssplayer.com
         registerExtractorAPI(MinochinosExtractor())
     }
 }
