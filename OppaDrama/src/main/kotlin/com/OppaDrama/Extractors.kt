@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.base64DecodeArray
 import com.lagradost.cloudstream3.extractors.VidHidePro
-import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -86,7 +85,7 @@ class BuzzServer : ExtractorApi() {
             // WAJIB: jangan menelan CancellationException agar mekanisme
             // timeout coroutine core tetap berfungsi (sesuai pola loadExtractor).
             if (e is CancellationException) throw e
-            logError(e)
+            Log.e("BuzzServer", "Ekstraksi gagal: ${e.message}")
         }
     }
 }
@@ -153,7 +152,7 @@ open class EmturbovidExtractor : ExtractorApi() {
             ).forEach(callback)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            logError(e)
+            Log.e("Emturbovid", "Ekstraksi gagal: ${e.message}")
         }
     }
 }
@@ -167,7 +166,7 @@ open class EmturbovidExtractor : ExtractorApi() {
  */
 open class AbyssExtractor : ExtractorApi() {
     override val name = "Abyss"
-    open override val mainUrl = "https://abyss.to"
+    override val mainUrl = "https://abyss.to"
     override val requiresReferer = true
 
     private data class AbyssSource(
@@ -267,7 +266,7 @@ open class AbyssExtractor : ExtractorApi() {
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            logError(e)
+            Log.e("Abyss", "Ekstraksi gagal: ${e.message}")
         }
     }
 }
@@ -325,7 +324,7 @@ class MinochinosExtractor : ExtractorApi() {
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            logError(e)
+            Log.e("Minochinos", "Ekstraksi gagal: ${e.message}")
         }
     }
 }
