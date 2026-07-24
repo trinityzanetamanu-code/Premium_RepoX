@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.base64DecodeArray
 import com.lagradost.cloudstream3.extractors.VidHidePro
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -325,6 +326,117 @@ class MinochinosExtractor : ExtractorApi() {
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Log.e("Minochinos", "Ekstraksi gagal: ${e.message}")
+        }
+    }
+}
+
+/**
+ * 6. WebView Sniffer Fallback (LAST RESORT)
+ *
+ * Dipanggil oleh provider HANYA ketika seluruh pipeline HTTP (semua extractor,
+ * semua mirror) selesai dieksekusi tanpa menghasilkan satu pun ExtractorLink.
+ * Bukan bagian dari alur normal — jalur sukses tidak pernah menyentuh kelas ini.
+ *
+ * Mekanisme: memuat halaman embed di WebView headless core (WebViewResolver),
+ * membiarkan JS situs berjalan (deobfuscation/token asli), lalu meng-intercept
+ * request media pertama yang cocok pola m3u8/mp4/mpd via shouldInterceptRequest.
+ * Catatan penting dari pembacaan kode core: pengecekan interceptUrl dilakukan
+ * SEBELUM evaluasi blacklistedFiles, sehingga pola media tetap tertangkap.
+ *
+ * Keterbatasan yang disadari (by design): host berbasis MSE/blob/DRM
+ * (mis. Abyss/Hydrax) atau file-host tanpa autoplay (mis. BuzzHeavier)
+ * kemungkinan tetap gagal — resolver hanya akan timeout tanpa efek samping.
+ */
+object WebViewFallback {
+    private const val TAG = "WebViewFallback"
+
+    /** Pola request media yang menghentikan WebView saat tertangkap. */
+    private val mediaUrlPattern = Regex("""\.(m3u8|mp4|mpd)(\?|${'$'})""")
+
+    /**
+     * Timeout per percobaan sniffing. Sengaja jauh di bawah DEFAULT_TIMEOUT (60s)
+     * core agar total durasi fallback tetap aman terhadap timeout loadLinks,
+     * dan memperkecil jendela hidup WebView (mitigasi risiko leak saat
+     * pembatalan coroutine di tengah polling resolver).
+     */
+    private const val SNIFF_TIMEOUT_MS = 15_000L
+
+    /**
+     * Hanya header identitas/sesi yang relevan untuk playback yang diteruskan
+     * ke ExoPlayer. Header transport (Host, Connection, Range, dsb.) sengaja
+     * dibuang karena akan di-generate ulang oleh datasource player.
+     */
+    private val forwardedHeaderNames = setOf(
+        "user-agent", "referer", "origin", "cookie", "accept", "accept-language"
+    )
+
+    /**
+     * Muat [embedUrl] di WebView dan sniff request media pertama.
+     * @return true bila sebuah ExtractorLink berhasil dikirim ke [callback].
+     */
+    suspend fun sniff(
+        embedUrl: String,
+        referer: String?,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        return try {
+            Log.i(TAG, "Fallback WebView aktif untuk: $embedUrl")
+
+            val resolver = WebViewResolver(
+                interceptUrl = mediaUrlPattern,
+                additionalUrls = emptyList(),
+                userAgent = null,       // JANGAN override UA: bisa merusak bypass Cloudflare (catatan core)
+                useOkhttp = false,      // false = seluruh request lewat engine WebView (aman utk Cloudflare)
+                script = null,
+                scriptCallback = null,
+                timeout = SNIFF_TIMEOUT_MS
+            )
+
+            val (mediaRequest, _) = resolver.resolveUsingWebView(
+                url = embedUrl,
+                referer = referer,
+                method = "GET",
+                requestCallBack = { false }
+            )
+
+            val request = mediaRequest ?: run {
+                Log.w(TAG, "Sniffing timeout/gagal (tidak ada request media tertangkap): $embedUrl")
+                return false
+            }
+
+            val mediaUrl = request.url.toString()
+
+            // okhttp3.Headers adalah Iterable<Pair<String, String>>; saring
+            // hanya header yang berguna bagi player, pertahankan nama aslinya.
+            val sniffedHeaders = request.headers
+                .filter { (key, _) -> key.lowercase() in forwardedHeaderNames }
+                .toMap()
+
+            val sniffedReferer = sniffedHeaders.entries
+                .firstOrNull { it.key.equals("referer", ignoreCase = true) }
+                ?.value
+                ?: embedUrl
+
+            // Tanpa parameter `type` => INFER_TYPE: m3u8/mpd/mp4 disimpulkan dari URL.
+            callback.invoke(
+                newExtractorLink(
+                    source = "WebView",
+                    name = "WebView (Fallback)",
+                    url = mediaUrl,
+                ) {
+                    this.referer = sniffedReferer
+                    this.quality = Qualities.Unknown.value
+                    this.headers = sniffedHeaders
+                }
+            )
+
+            Log.i(TAG, "Sniffing berhasil: $mediaUrl")
+            true
+        } catch (e: Exception) {
+            // WAJIB: jangan menelan CancellationException (mekanisme timeout core).
+            if (e is CancellationException) throw e
+            Log.e(TAG, "Fallback WebView gagal: ${e.message}")
+            false
         }
     }
 }
