@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.cancellation.CancellationException
 
 class OppaDramaProvider : MainAPI() {
@@ -247,27 +248,45 @@ class OppaDramaProvider : MainAPI() {
     // sebelum menyentuh loadExtractor.
     private val abyssHosts = listOf("abyss.to", "abyssplayer.com", "short.icu", "abysscdn.com")
 
+    /** Deteksi host keluarga Abyss dari URL yang sudah di-httpsify. */
+    private fun isAbyssUrl(fixedUrl: String): Boolean {
+        val host = fixedUrl.substringAfter("://").substringBefore("/").substringBefore(":").lowercase()
+        return abyssHosts.any { host == it || host.endsWith(".$it") }
+    }
+
+    /**
+     * Routing satu URL embed ke extractor yang tepat.
+     * @return URL final (ter-httpsify) yang di-dispatch — dipakai loadLinks
+     *         sebagai daftar kandidat untuk fallback WebView.
+     */
     private suspend fun dispatchEmbed(
         url: String,
         referer: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) {
+    ): String {
         val fixed = httpsify(url)
-        val host = fixed.substringAfter("://").substringBefore("/").substringBefore(":").lowercase()
-        if (abyssHosts.any { host == it || host.endsWith(".$it") }) {
+        if (isAbyssUrl(fixed)) {
             AbyssExtractor().getUrl(fixed, referer, subtitleCallback, callback)
         } else {
             loadExtractor(fixed, referer, subtitleCallback, callback)
         }
+        return fixed
     }
 
+    /**
+     * Mengurai seluruh sumber embed dari satu dokumen dan men-dispatch-nya.
+     * @return daftar URL embed yang telah dicoba (untuk kandidat fallback).
+     *         Alur dispatch tidak berubah dari implementasi sebelumnya.
+     */
     private suspend fun parseEmbeds(
         doc: Document,
         dataUrl: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) {
+    ): List<String> {
+        val attempted = mutableListOf<String>()
+
         // Semua extractor kustom (Minochinos, Abyss + alias AbyssPlayer, dll.)
         // sudah terdaftar via registerExtractorAPI, sehingga loadExtractor()
         // otomatis mencocokkannya berdasarkan prefix mainUrl / Levenshtein mirror.
@@ -275,7 +294,7 @@ class OppaDramaProvider : MainAPI() {
         doc.select("div.player-embed iframe").first()?.let { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
             if (src.isNotBlank()) {
-                dispatchEmbed(src, dataUrl, subtitleCallback, callback)
+                attempted.add(dispatchEmbed(src, dataUrl, subtitleCallback, callback))
             }
         }
 
@@ -289,7 +308,7 @@ class OppaDramaProvider : MainAPI() {
                     el.attr("src").ifBlank { el.attr("data-src") }
                 }
                 if (!mirrorSrc.isNullOrBlank()) {
-                    dispatchEmbed(mirrorSrc, dataUrl, subtitleCallback, callback)
+                    attempted.add(dispatchEmbed(mirrorSrc, dataUrl, subtitleCallback, callback))
                 }
             } catch (e: Exception) {
                 // Jangan menelan CancellationException (mekanisme timeout core)
@@ -301,7 +320,39 @@ class OppaDramaProvider : MainAPI() {
         for (a in doc.select("div.dlbox li span.e a[href]")) {
             val href = a.attr("href").trim()
             if (href.isNotBlank()) {
-                dispatchEmbed(href, dataUrl, subtitleCallback, callback)
+                attempted.add(dispatchEmbed(href, dataUrl, subtitleCallback, callback))
+            }
+        }
+
+        return attempted
+    }
+
+    /**
+     * LAST RESORT: dijalankan HANYA bila seluruh pipeline HTTP selesai tanpa
+     * satu pun ExtractorLink. Kandidat diurutkan non-Abyss lebih dulu (host
+     * MSE/blob seperti Abyss diketahui sulit di-sniff), dibatasi maksimal
+     * [MAX_WEBVIEW_ATTEMPTS] percobaan, dan berhenti pada keberhasilan pertama.
+     * Seluruh kegagalan di sini bersifat non-fatal terhadap alur loadLinks.
+     */
+    private suspend fun runWebViewFallbackIfNeeded(
+        linkFound: AtomicBoolean,
+        attemptedEmbeds: List<String>,
+        pageUrl: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        if (linkFound.get() || attemptedEmbeds.isEmpty()) return
+
+        Log.w("OppaDrama", "Seluruh extractor gagal (${attemptedEmbeds.size} embed dicoba). Mengaktifkan fallback WebView.")
+
+        val candidates = attemptedEmbeds
+            .distinct()
+            .sortedBy { if (isAbyssUrl(it)) 1 else 0 }
+            .take(MAX_WEBVIEW_ATTEMPTS)
+
+        for (embed in candidates) {
+            if (WebViewFallback.sniff(embed, pageUrl, callback)) {
+                linkFound.set(true)
+                break
             }
         }
     }
@@ -312,6 +363,16 @@ class OppaDramaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // Penanda keberhasilan pipeline utama. AtomicBoolean dipakai (bukan var
+        // Boolean) demi jaminan visibilitas memori bila sebuah extractor core
+        // memanggil callback dari dispatcher thread berbeda. Pada jalur sukses,
+        // satu-satunya overhead tambahan adalah satu operasi set() ini.
+        val linkFound = AtomicBoolean(false)
+        val trackingCallback: (ExtractorLink) -> Unit = { link ->
+            linkFound.set(true)
+            callback(link)
+        }
+
         val document = app.get(data, headers = desktopBypassHeaders).document
 
         var isMovie = data.contains("/movie-")
@@ -327,18 +388,23 @@ class OppaDramaProvider : MainAPI() {
         if (isMovie) {
             val pseudoEpisodes = document.select("div.eplister ul li a")
             if (pseudoEpisodes.isNotEmpty()) {
+                val attemptedEmbeds = mutableListOf<String>()
                 for (anchor in pseudoEpisodes) {
                     val href = anchor.attr("href")
                     if (!href.isNullOrBlank()) {
                         val subDocument = app.get(href, headers = desktopBypassHeaders).document
-                        parseEmbeds(subDocument, href, subtitleCallback, callback)
+                        attemptedEmbeds += parseEmbeds(subDocument, href, subtitleCallback, trackingCallback)
                     }
                 }
+                // Fallback dievaluasi SETELAH seluruh sub-halaman selesai diproses.
+                runWebViewFallbackIfNeeded(linkFound, attemptedEmbeds, data, trackingCallback)
                 return true
             }
         }
 
-        parseEmbeds(document, data, subtitleCallback, callback)
+        val attemptedEmbeds = parseEmbeds(document, data, subtitleCallback, trackingCallback)
+        // Fallback dievaluasi SETELAH iframe utama + semua mirror + dlbox selesai.
+        runWebViewFallbackIfNeeded(linkFound, attemptedEmbeds, data, trackingCallback)
         return true
     }
 
@@ -389,5 +455,10 @@ class OppaDramaProvider : MainAPI() {
         val minutes = Regex("(\\d+)\\s*min").find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         val total = hours * 60 + minutes
         return if (total > 0) total else null
+    }
+
+    companion object {
+        /** Batas percobaan sniffing WebView per pemanggilan loadLinks. */
+        private const val MAX_WEBVIEW_ATTEMPTS = 2
     }
 }
