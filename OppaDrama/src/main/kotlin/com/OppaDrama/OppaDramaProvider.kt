@@ -285,17 +285,17 @@ class OppaDramaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): List<String> {
-        val attempted = mutableListOf<String>()
+        // TAHAP 1 — kumpulkan seluruh URL embed lebih dulu, tanpa request apa pun.
+        //
+        // Player default pada halaman ini juga terdaftar sebagai opsi pertama di
+        // dropdown mirror, sehingga embed yang sama sebelumnya diproses dua kali
+        // (terlihat di logcat: 4 link Emturbovid identik muncul dua kali, terpaut
+        // ~2 detik). Mengumpulkan dulu memungkinkan deduplikasi sebelum request.
+        val rawEmbeds = mutableListOf<String>()
 
-        // Semua extractor kustom (Minochinos, Abyss + alias AbyssPlayer, dll.)
-        // sudah terdaftar via registerExtractorAPI, sehingga loadExtractor()
-        // otomatis mencocokkannya berdasarkan prefix mainUrl / Levenshtein mirror.
-        // Fallback instansiasi manual tidak diperlukan lagi.
         doc.select("div.player-embed iframe").first()?.let { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-            if (src.isNotBlank()) {
-                attempted.add(dispatchEmbed(src, dataUrl, subtitleCallback, callback))
-            }
+            if (src.isNotBlank()) rawEmbeds.add(src)
         }
 
         val mirrors = doc.select("select.mirror option[value]:not([disabled])")
@@ -307,20 +307,48 @@ class OppaDramaProvider : MainAPI() {
                 val mirrorSrc = Jsoup.parse(decoded).select("iframe").first()?.let { el ->
                     el.attr("src").ifBlank { el.attr("data-src") }
                 }
-                if (!mirrorSrc.isNullOrBlank()) {
-                    attempted.add(dispatchEmbed(mirrorSrc, dataUrl, subtitleCallback, callback))
-                }
+                if (!mirrorSrc.isNullOrBlank()) rawEmbeds.add(mirrorSrc)
             } catch (e: Exception) {
                 // Jangan menelan CancellationException (mekanisme timeout core)
                 if (e is CancellationException) throw e
-                Log.e("OppaDrama", "Mirror decode/extract gagal: ${e.message}")
+                Log.e("OppaDrama", "Mirror decode gagal: ${e.message}")
             }
         }
 
         for (a in doc.select("div.dlbox li span.e a[href]")) {
             val href = a.attr("href").trim()
-            if (href.isNotBlank()) {
-                attempted.add(dispatchEmbed(href, dataUrl, subtitleCallback, callback))
+            if (href.isNotBlank()) rawEmbeds.add(href)
+        }
+
+        // TAHAP 2 — deduplikasi.
+        //
+        // Kunci dedup SENGAJA berupa string URL persis sesudah httpsify() + trim(),
+        // tanpa normalisasi lain. Alasannya:
+        //   - lowercase() BERBAHAYA: subdomain CDN seperti "wt4PjIIVE9AGjPL" peka
+        //     huruf besar-kecil, dua mirror bisa berbeda hanya di kapitalisasi.
+        //   - membuang query BERBAHAYA: AbyssExtractor membaca identitas video dari
+        //     parameter "v", dan token CDN juga hidup di query string.
+        // Dua string byte-identik dijamin menghasilkan request dan hasil yang sama,
+        // jadi membuang yang kedua tidak mungkin menghilangkan mirror yang berbeda.
+        // Bila ragu, biasnya ke arah aman: keduanya tetap diproses.
+        val uniqueEmbeds = rawEmbeds
+            .map { httpsify(it).trim() }
+            .filter { it.isNotBlank() }
+            .distinct()   // mempertahankan urutan, kemunculan pertama menang
+
+        val skipped = rawEmbeds.size - uniqueEmbeds.size
+        if (skipped > 0) {
+            Log.i("OppaDrama", "Dedup embed: ${rawEmbeds.size} -> ${uniqueEmbeds.size} ($skipped duplikat dilewati)")
+        }
+
+        // TAHAP 3 — dispatch. Urutannya identik dengan sebelumnya.
+        val attempted = mutableListOf<String>()
+        for (embed in uniqueEmbeds) {
+            try {
+                attempted.add(dispatchEmbed(embed, dataUrl, subtitleCallback, callback))
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.e("OppaDrama", "Extract gagal untuk $embed: ${e.message}")
             }
         }
 
