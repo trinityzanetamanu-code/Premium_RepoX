@@ -1,7 +1,7 @@
 package com.OppaDrama
 
 import com.lagradost.cloudstream3.plugins.BasePlugin
-import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugi
 
 @CloudstreamPlugin
 class OppaDramaPlugin : BasePlugin() {
