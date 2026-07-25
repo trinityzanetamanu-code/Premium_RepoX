@@ -60,11 +60,30 @@ class BuzzServer : ExtractorApi() {
                 allowRedirects = false,
             )
 
-            // MULTI-HEADERS OVERRIDE: tangkap seluruh variasi nama header dari htmx engine
-            val redirectUrl = response.headers["hx-redirect"]
+            // MULTI-HEADERS OVERRIDE: tangkap seluruh variasi nama header dari htmx engine.
+            // hx-redirect diprioritaskan karena itulah header yang benar; location
+            // hanya dipakai sebagai cadangan terakhir.
+            val rawRedirect = response.headers["hx-redirect"]
                 ?: response.headers["HX-Redirect"]
                 ?: response.headers["location"]
                 ?: response.headers["Location"]
+
+            // Endpoint /download kadang memantulkan Location kembali ke halaman
+            // asalnya. Nilai seperti itu bukan tautan media dan harus dibuang,
+            // kalau tidak player menerima HTML dan gagal diam-diam.
+            val redirectUrl = rawRedirect
+                ?.trim()
+                ?.let { if (it.startsWith("/")) "$mainUrl$it" else it }
+                ?.takeIf { candidate ->
+                    val a = candidate.trimEnd('/').substringBefore('?')
+                    val b = cleanUrl.trimEnd('/').substringBefore('?')
+                    !a.equals(b, ignoreCase = true) &&
+                            !a.equals("$b/download", ignoreCase = true)
+                }
+
+            if (rawRedirect != null && redirectUrl == null) {
+                Log.w("BuzzServer", "Redirect memantul ke halaman asal, diabaikan: $rawRedirect")
+            }
 
             if (!redirectUrl.isNullOrBlank()) {
                 callback.invoke(
