@@ -1,4 +1,4 @@
-package com.OppaDrama
+package com.OppaDram
 
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
