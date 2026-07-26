@@ -243,7 +243,13 @@ open class AbyssExtractor : ExtractorApi() {
                     .find(html)?.groupValues?.getOrNull(1)?.trim() ?: ""
             }
 
-            if (slug.isNullOrBlank()) return
+            // [DIAG] Titik keluar senyap #1
+            Log.i("Abyss", "DIAG datasRaw=${if (datasRaw.isNullOrBlank()) "TIDAK ADA" else "ada(${datasRaw.length} char)"} | slug='$slug' | md5Id='$md5Id' | userId='$userId'")
+
+            if (slug.isNullOrBlank()) {
+                Log.w("Abyss", "DIAG BERHENTI: slug kosong")
+                return
+            }
 
             val host = URI(url).host
             val apiUrl = "https://$host/api/player/v2"
@@ -263,6 +269,11 @@ open class AbyssExtractor : ExtractorApi() {
                     "user_id" to userId
                 )
             ).parsedSafe<AbyssResponse>()
+
+            // [DIAG] Titik keluar senyap #2 — inilah yang paling mungkin terjadi:
+            // parsedSafe mengembalikan null tanpa jejak, lalu forEach tidak pernah
+            // berjalan sehingga getUrl selesai tanpa satu pun callback.
+            Log.i("Abyss", "DIAG apiResponse=${if (apiResponse == null) "NULL (parse gagal)" else "ok"} | sources=${apiResponse?.sources?.size ?: -1}")
 
             apiResponse?.sources?.forEach { source ->
                 val videoUrl = source.file
@@ -394,6 +405,14 @@ class MinochinosExtractor : ExtractorApi() {
                 Log.i("Minochinos", "Bukan master playlist, kualitas tidak dapat diukur")
                 return Qualities.Unknown.value
             }
+
+            // [DIAG] Cetak baris varian apa adanya. Ini yang akan memastikan apakah
+            // duplikasi berasal dari dua jalur (hls2/hls3) dan mana yang mati.
+            body.lines()
+                .map { it.trim() }
+                .filter { it.startsWith("#EXT-X-STREAM-INF") || (it.isNotBlank() && !it.startsWith("#")) }
+                .take(20)
+                .forEachIndexed { i, baris -> Log.i("Minochinos", "DIAG playlist[$i] $baris") }
 
             val heights = Regex("""RESOLUTION=\d+x(\d+)""", RegexOption.IGNORE_CASE)
                 .findAll(body)
