@@ -364,25 +364,27 @@ class MinochinosExtractor : ExtractorApi() {
             if (!streamUrl.isNullOrBlank()) {
                 val isM3u8 = streamUrl.contains(".m3u8")
 
-                // Jalur utama: urai master sekali, keluarkan satu link per rendition
-                // (duplikat jalur dibuang). Bila gagal APA PUN, jatuh ke jalur lama.
-                val berhasil = isM3u8 && emitDedupedVariants(streamUrl, callback)
-
-                if (!berhasil) {
-                    // JALUR LAMA — persis seperti versi yang terbukti bisa diputar.
-                    // Tidak ada request tambahan ke CDN sebelum player menyentuhnya.
-                    callback.invoke(
-                        newExtractorLink(
-                            source = name,
-                            name = name,
-                            url = streamUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = "$mainUrl/"
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
-                }
+                // DIKEMBALIKAN ke bentuk semula.
+                //
+                // Bentuk inilah yang TERBUKTI memutar di logcat 26 Jul 10:47:28
+                // (decoder RUNNING, lalu IsPlaying pada 10:47:30) — meskipun saat
+                // itu CDN sedang mengembalikan 429. Tidak ada request tambahan ke
+                // CDN sebelum player menyentuh URL-nya.
+                //
+                // Dua percobaan sebelumnya (probe resolusi, lalu pemecahan varian)
+                // sama-sama dipasang tanpa bukti runtime dan sama-sama dicabut.
+                // Jangan ubah blok ini lagi tanpa logcat pembanding.
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = streamUrl,
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -390,76 +392,6 @@ class MinochinosExtractor : ExtractorApi() {
         }
     }
 
-    /**
-     * Mengurai master playlist SEKALI, lalu mengeluarkan satu ExtractorLink per
-     * rendition — bukan satu link master adaptif.
-     *
-     * KENAPA INI MENGHILANGKAN "Video Trek ganda":
-     * Master acek-cdn terbukti memuat enam varian ([1080,1080,720,720,480,480]),
-     * yaitu tiga rendition yang didaftarkan dua kali lewat dua jalur berbeda
-     * (hls2 dan hls3). Selama link yang dikirim ke player masih berupa master,
-     * ExoPlayer membaca keenamnya dan menampilkan keenamnya di pemilih trek —
-     * termasuk jalur yang mati. Dengan mengirim URL rendition langsung, player
-     * tidak pernah melihat master, sehingga tiap sumber hanya punya satu trek.
-     *
-     * KENAPA INI TIDAK MENAMBAH BEBAN CDN:
-     * Sebelumnya master tetap diunduh, hanya saja oleh player. Di sini master
-     * diunduh oleh extractor dan player langsung ke rendition. Jumlah request
-     * ke CDN sama — ini yang membedakannya dari probe resolusi sebelumnya, yang
-     * membuat master terunduh DUA kali dan diduga kuat memicu rate limit.
-     *
-     * PEMILIHAN DUPLIKAT:
-     * Untuk tiap kualitas dipilih varian yang host-nya sama dengan host master.
-     * Alasannya konkret: host itu baru saja berhasil melayani permintaan master,
-     * sedangkan jalur alternatif belum terbukti hidup.
-     *
-     * @return true bila minimal satu link dikeluarkan. false berarti pemanggil
-     *         harus memakai jalur lama — jadi kegagalan di sini tidak pernah
-     *         membuat keadaan lebih buruk daripada sebelum perubahan ini.
-     */
-    private suspend fun emitDedupedVariants(
-        masterUrl: String,
-        callback: (ExtractorLink) -> Unit,
-    ): Boolean {
-        return try {
-            val variants = M3u8Helper.generateM3u8(
-                source = name,
-                streamUrl = masterUrl,
-                referer = "$mainUrl/",
-                headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
-                )
-            )
-
-            if (variants.isEmpty()) {
-                Log.w("Minochinos", "generateM3u8 kosong, kembali ke link master")
-                return false
-            }
-
-            val masterHost = runCatching { URI(masterUrl).host }.getOrNull()
-
-            val terpilih = variants
-                // stabil: varian sehost didahulukan tanpa mengacak urutan asli
-                .sortedByDescending { v ->
-                    masterHost != null && runCatching { URI(v.url).host == masterHost }.getOrDefault(false)
-                }
-                .distinctBy { it.quality }
-                .sortedByDescending { it.quality }
-
-            Log.i(
-                "Minochinos",
-                "Varian: ${variants.size} -> ${terpilih.size} setelah dedup | " +
-                        "kualitas=${terpilih.map { it.quality }}"
-            )
-
-            terpilih.forEach(callback)
-            true
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            Log.w("Minochinos", "Dedup varian gagal (${e.message}), kembali ke link master")
-            false
-        }
-    }
 
 }
 
