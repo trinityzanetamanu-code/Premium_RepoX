@@ -1,8 +1,8 @@
 package com.OppaDrama
 
-import com.fleeksoft.ksoup.Ksoup
-import com.fleeksoft.ksoup.nodes.Document
-import com.fleeksoft.ksoup.nodes.Element
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.api.Log
@@ -172,10 +172,15 @@ class OppaDramaProvider : MainAPI() {
         val html = response.text
         val tBody = System.currentTimeMillis()
 
-        // [FIX #2] Pakai Ksoup (parser standar CloudStream), bukan org.jsoup.Jsoup.
-        // Ksoup adalah drop-in replacement yang dipakai loadExtractor() di core.
-        // Jsoup menambah dependency dan non-cross-platform.
-        val document = Ksoup.parse(html)
+        // [FIX #2 — DIREVERT] Pakai Jsoup (yang sudah ada di classpath plugin),
+        // bukan Ksoup. Alasan revert: Ksoup belum di-expose sebagai transitive
+        // dependency di build classpath plugin, sehingga build gagal dengan
+        // "Unresolved reference: Document" di banyak titik.
+        //
+        // Untuk align ke standar Ksoup (sesuai MainAPI.kt versi baru), tambahkan
+        //   implementation 'com.fleeksoft:ksoup:<version>'
+        // ke build.gradle module plugin ini, lalu ganti import + parse() di sini.
+        val document = Jsoup.parse(html)
         val tParse = System.currentTimeMillis()
 
         val forceMovie = request.data.contains("type=Movie")
@@ -443,8 +448,10 @@ class OppaDramaProvider : MainAPI() {
             if (encoded.isBlank() || encoded.equals("Pilih Server Video", ignoreCase = true)) continue
             try {
                 val decoded = base64Decode(encoded.replace("\\s".toRegex(), ""))
-                // [FIX #2] Pakai Ksoup (drop-in replacement Jsoup yang dipakai core).
-                val mirrorSrc = Ksoup.parse(decoded).select("iframe").first()?.let { el ->
+                // [FIX #2 — DIREVERT] Lihat catatan di getMainPage. Pakai Jsoup
+                // yang sudah ada di classpath. Align ke Ksoup memerlukan
+                // dependency tambahan di build.gradle.
+                val mirrorSrc = Jsoup.parse(decoded).select("iframe").first()?.let { el ->
                     el.attr("src").ifBlank { el.attr("data-src") }
                 }
                 if (!mirrorSrc.isNullOrBlank()) rawEmbeds.add("MIRROR#$idx" to mirrorSrc)
