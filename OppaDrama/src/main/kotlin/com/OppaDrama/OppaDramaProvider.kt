@@ -9,6 +9,7 @@ import com.lagradost.api.Log
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 
 class OppaDramaProvider : MainAPI() {
@@ -254,6 +255,24 @@ class OppaDramaProvider : MainAPI() {
         return abyssHosts.any { host == it || host.endsWith(".$it") }
     }
 
+    /* ── [DIAG] Penghitung link per embed. Hapus bersama baris ber-tag EMBED. ──
+     *
+     * Meneruskan link apa adanya — tidak menyaring, tidak mengubah urutan, tidak
+     * mengubah isi. Satu-satunya efeknya adalah menghitung, sehingga kita bisa
+     * membedakan "extractor tidak pernah dipanggil" dari "extractor dipanggil
+     * tapi tidak menghasilkan apa pun".
+     */
+    private class CountingCallback(
+        private val delegate: (ExtractorLink) -> Unit
+    ) : (ExtractorLink) -> Unit {
+        private val n = AtomicInteger(0)
+        val count: Int get() = n.get()
+        override fun invoke(link: ExtractorLink) {
+            n.incrementAndGet()
+            delegate(link)
+        }
+    }
+
     /**
      * Routing satu URL embed ke extractor yang tepat.
      * @return URL final (ter-httpsify) yang di-dispatch — dipakai loadLinks
@@ -263,14 +282,32 @@ class OppaDramaProvider : MainAPI() {
         url: String,
         referer: String,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        asal: String = "?",   // [DIAG] penanda selector asal, mis. "MIRROR#2"
     ): String {
         val fixed = httpsify(url)
+        val host = fixed.substringAfter("://").substringBefore("/").substringBefore(":")
+
+        // [DIAG]
+        val counter = CountingCallback(callback)
+        val mulai = System.currentTimeMillis()
+        var jalur: String
+
         if (isAbyssUrl(fixed)) {
-            AbyssExtractor().getUrl(fixed, referer, subtitleCallback, callback)
+            jalur = "ABYSS-LANGSUNG"
+            AbyssExtractor().getUrl(fixed, referer, subtitleCallback, counter)
         } else {
-            loadExtractor(fixed, referer, subtitleCallback, callback)
+            val cocok = loadExtractor(fixed, referer, subtitleCallback, counter)
+            jalur = if (cocok) "loadExtractor=COCOK" else "loadExtractor=TIDAK-COCOK"
         }
+
+        // [DIAG] Baris inilah yang mengungkap embed yang selama ini diam.
+        val durasi = System.currentTimeMillis() - mulai
+        Log.i(
+            "OppaDrama",
+            "EMBED $asal | host=$host | $jalur | ${counter.count} link | ${durasi}ms | $fixed"
+        )
+
         return fixed
     }
 
@@ -291,15 +328,17 @@ class OppaDramaProvider : MainAPI() {
         // dropdown mirror, sehingga embed yang sama sebelumnya diproses dua kali
         // (terlihat di logcat: 4 link Emturbovid identik muncul dua kali, terpaut
         // ~2 detik). Mengumpulkan dulu memungkinkan deduplikasi sebelum request.
-        val rawEmbeds = mutableListOf<String>()
+        // [DIAG] Pasangan (asal, url) supaya tiap embed bisa dilacak balik ke
+        // selector sumbernya. Kembalikan ke mutableListOf<String>() saat bersih-bersih.
+        val rawEmbeds = mutableListOf<Pair<String, String>>()
 
         doc.select("div.player-embed iframe").first()?.let { iframe ->
             val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-            if (src.isNotBlank()) rawEmbeds.add(src)
+            if (src.isNotBlank()) rawEmbeds.add("IFRAME" to src)
         }
 
         val mirrors = doc.select("select.mirror option[value]:not([disabled])")
-        for (option in mirrors) {
+        for ((idx, option) in mirrors.withIndex()) {
             val encoded = option.attr("value").trim()
             if (encoded.isBlank() || encoded.equals("Pilih Server Video", ignoreCase = true)) continue
             try {
@@ -307,7 +346,7 @@ class OppaDramaProvider : MainAPI() {
                 val mirrorSrc = Jsoup.parse(decoded).select("iframe").first()?.let { el ->
                     el.attr("src").ifBlank { el.attr("data-src") }
                 }
-                if (!mirrorSrc.isNullOrBlank()) rawEmbeds.add(mirrorSrc)
+                if (!mirrorSrc.isNullOrBlank()) rawEmbeds.add("MIRROR#$idx" to mirrorSrc)
             } catch (e: Exception) {
                 // Jangan menelan CancellationException (mekanisme timeout core)
                 if (e is CancellationException) throw e
@@ -315,9 +354,9 @@ class OppaDramaProvider : MainAPI() {
             }
         }
 
-        for (a in doc.select("div.dlbox li span.e a[href]")) {
+        for ((idx, a) in doc.select("div.dlbox li span.e a[href]").withIndex()) {
             val href = a.attr("href").trim()
-            if (href.isNotBlank()) rawEmbeds.add(href)
+            if (href.isNotBlank()) rawEmbeds.add("DLBOX#$idx" to href)
         }
 
         // TAHAP 2 — deduplikasi.
@@ -332,9 +371,9 @@ class OppaDramaProvider : MainAPI() {
         // jadi membuang yang kedua tidak mungkin menghilangkan mirror yang berbeda.
         // Bila ragu, biasnya ke arah aman: keduanya tetap diproses.
         val uniqueEmbeds = rawEmbeds
-            .map { httpsify(it).trim() }
-            .filter { it.isNotBlank() }
-            .distinct()   // mempertahankan urutan, kemunculan pertama menang
+            .map { (asal, u) -> asal to httpsify(u).trim() }
+            .filter { it.second.isNotBlank() }
+            .distinctBy { it.second }   // urutan tetap, kemunculan pertama menang
 
         val skipped = rawEmbeds.size - uniqueEmbeds.size
         if (skipped > 0) {
@@ -343,12 +382,13 @@ class OppaDramaProvider : MainAPI() {
 
         // TAHAP 3 — dispatch. Urutannya identik dengan sebelumnya.
         val attempted = mutableListOf<String>()
-        for (embed in uniqueEmbeds) {
+        for ((asal, embed) in uniqueEmbeds) {
             try {
-                attempted.add(dispatchEmbed(embed, dataUrl, subtitleCallback, callback))
+                attempted.add(dispatchEmbed(embed, dataUrl, subtitleCallback, callback, asal))
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                Log.e("OppaDrama", "Extract gagal untuk $embed: ${e.message}")
+                // [DIAG] embed yang melempar sekarang ikut tercatat dengan asalnya
+                Log.e("OppaDrama", "EMBED $asal | EXCEPTION ${e.javaClass.simpleName}: ${e.message} | $embed")
             }
         }
 
