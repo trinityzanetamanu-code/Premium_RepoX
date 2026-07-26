@@ -13,12 +13,26 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 
 class OppaDramaProvider : MainAPI() {
-    // [FIX #1] mainUrl HTTPS — bukan HTTP.
-    // updateUrl() di MainAPI membandingkan protocol; mixed content di WebView
-    // akan diblok. Kalau server memaksa HTTP, gunakan reverse proxy HTTPS
-    // di sisi server daripada hardcode http://.
+    // [FIX #1 — DIREVERT] mainUrl tetap HTTP, bukan HTTPS.
+    //
+    // Alasan revert: server 45.11.57.192 tidak listen di port 443. Plugin
+    // sukses load dan registrasi, TAPI runtime call gagal dengan
+    //   "java.net.ConnectException: Failed to connect to /45.11.57.192:443
+    //    ... ECONNREFUSED (Connection refused)"
+    // artinya port HTTPS di server emang tutup.
+    //
+    // Untuk align ke HTTPS yang proper, diperlukan EITHER:
+    //   1. Akses ke server untuk install reverse proxy (Caddy/nginx + Let's Encrypt)
+    //      yang forward HTTPS:443 -> HTTP:80 ke origin OppaDrama.
+    //      Lalu update mainUrl ke https://<proxy-domain>.
+    //   2. Pakai Cloudflare di depan origin (bisa kasih HTTPS tanpa setup server).
+    //   3. Pakai Clone Site feature CloudStream: user override mainUrl ke mirror
+    //      yang udah HTTPS, default mainUrl tetep HTTP.
+    //
+    // Selama salah satu di atas belum siap, default mainUrl HARUS HTTP
+    // supaya plugin tetap bisa konek ke server.
     override var name = "OPPADRAMA"
-    override var mainUrl = "https://45.11.57.192"
+    override var mainUrl = "http://45.11.57.192"
     override var lang = "id"
     override val hasMainPage = true
     override val hasQuickSearch = true
