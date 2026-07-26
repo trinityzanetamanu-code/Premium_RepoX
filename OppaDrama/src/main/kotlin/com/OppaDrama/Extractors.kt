@@ -212,9 +212,22 @@ open class AbyssExtractor : ExtractorApi() {
                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             )
 
-            val html = app.get(url, headers = headers).text
+            // [DIAG] Rekam respons halaman embed apa adanya
+            val pageResp = app.get(url, headers = headers)
+            val html = pageResp.text
+            Log.i("Abyss", "DIAG halaman code=${pageResp.code} len=${html.length}")
+
             val datasRaw = Regex("""const\s+datas\s*=\s*["']([^"']+)["']""")
                 .find(html)?.groupValues?.getOrNull(1)
+
+            // [DIAG] Bila penanda hilang, cetak cuplikan supaya perubahan
+            // struktur halaman bisa dilihat langsung, bukan ditebak.
+            if (datasRaw.isNullOrBlank()) {
+                Log.w("Abyss", "DIAG 'const datas' TIDAK DITEMUKAN. Cuplikan HTML:")
+                html.take(1500).chunked(700).forEachIndexed { i, c ->
+                    Log.w("Abyss", "DIAG html[$i] $c")
+                }
+            }
 
             var slug = Regex("[?&]v=([^&#]+)").find(url)?.groupValues?.getOrNull(1)?.trim()
             var md5Id = ""
@@ -254,7 +267,7 @@ open class AbyssExtractor : ExtractorApi() {
             val host = URI(url).host
             val apiUrl = "https://$host/api/player/v2"
 
-            val apiResponse = app.post(
+            val apiRaw = app.post(
                 apiUrl,
                 headers = mapOf(
                     "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
@@ -268,7 +281,15 @@ open class AbyssExtractor : ExtractorApi() {
                     "md5_id" to md5Id,
                     "user_id" to userId
                 )
-            ).parsedSafe<AbyssResponse>()
+            )
+
+            // [DIAG] Inilah yang menjawab: API menolak, atau struktur JSON berubah?
+            Log.i("Abyss", "DIAG API url=$apiUrl code=${apiRaw.code} len=${apiRaw.text.length}")
+            apiRaw.text.take(1400).chunked(700).forEachIndexed { i, c ->
+                Log.i("Abyss", "DIAG API body[$i] $c")
+            }
+
+            val apiResponse = apiRaw.parsedSafe<AbyssResponse>()
 
             // [DIAG] Titik keluar senyap #2 — inilah yang paling mungkin terjadi:
             // parsedSafe mengembalikan null tanpa jejak, lalu forEach tidak pernah
@@ -343,34 +364,25 @@ class MinochinosExtractor : ExtractorApi() {
             if (!streamUrl.isNullOrBlank()) {
                 val isM3u8 = streamUrl.contains(".m3u8")
 
-                // Kualitas DIUKUR, bukan ditebak.
-                //
-                // Sebelumnya nilainya dipatok Qualities.Unknown (400), sehingga
-                // sumber ini selalu terlempar ke dasar daftar — padahal sortUrls()
-                // di core mengurutkan murni berdasarkan `-quality`, dan entri
-                // Emturbovid yang berlabel 1080p/720p/480p otomatis naik ke atas
-                // meski sebagiannya gagal diputar.
-                //
-                // Segmen ",l,n,h," pada URL urlset hanya menandakan tiga rendition
-                // (low/normal/high) — itu label RELATIF, bukan resolusi. Satu-satunya
-                // cara jujur mendapat angkanya adalah membaca master playlist.
-                val quality = if (isM3u8) {
-                    probeMaxResolution(streamUrl, headers)
-                } else {
-                    Qualities.Unknown.value
-                }
+                // Jalur utama: urai master sekali, keluarkan satu link per rendition
+                // (duplikat jalur dibuang). Bila gagal APA PUN, jatuh ke jalur lama.
+                val berhasil = isM3u8 && emitDedupedVariants(streamUrl, callback)
 
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = streamUrl,
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.quality = quality
-                    }
-                )
+                if (!berhasil) {
+                    // JALUR LAMA — persis seperti versi yang terbukti bisa diputar.
+                    // Tidak ada request tambahan ke CDN sebelum player menyentuhnya.
+                    callback.invoke(
+                        newExtractorLink(
+                            source = name,
+                            name = name,
+                            url = streamUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = "$mainUrl/"
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                }
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -379,60 +391,76 @@ class MinochinosExtractor : ExtractorApi() {
     }
 
     /**
-     * Membaca master playlist sekali, lalu mengembalikan resolusi TERTINGGI
-     * yang benar-benar tercantum di dalamnya.
+     * Mengurai master playlist SEKALI, lalu mengeluarkan satu ExtractorLink per
+     * rendition — bukan satu link master adaptif.
      *
-     * Link tetap satu buah dan tetap adaptif — ExoPlayer yang memilih rendition
-     * saat pemutaran. Yang berubah hanya nilai `quality`, supaya posisinya di
-     * daftar sumber mencerminkan kualitas maksimum yang sungguh tersedia.
-     * Memecah master jadi satu entri per rendition sengaja TIDAK dilakukan
-     * karena itu justru memperpanjang daftar.
+     * KENAPA INI MENGHILANGKAN "Video Trek ganda":
+     * Master acek-cdn terbukti memuat enam varian ([1080,1080,720,720,480,480]),
+     * yaitu tiga rendition yang didaftarkan dua kali lewat dua jalur berbeda
+     * (hls2 dan hls3). Selama link yang dikirim ke player masih berupa master,
+     * ExoPlayer membaca keenamnya dan menampilkan keenamnya di pemilih trek —
+     * termasuk jalur yang mati. Dengan mengirim URL rendition langsung, player
+     * tidak pernah melihat master, sehingga tiap sumber hanya punya satu trek.
      *
-     * Gagal apa pun -> kembali ke Qualities.Unknown, yaitu perilaku lama.
-     * Jadi perubahan ini tidak pernah lebih buruk dari sebelumnya.
+     * KENAPA INI TIDAK MENAMBAH BEBAN CDN:
+     * Sebelumnya master tetap diunduh, hanya saja oleh player. Di sini master
+     * diunduh oleh extractor dan player langsung ke rendition. Jumlah request
+     * ke CDN sama — ini yang membedakannya dari probe resolusi sebelumnya, yang
+     * membuat master terunduh DUA kali dan diduga kuat memicu rate limit.
+     *
+     * PEMILIHAN DUPLIKAT:
+     * Untuk tiap kualitas dipilih varian yang host-nya sama dengan host master.
+     * Alasannya konkret: host itu baru saja berhasil melayani permintaan master,
+     * sedangkan jalur alternatif belum terbukti hidup.
+     *
+     * @return true bila minimal satu link dikeluarkan. false berarti pemanggil
+     *         harus memakai jalur lama — jadi kegagalan di sini tidak pernah
+     *         membuat keadaan lebih buruk daripada sebelum perubahan ini.
      */
-    private suspend fun probeMaxResolution(
+    private suspend fun emitDedupedVariants(
         masterUrl: String,
-        headers: Map<String, String>,
-    ): Int {
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
         return try {
-            val body = app.get(masterUrl, headers = headers, timeout = 10L).text
+            val variants = M3u8Helper.generateM3u8(
+                source = name,
+                streamUrl = masterUrl,
+                referer = "$mainUrl/",
+                headers = mapOf(
+                    "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+                )
+            )
 
-            // Master playlist wajib memuat #EXT-X-STREAM-INF. Kalau tidak ada,
-            // yang kita pegang adalah playlist media biasa (rendition tunggal)
-            // dan resolusinya memang tidak tercantum di sana.
-            if (!body.contains("#EXT-X-STREAM-INF")) {
-                Log.i("Minochinos", "Bukan master playlist, kualitas tidak dapat diukur")
-                return Qualities.Unknown.value
+            if (variants.isEmpty()) {
+                Log.w("Minochinos", "generateM3u8 kosong, kembali ke link master")
+                return false
             }
 
-            // [DIAG] Cetak baris varian apa adanya. Ini yang akan memastikan apakah
-            // duplikasi berasal dari dua jalur (hls2/hls3) dan mana yang mati.
-            body.lines()
-                .map { it.trim() }
-                .filter { it.startsWith("#EXT-X-STREAM-INF") || (it.isNotBlank() && !it.startsWith("#")) }
-                .take(20)
-                .forEachIndexed { i, baris -> Log.i("Minochinos", "DIAG playlist[$i] $baris") }
+            val masterHost = runCatching { URI(masterUrl).host }.getOrNull()
 
-            val heights = Regex("""RESOLUTION=\d+x(\d+)""", RegexOption.IGNORE_CASE)
-                .findAll(body)
-                .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
-                .toList()
+            val terpilih = variants
+                // stabil: varian sehost didahulukan tanpa mengacak urutan asli
+                .sortedByDescending { v ->
+                    masterHost != null && runCatching { URI(v.url).host == masterHost }.getOrDefault(false)
+                }
+                .distinctBy { it.quality }
+                .sortedByDescending { it.quality }
 
-            if (heights.isEmpty()) {
-                Log.i("Minochinos", "Master tanpa atribut RESOLUTION, kualitas tidak dapat diukur")
-                return Qualities.Unknown.value
-            }
+            Log.i(
+                "Minochinos",
+                "Varian: ${variants.size} -> ${terpilih.size} setelah dedup | " +
+                        "kualitas=${terpilih.map { it.quality }}"
+            )
 
-            val max = heights.max()
-            Log.i("Minochinos", "Resolusi terukur: ${heights.sorted().reversed()} -> pakai ${max}p")
-            max
+            terpilih.forEach(callback)
+            true
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.w("Minochinos", "Gagal mengukur resolusi (${e.message}), pakai Unknown")
-            Qualities.Unknown.value
+            Log.w("Minochinos", "Dedup varian gagal (${e.message}), kembali ke link master")
+            false
         }
     }
+
 }
 
 /**
