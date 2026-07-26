@@ -156,20 +156,72 @@ open class EmturbovidExtractor : ExtractorApi() {
 
             if (masterUrl.isNullOrBlank()) return
 
-            val streamHeaders = mapOf(
-                "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-                "Origin" to mainUrl
+            /* ── UJI SATU VARIABEL: samakan header dengan browser ────────────
+             *
+             * DASAR BUKTI — turbovip.har, 26 Jul 2026, 28 request segmen:
+             *
+             *   Playlist media g280.turbosplayer.com berisi 1877 segmen,
+             *   SEMUANYA di https://lh3.googleusercontent.com/d/{id}=d
+             *   (Google Drive, disamarkan content-type image/png,
+             *    content-disposition attachment;filename="file_N.png").
+             *
+             *   Header yang browser kirim ke setiap segmen Drive:
+             *       Referer    : ''          <- ADA tapi KOSONG
+             *       User-Agent : Mozilla/5.0 …
+             *       Origin     : TIDAK DIKIRIM SAMA SEKALI
+             *
+             *   Header yang kita kirim sebelumnya ke URL yang sama:
+             *       Origin  : https://emturbovid.com
+             *       Referer : https://emturbovid.com/
+             *
+             * Keduanya ikut ke segmen karena generateM3u8 menyalin `headers`
+             * ke tiap ExtractorLink dan menaruh `referer` di link.referer;
+             * CS3IPlayer meneruskan keduanya ke seluruh request, termasuk
+             * pengambilan segmen. Google Drive menyajikan halaman perantara
+             * alih-alih berkas untuk request yang dianggap tidak wajar, dan
+             * badan HTML seperti itu persis memicu error 3001 di TsExtractor
+             * (byte pertama '<', bukan sync byte 0x47).
+             *
+             * BELUM TERBUKTI — ini uji, bukan perbaikan yang dipastikan.
+             * Semua 28 segmen di HAR berstatus 200, jadi kuota Drive BUKAN
+             * penyebabnya (hipotesis itu sudah digugurkan).
+             */
+            val browserLikeHeaders = mapOf(
+                "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
             )
 
-            // Mekanisme standar: M3u8Helper mengurai master playlist, menghasilkan
-            // satu ExtractorLink per varian kualitas dengan resolusi URL relatif
-            // yang benar, dan otomatis memakai ExtractorLinkType.M3U8.
-            M3u8Helper.generateM3u8(
+            var links = M3u8Helper.generateM3u8(
                 source = name,
                 streamUrl = masterUrl,
-                referer = "$mainUrl/",
-                headers = streamHeaders
-            ).forEach(callback)
+                referer = "",              // browser mengirim Referer kosong
+                headers = browserLikeHeaders
+            )
+            Log.i("Emturbovid", "UJI header-browser: ${links.size} link")
+
+            /* JARING PENGAMAN.
+             *
+             * Ke master playlist (g*.turbosplayer.com) browser justru MENGIRIM
+             * `origin: https://turbovidhls.com`. generateM3u8 memakai satu peta
+             * header yang sama untuk master dan segmen, jadi keduanya tidak bisa
+             * dicocokkan sekaligus. Kalau menghapus Origin membuat pengambilan
+             * master ditolak, kita kembali ke perilaku lama yang sudah terbukti
+             * menghasilkan link — supaya kegagalan uji ini tidak lebih buruk
+             * daripada keadaan sekarang.
+             */
+            if (links.isEmpty()) {
+                Log.w("Emturbovid", "Tanpa Origin gagal, kembali ke header lama")
+                links = M3u8Helper.generateM3u8(
+                    source = name,
+                    streamUrl = masterUrl,
+                    referer = "$mainUrl/",
+                    headers = mapOf(
+                        "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+                        "Origin" to mainUrl
+                    )
+                )
+            }
+
+            links.forEach(callback)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Log.e("Emturbovid", "Ekstraksi gagal: ${e.message}")
