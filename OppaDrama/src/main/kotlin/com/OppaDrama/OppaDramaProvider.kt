@@ -8,7 +8,6 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -597,34 +596,11 @@ class OppaDramaProvider : MainAPI() {
     }
 
     /**
-     * LAST RESORT: dijalankan HANYA bila seluruh pipeline HTTP selesai tanpa
-     * satu pun ExtractorLink. Kandidat diurutkan non-Abyss lebih dulu (host
-     * MSE/blob seperti Abyss diketahui sulit di-sniff), dibatasi maksimal
-     * [MAX_WEBVIEW_ATTEMPTS] percobaan, dan berhenti pada keberhasilan pertama.
-     * Seluruh kegagalan di sini bersifat non-fatal terhadap alur loadLinks.
+     * (WebView fallback DIHAPUS — plugin tidak punya last-resort WebView
+     *  sniffing lagi. Hanya 3 server valid: TurboVIP/Hydrax/FileLions.
+     *  Kalau extractor core gagal pada semuanya, plugin menyerah — user
+     *  harus pilih mirror lain dari dropdown halaman versi.)
      */
-    private suspend fun runWebViewFallbackIfNeeded(
-        linkFound: AtomicBoolean,
-        attemptedEmbeds: List<String>,
-        pageUrl: String,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        if (linkFound.get() || attemptedEmbeds.isEmpty()) return
-
-        Log.w("OppaDrama", "Seluruh extractor gagal (${attemptedEmbeds.size} embed dicoba). Mengaktifkan fallback WebView.")
-
-        val candidates = attemptedEmbeds
-            .distinct()
-            .sortedBy { if (isAbyssUrl(it)) 1 else 0 }
-            .take(MAX_WEBVIEW_ATTEMPTS)
-
-        for (embed in candidates) {
-            if (WebViewFallback.sniff(embed, pageUrl, callback)) {
-                linkFound.set(true)
-                break
-            }
-        }
-    }
 
     override suspend fun loadLinks(
         data: String,
@@ -633,16 +609,6 @@ class OppaDramaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val tLoadLinks0 = System.currentTimeMillis()
-        // Penanda keberhasilan pipeline utama. AtomicBoolean dipakai (bukan var
-        // Boolean) demi jaminan visibilitas memori bila sebuah extractor core
-        // memanggil callback dari dispatcher thread berbeda. Pada jalur sukses,
-        // satu-satunya overhead tambahan adalah satu operasi set() ini.
-        val linkFound = AtomicBoolean(false)
-        val trackingCallback: (ExtractorLink) -> Unit = { link ->
-            linkFound.set(true)
-            callback(link)
-        }
-
         val document = getPageOrThrow(data)
         val tPage = System.currentTimeMillis()
         Log.i("OppaDrama", "TIMING loadLinks tahap=ambilHalaman ${tPage - tLoadLinks0}ms url=$data")
@@ -668,15 +634,13 @@ class OppaDramaProvider : MainAPI() {
         if (isMovie && parentVersionLinks.isNotEmpty() && !hasPlayer) {
             // Halaman ini parent (punya eplister, ga punya player) — harus masuk
             // ke setiap halaman versi
-            val attemptedEmbeds = mutableListOf<String>()
             for (anchor in parentVersionLinks) {
                 val href = fixUrlNull(anchor.attr("href")) ?: continue
                 val tSub0 = System.currentTimeMillis()
                 val subDocument = getPageOrThrow(href)
                 Log.i("OppaDrama", "TIMING loadLinks tahap=halamanVersi ${System.currentTimeMillis() - tSub0}ms url=$href")
-                attemptedEmbeds += parseEmbeds(subDocument, href, subtitleCallback, trackingCallback)
+                parseEmbeds(subDocument, href, subtitleCallback, callback)
             }
-            runWebViewFallbackIfNeeded(linkFound, attemptedEmbeds, data, trackingCallback)
             return true
         }
 
@@ -686,25 +650,20 @@ class OppaDramaProvider : MainAPI() {
             // Normalnya tidak akan kena path ini karena sudah ditangani di atas.
             val pseudoEpisodes = document.select("div.eplister ul li a")
             if (pseudoEpisodes.isNotEmpty()) {
-                val attemptedEmbeds = mutableListOf<String>()
                 for (anchor in pseudoEpisodes) {
                     val href = anchor.attr("href")
                     if (!href.isNullOrBlank()) {
                         val tSub0 = System.currentTimeMillis()
                         val subDocument = getPageOrThrow(href)
                         Log.i("OppaDrama", "TIMING loadLinks tahap=halamanVersi ${System.currentTimeMillis() - tSub0}ms url=$href")
-                        attemptedEmbeds += parseEmbeds(subDocument, href, subtitleCallback, trackingCallback)
+                        parseEmbeds(subDocument, href, subtitleCallback, callback)
                     }
                 }
-                // Fallback dievaluasi SETELAH seluruh sub-halaman selesai diproses.
-                runWebViewFallbackIfNeeded(linkFound, attemptedEmbeds, data, trackingCallback)
                 return true
             }
         }
 
-        val attemptedEmbeds = parseEmbeds(document, data, subtitleCallback, trackingCallback)
-        // Fallback dievaluasi SETELAH iframe utama + semua mirror + dlbox selesai.
-        runWebViewFallbackIfNeeded(linkFound, attemptedEmbeds, data, trackingCallback)
+        parseEmbeds(document, data, subtitleCallback, callback)
         return true
     }
 
@@ -758,7 +717,6 @@ class OppaDramaProvider : MainAPI() {
     }
 
     companion object {
-        /** Batas percobaan sniffing WebView per pemanggilan loadLinks. */
-        private const val MAX_WEBVIEW_ATTEMPTS = 2
+        // Tidak ada konstanta — WebView fallback sudah dihapus.
     }
 }
