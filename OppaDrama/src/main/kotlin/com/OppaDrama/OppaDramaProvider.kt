@@ -395,6 +395,38 @@ class OppaDramaProvider : MainAPI() {
         return attempted
     }
 
+
+    /* ── Deteksi halaman tantangan anti-bot ──────────────────────────────────
+     *
+     * Diverifikasi langsung terhadap server pada 26 Jul 2026: request tanpa
+     * cookie `user_is_human=true` TIDAK menerima 403 maupun redirect, melainkan
+     * HTTP 200 berisi halaman interstisial "Verifying your browser...".
+     *
+     * Itu bentuk kegagalan paling berbahaya bagi parser ini: statusnya sukses,
+     * Jsoup mengurainya tanpa keluhan, tetapi seluruh selector (player-embed,
+     * select.mirror, dlbox) menghasilkan nol elemen. Gejalanya di layar identik
+     * dengan "situs tidak punya sumber" padahal sebenarnya kita ditolak.
+     *
+     * Guard ini mengubah kegagalan senyap menjadi pesan yang jelas.
+     */
+    private fun Document.isAntiBotChallenge(): Boolean {
+        val body = this.body()?.text()?.lowercase() ?: return false
+        if (body.length > 2000) return false   // halaman asli jauh lebih panjang
+        return body.contains("verifying your browser") ||
+                body.contains("checking your browser") ||
+                body.contains("check your connection")
+    }
+
+    /** Ambil halaman + hentikan lebih awal bila yang datang halaman tantangan. */
+    private suspend fun getPageOrThrow(url: String): Document {
+        val document = app.get(url, headers = desktopBypassHeaders).document
+        if (document.isAntiBotChallenge()) {
+            Log.e("OppaDrama", "Diblokir anti-bot (cookie user_is_human tidak lagi diterima): $url")
+            throw ErrorLoadingException("Situs menolak permintaan (halaman verifikasi browser). Mekanisme bypass perlu diperbarui.")
+        }
+        return document
+    }
+
     /**
      * LAST RESORT: dijalankan HANYA bila seluruh pipeline HTTP selesai tanpa
      * satu pun ExtractorLink. Kandidat diurutkan non-Abyss lebih dulu (host
@@ -441,7 +473,7 @@ class OppaDramaProvider : MainAPI() {
             callback(link)
         }
 
-        val document = app.get(data, headers = desktopBypassHeaders).document
+        val document = getPageOrThrow(data)
 
         var isMovie = data.contains("/movie-")
         for (span in document.select("div.spe span")) {
@@ -460,7 +492,7 @@ class OppaDramaProvider : MainAPI() {
                 for (anchor in pseudoEpisodes) {
                     val href = anchor.attr("href")
                     if (!href.isNullOrBlank()) {
-                        val subDocument = app.get(href, headers = desktopBypassHeaders).document
+                        val subDocument = getPageOrThrow(href)
                         attemptedEmbeds += parseEmbeds(subDocument, href, subtitleCallback, trackingCallback)
                     }
                 }
