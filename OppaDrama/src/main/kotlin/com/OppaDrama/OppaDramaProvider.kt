@@ -93,7 +93,14 @@ class OppaDramaProvider : MainAPI() {
         }
     }
 
+    /* [TIMING] Jejak akhir pemanggilan getMainPage sebelumnya. Dipakai untuk
+     * mengukur JEDA antar kategori — inilah yang memperlihatkan biaya
+     * sequentialMainPageDelay secara langsung. Hapus bersama blok TIMING. */
+    private val lastMainPageFinish = java.util.concurrent.atomic.AtomicLong(0L)
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        val t0 = System.currentTimeMillis()
+
         // Penanganan paginasi struktur tautan dinamis arsip kategori WordPress
         val targetUrl = if (page > 1) {
             request.data.replace("/series/?", "/series/page/$page/?")
@@ -101,11 +108,24 @@ class OppaDramaProvider : MainAPI() {
             request.data
         }
 
-        // Idiomatik NiceHttp: .document langsung, tanpa Jsoup.parse manual
-        val document = app.get(targetUrl, headers = desktopBypassHeaders).document
+        // [TIMING] .document dipecah jadi tiga tahap supaya jaringan, pembacaan
+        // body, dan parsing Jsoup bisa diukur terpisah. Hasil akhirnya identik
+        // dengan .document — hanya visibilitasnya yang bertambah.
+        val response = app.get(targetUrl, headers = desktopBypassHeaders)
+        val tConnect = System.currentTimeMillis()
+
+        val html = response.text
+        val tBody = System.currentTimeMillis()
+
+        val document = Jsoup.parse(html)
+        val tParse = System.currentTimeMillis()
+
         val forceMovie = request.data.contains("type=Movie")
-        var items = document.select("article.bs")
-            .mapNotNull { it.toCardSearchResponse(forceMovie) }
+        val selected = document.select("article.bs")
+        val tSelect = System.currentTimeMillis()
+
+        var items = selected.mapNotNull { it.toCardSearchResponse(forceMovie) }
+        val tMap = System.currentTimeMillis()
 
         // Fallback: sebagian konfigurasi WordPress menolak pola /series/page/N/
         // dan hanya menerima query "&paged=N". Coba pola kedua bila kosong.
@@ -119,7 +139,25 @@ class OppaDramaProvider : MainAPI() {
             Log.d("OppaDrama", "mainPage p=$page url=$targetUrl items=${items.size}")
         }
 
-        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+        val out = newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+        val tBuild = System.currentTimeMillis()
+
+        // [TIMING] Jeda sejak kategori sebelumnya selesai. Nilai ~1500 ms berarti
+        // waktu itu dihabiskan menunggu, bukan bekerja.
+        val prev = lastMainPageFinish.getAndSet(tBuild)
+        val gap = if (prev == 0L) -1L else t0 - prev
+
+        Log.i(
+            "OppaDrama",
+            "TIMING [${request.name}] p=$page " +
+                    "gap=${gap}ms | http=${tConnect - t0} body=${tBody - tConnect} " +
+                    "jsoup=${tParse - tBody} select=${tSelect - tParse} map=${tMap - tSelect} " +
+                    "build=${tBuild - tMap} | TOTAL=${tBuild - t0}ms | " +
+                    "code=${response.code} htmlLen=${html.length} nodes=${selected.size} " +
+                    "items=${items.size} | thread=${Thread.currentThread().name}"
+        )
+
+        return out
     }
 
     override suspend fun search(query: String): List<SearchResponse>? {
