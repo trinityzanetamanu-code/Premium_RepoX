@@ -5,7 +5,6 @@ import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.base64DecodeArray
-import com.lagradost.cloudstream3.extractors.VidHidePro
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -19,98 +18,7 @@ import java.net.URI
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * 1. EarnVids / Smoothpre Extractor
- * Alias backend extractor: smoothpre.com menggunakan arsitektur yang sama
- * dengan vidhidepro.com. (Pola alias resmi, sama seperti extractor bawaan core.)
- */
-class Smoothpre : VidHidePro() {
-    override var name = "EarnVids"
-    override var mainUrl = "https://smoothpre.com"
-}
-
-/**
- * 2. BuzzServer Extractor (Local Plugin Overrider)
- * Memperbaiki kegagalan pembacaan hx-redirect statis huruf kecil pada core HubCloud.kt
- * dengan menerapkan metode multi-headers fallback (hx-redirect, HX-Redirect, location, Location).
- */
-class BuzzServer : ExtractorApi() {
-    override val name = "BuzzServer"
-    override val mainUrl = "https://buzzheavier.com"
-    override val requiresReferer = true
-
-    override suspend fun getUrl(
-        url: String,
-        referer: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-    ) {
-        try {
-            // Bersihkan URL dari silsilah parameter /download ganda jika terlempar dari core
-            val cleanUrl = if (url.endsWith("/download")) url.substringBeforeLast("/download") else url
-
-            val page = app.get(cleanUrl)
-            val qualityText = page.documentLarge.selectFirst("div.max-w-2xl > span")?.text()
-            val quality = getQualityFromName(qualityText)
-
-            // Ambil respons headers dengan mematikan auto-redirect
-            val response = app.get(
-                "$cleanUrl/download",
-                referer = cleanUrl,
-                allowRedirects = false,
-            )
-
-            // MULTI-HEADERS OVERRIDE: tangkap seluruh variasi nama header dari htmx engine.
-            // hx-redirect diprioritaskan karena itulah header yang benar; location
-            // hanya dipakai sebagai cadangan terakhir.
-            val rawRedirect = response.headers["hx-redirect"]
-                ?: response.headers["HX-Redirect"]
-                ?: response.headers["location"]
-                ?: response.headers["Location"]
-
-            // Endpoint /download kadang memantulkan Location kembali ke halaman
-            // asalnya. Nilai seperti itu bukan tautan media dan harus dibuang,
-            // kalau tidak player menerima HTML dan gagal diam-diam.
-            val redirectUrl = rawRedirect
-                ?.trim()
-                ?.let { if (it.startsWith("/")) "$mainUrl$it" else it }
-                ?.takeIf { candidate ->
-                    val a = candidate.trimEnd('/').substringBefore('?')
-                    val b = cleanUrl.trimEnd('/').substringBefore('?')
-                    !a.equals(b, ignoreCase = true) &&
-                            !a.equals("$b/download", ignoreCase = true)
-                }
-
-            if (rawRedirect != null && redirectUrl == null) {
-                Log.w("BuzzServer", "Redirect memantul ke halaman asal, diabaikan: $rawRedirect")
-            }
-
-            if (!redirectUrl.isNullOrBlank()) {
-                callback.invoke(
-                    // Tanpa parameter `type` => INFER_TYPE: tipe media otomatis
-                    // disimpulkan dari URL (fallback ke VIDEO bila tak dikenali).
-                    newExtractorLink(
-                        source = name,
-                        name = name, // konsisten dgn source (saran maintainer core)
-                        url = redirectUrl,
-                    ) {
-                        this.quality = quality
-                        this.referer = "$mainUrl/"
-                    }
-                )
-            } else {
-                Log.w("BuzzServer", "Bypass Failed: No valid redirect token found in response headers.")
-            }
-        } catch (e: Exception) {
-            // WAJIB: jangan menelan CancellationException agar mekanisme
-            // timeout coroutine core tetap berfungsi (sesuai pola loadExtractor).
-            if (e is CancellationException) throw e
-            Log.e("BuzzServer", "Ekstraksi gagal: ${e.message}")
-        }
-    }
-}
-
-/**
- * 3. Emturbovid Extractor
+ * 1. Emturbovid Extractor (TurboVIP)
  * Ekstraksi varian kualitas HLS kini didelegasikan ke M3u8Helper.generateM3u8 —
  * mekanisme standar core untuk mengurai master playlist (menggantikan parsing
  * manual baris #EXT-X-STREAM-INF yang rapuh terhadap edge case URL relatif).
@@ -380,13 +288,12 @@ open class AbyssExtractor : ExtractorApi() {
 }
 
 /**
- * 4b. Alias domain mirror Abyss (abyssplayer.com).
- * Pola alias standar (sama seperti Smoothpre) menggantikan fallback instansiasi
- * manual di provider — loadExtractor() akan mencocokkannya secara otomatis.
+ * 4b. (Dihapus) Alias domain mirror Abyss (abyssplayer.com).
+ * Tidak lagi didaftarkan — keluarga host Abyss di-handle via routing eksplisit
+ * di `OppaDramaProvider.dispatchEmbed()` yang langsung instantiate
+ * `AbyssExtractor()`. Plugin ini hanya daftarkan 3 server valid sesuai
+ * hasil debug: TurboVIP, Hydrax, FileLions.
  */
-class AbyssPlayer : AbyssExtractor() {
-    override val mainUrl = "https://abyssplayer.com"
-}
 
 /**
  * 5. Minochinos / VidHide Obfuscated Extractor
