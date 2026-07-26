@@ -333,7 +333,39 @@ class OppaDramaProvider : MainAPI() {
             .map { it.text().trim() }.filter { it.isNotBlank() }
         val trailerUrl = document.select("div.bixbox.trailer iframe").first()?.attr("src")
 
-        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+        // [FIX v2 — debug structure] Resolve dataUrl ke halaman VERSI (kalau ada
+        // eplister dengan multiple li), BUKAN halaman parent yang lagi dibuka.
+        //
+        // Struktur asli OppaDrama (diverifikasi 27 Jul 2026):
+        //   PARENT URL  : /{name}-{year}/                  → ada eplister, NO player
+        //   VERSION URL : /movie-{name}-{year}-{ver}/      → ada player-embed + mirror
+        //
+        // Halaman parent TIDAK punya player-embed atau select.mirror. Server
+        // streaming (TurboVIP/Hydrax/FileLions) HANYA ada di halaman versi.
+        // Kalau dataUrl = parent URL, loadLinks() akan navigate ke parent (yang
+        // ga punya player) → nol embed.
+        //
+        // Strategi: kalau ada eplister dengan 1+ li, ambil URL versi dengan
+        // data-index terkecil (= versi pertama dipublikasi, biasanya WEBDL atau
+        // BluRay — yang paling lengkap). Fallback ke url kalau eplister kosong
+        // (= single-version URL yang langsung ke halaman versi).
+        val versionAnchors = document.select("div.eplister ul li a")
+        val resolvedDataUrl = if (versionAnchors.isNotEmpty()) {
+            val firstVersion = versionAnchors
+                .minByOrNull { it.attr("data-index").toIntOrNull() ?: Int.MAX_VALUE }
+                ?.attr("href")
+            val resolved = fixUrlNull(firstVersion) ?: url
+            Log.i(
+                "OppaDrama",
+                "MOVIE multi-version detected (${versionAnchors.size} versi). " +
+                        "dataUrl parent='$url' → versi='$resolved'"
+            )
+            resolved
+        } else {
+            url
+        }
+
+        return newMovieLoadResponse(title, url, TvType.Movie, resolvedDataUrl) {
             this.posterUrl = poster
             this.year = info.year
             this.plot = info.plot
@@ -625,7 +657,33 @@ class OppaDramaProvider : MainAPI() {
             }
         }
 
+        // [FIX v2] Deteksi dini: kalau data URL adalah parent movie (eplister ada
+        // tapi player TIDAK ada), navigate ke halaman versi dulu. Ini terjadi
+        // kalau clone site override dataUrl, atau edge case lain yang lolos dari
+        // loadMovie() resolution.
+        val parentVersionLinks = document.select("div.eplister ul li a")
+        val hasPlayer = document.select("div.player-embed").any() ||
+                document.select("select.mirror option[value]:not([disabled])").any()
+
+        if (isMovie && parentVersionLinks.isNotEmpty() && !hasPlayer) {
+            // Halaman ini parent (punya eplister, ga punya player) — harus masuk
+            // ke setiap halaman versi
+            val attemptedEmbeds = mutableListOf<String>()
+            for (anchor in parentVersionLinks) {
+                val href = fixUrlNull(anchor.attr("href")) ?: continue
+                val tSub0 = System.currentTimeMillis()
+                val subDocument = getPageOrThrow(href)
+                Log.i("OppaDrama", "TIMING loadLinks tahap=halamanVersi ${System.currentTimeMillis() - tSub0}ms url=$href")
+                attemptedEmbeds += parseEmbeds(subDocument, href, subtitleCallback, trackingCallback)
+            }
+            runWebViewFallbackIfNeeded(linkFound, attemptedEmbeds, data, trackingCallback)
+            return true
+        }
+
         if (isMovie) {
+            // [BACKWARD-COMPAT] Logic lama: kalau URL contain "/movie-" dan ada
+            // eplister (kasus edge: halaman versi dengan pseudo-list), iterate.
+            // Normalnya tidak akan kena path ini karena sudah ditangani di atas.
             val pseudoEpisodes = document.select("div.eplister ul li a")
             if (pseudoEpisodes.isNotEmpty()) {
                 val attemptedEmbeds = mutableListOf<String>()
