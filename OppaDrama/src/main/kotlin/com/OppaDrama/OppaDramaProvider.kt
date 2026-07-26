@@ -98,6 +98,42 @@ class OppaDramaProvider : MainAPI() {
      * sequentialMainPageDelay secara langsung. Hapus bersama blok TIMING. */
     private val lastMainPageFinish = java.util.concurrent.atomic.AtomicLong(0L)
 
+    /* ── CACHE HALAMAN UTAMA ─────────────────────────────────────────────────
+     *
+     * DASAR BUKTI (logcat 26 Jul 10:35–10:45, terukur, bukan dugaan):
+     *   batch 1: 10:35:23 -> 10:35:55  = 12 kategori  (pid 2904)
+     *   batch 2: 10:38:49 -> 10:39:26  = 13 kategori  (pid 2904)
+     *   batch 3: 10:42:09 -> 10:42:45  = 11 kategori  (pid 7812)
+     *   batch 4: 10:44:43 -> 10:45:39  = 18 kategori  (pid 7812)
+     *   TOTAL 54 pemanggilan untuk 18 kategori unik, SEMUANYA p=1.
+     *
+     * Pemicunya terekam jelas:
+     *   10:35:55  mainPage kategori ke-12
+     *   10:35:57  VRI[MainActivity] WindowStopped        <- aplikasi ke background
+     *   10:38:29  handleAppVisibility visible = true     <- kembali
+     *   10:38:49  mainPage p=1 kategori ke-1             <- MULAI ULANG DARI NOL
+     *
+     * Jadi pemuatan homepage TIDAK bisa dilanjutkan. Setiap interupsi dalam
+     * jendela 53 detik membuang seluruh progres. Layar mati sebentar saja sudah
+     * cukup. Itulah kenapa terasa jauh lebih lambat daripada browser, bukan
+     * semata-mata karena jedanya.
+     *
+     * Cache ini TIDAK mengubah perilaku apa pun: hasil yang dikembalikan
+     * identik dengan hasil parsing, hanya diambil dari memori bila URL yang
+     * sama diminta lagi dalam TTL. Efeknya justru MENGURANGI request ke server,
+     * jadi aman terhadap bypass anti-bot.
+     *
+     * Cache hidup di memori proses. Batch 3 di atas memakai pid berbeda —
+     * aplikasi sempat dimatikan sistem — dan kasus seperti itu memang tidak
+     * tertolong. Tiga dari empat pengulangan terjadi dalam proses yang sama.
+     */
+    private data class CachedPage(val items: List<SearchResponse>, val at: Long)
+
+    private val mainPageCache = java.util.concurrent.ConcurrentHashMap<String, CachedPage>()
+
+    /** Konservatif: konten katalog tidak berubah secepat ini. */
+    private val mainPageCacheTtlMs = 10 * 60 * 1000L
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val t0 = System.currentTimeMillis()
 
@@ -106,6 +142,21 @@ class OppaDramaProvider : MainAPI() {
             request.data.replace("/series/?", "/series/page/$page/?")
         } else {
             request.data
+        }
+
+        // Cache hanya untuk halaman 1. Paginasi scroll selalu diambil segar.
+        if (page == 1) {
+            val cached = mainPageCache[targetUrl]
+            if (cached != null && System.currentTimeMillis() - cached.at < mainPageCacheTtlMs) {
+                val umur = (System.currentTimeMillis() - cached.at) / 1000
+                Log.i(
+                    "OppaDrama",
+                    "TIMING [${request.name}] p=1 CACHE HIT umur=${umur}s items=${cached.items.size} " +
+                            "| TOTAL=${System.currentTimeMillis() - t0}ms"
+                )
+                lastMainPageFinish.set(System.currentTimeMillis())
+                return newHomePageResponse(request.name, cached.items, hasNext = cached.items.isNotEmpty())
+            }
         }
 
         // [TIMING] .document dipecah jadi tiga tahap supaya jaringan, pembacaan
@@ -137,6 +188,10 @@ class OppaDramaProvider : MainAPI() {
             Log.d("OppaDrama", "mainPage p=$page fallback=$altUrl items=${items.size}")
         } else {
             Log.d("OppaDrama", "mainPage p=$page url=$targetUrl items=${items.size}")
+        }
+
+        if (page == 1 && items.isNotEmpty()) {
+            mainPageCache[targetUrl] = CachedPage(items, System.currentTimeMillis())
         }
 
         val out = newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
