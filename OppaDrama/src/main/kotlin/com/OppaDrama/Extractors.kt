@@ -258,9 +258,14 @@ open class AbyssExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
     ) {
         try {
+            // [FIX] Pakai mainUrl extractor (portable) sebagai fallback referer,
+            // bukan IP provider yang hardcoded. Penting agar plugin tetap
+            // berfungsi ketika provider di-clone atau mirror domain dipakai.
+            val fallbackReferer = "$mainUrl/"
+
             val headers = mapOf(
                 "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-                "Referer" to (referer ?: "http://45.11.57.192/"),
+                "Referer" to (referer ?: fallbackReferer),
                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             )
 
@@ -499,15 +504,35 @@ object WebViewFallback {
         return try {
             Log.i(TAG, "Fallback WebView aktif untuk: $embedUrl")
 
-            val resolver = WebViewResolver(
-                interceptUrl = mediaUrlPattern,
-                additionalUrls = emptyList(),
-                userAgent = null,       // JANGAN override UA: bisa merusak bypass Cloudflare (catatan core)
-                useOkhttp = false,      // false = seluruh request lewat engine WebView (aman utk Cloudflare)
-                script = null,
-                scriptCallback = null,
-                timeout = SNIFF_TIMEOUT_MS
-            )
+            // [FIX #3] WebViewResolver adalah INTERNAL API CloudStream
+            // (com.lagradost.cloudstream3.network.WebViewResolver). Class ini
+            // bisa hilang/berubah nama/berubah package sewaktu-waktu tanpa
+            // deprecation notice. Tangani NoClassDefFoundError/ClassNotFoundException
+            // secara eksplisit agar plugin TIDAK crash saat runtime ketika
+            // class internal ini tidak ditemukan di classpath, dan tetap
+            // gagal secara graceful (return false → fallback tidak berlaku,
+            // bukan throw ke user).
+            val resolver = try {
+                WebViewResolver(
+                    interceptUrl = mediaUrlPattern,
+                    additionalUrls = emptyList(),
+                    userAgent = null,       // JANGAN override UA: bisa merusak bypass Cloudflare (catatan core)
+                    useOkhttp = false,      // false = seluruh request lewat engine WebView (aman utk Cloudflare)
+                    script = null,
+                    scriptCallback = null,
+                    timeout = SNIFF_TIMEOUT_MS
+                )
+            } catch (e: NoClassDefFoundError) {
+                Log.w(TAG, "WebViewResolver tidak tersedia — internal API CloudStream kemungkinan dihapus/berubah. Plugin perlu di-update untuk nonaktifkan fallback ini.")
+                return false
+            } catch (e: ClassNotFoundException) {
+                Log.w(TAG, "WebViewResolver class not found di classpath plugin: ${e.message}")
+                return false
+            } catch (e: LinkageError) {
+                // LinkageError = class ditemukan tapi dependensinya hilang/berubah
+                Log.w(TAG, "WebViewResolver LinkageError (dependency class berubah): ${e.message}")
+                return false
+            }
 
             val (mediaRequest, _) = resolver.resolveUsingWebView(
                 url = embedUrl,
@@ -549,10 +574,16 @@ object WebViewFallback {
 
             Log.i(TAG, "Sniffing berhasil: $mediaUrl")
             true
-        } catch (e: Exception) {
-            // WAJIB: jangan menelan CancellationException (mekanisme timeout core).
-            if (e is CancellationException) throw e
-            Log.e(TAG, "Fallback WebView gagal: ${e.message}")
+        } catch (e: CancellationException) {
+            // WAJIB: teruskan agar mekanisme timeout coroutine core tetap berfungsi.
+            // catch spesifik di atas Exception karena CancellationException extends Exception
+            throw e
+        } catch (e: Throwable) {
+            // [FIX #3] catch Throwable (bukan Exception) untuk handle Error lain
+            // yang mungkin muncul dari WebView internal (NoClassDefFoundError
+            // dependencies, OutOfMemoryError, dsb). TETAP rethrow CancellationException
+            // via catch di atas SEBELUM catch-all ini.
+            Log.e(TAG, "Fallback WebView error: ${e.javaClass.simpleName}: ${e.message}")
             false
         }
     }
