@@ -330,21 +330,88 @@ class MinochinosExtractor : ExtractorApi() {
                     .find(unpackedHtml)?.groupValues?.getOrNull(1)
 
             if (!streamUrl.isNullOrBlank()) {
+                val isM3u8 = streamUrl.contains(".m3u8")
+
+                // Kualitas DIUKUR, bukan ditebak.
+                //
+                // Sebelumnya nilainya dipatok Qualities.Unknown (400), sehingga
+                // sumber ini selalu terlempar ke dasar daftar — padahal sortUrls()
+                // di core mengurutkan murni berdasarkan `-quality`, dan entri
+                // Emturbovid yang berlabel 1080p/720p/480p otomatis naik ke atas
+                // meski sebagiannya gagal diputar.
+                //
+                // Segmen ",l,n,h," pada URL urlset hanya menandakan tiga rendition
+                // (low/normal/high) — itu label RELATIF, bukan resolusi. Satu-satunya
+                // cara jujur mendapat angkanya adalah membaca master playlist.
+                val quality = if (isM3u8) {
+                    probeMaxResolution(streamUrl, headers)
+                } else {
+                    Qualities.Unknown.value
+                }
+
                 callback.invoke(
                     newExtractorLink(
                         source = name,
                         name = name,
                         url = streamUrl,
-                        type = if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
+                        this.quality = quality
                     }
                 )
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Log.e("Minochinos", "Ekstraksi gagal: ${e.message}")
+        }
+    }
+
+    /**
+     * Membaca master playlist sekali, lalu mengembalikan resolusi TERTINGGI
+     * yang benar-benar tercantum di dalamnya.
+     *
+     * Link tetap satu buah dan tetap adaptif — ExoPlayer yang memilih rendition
+     * saat pemutaran. Yang berubah hanya nilai `quality`, supaya posisinya di
+     * daftar sumber mencerminkan kualitas maksimum yang sungguh tersedia.
+     * Memecah master jadi satu entri per rendition sengaja TIDAK dilakukan
+     * karena itu justru memperpanjang daftar.
+     *
+     * Gagal apa pun -> kembali ke Qualities.Unknown, yaitu perilaku lama.
+     * Jadi perubahan ini tidak pernah lebih buruk dari sebelumnya.
+     */
+    private suspend fun probeMaxResolution(
+        masterUrl: String,
+        headers: Map<String, String>,
+    ): Int {
+        return try {
+            val body = app.get(masterUrl, headers = headers, timeout = 10L).text
+
+            // Master playlist wajib memuat #EXT-X-STREAM-INF. Kalau tidak ada,
+            // yang kita pegang adalah playlist media biasa (rendition tunggal)
+            // dan resolusinya memang tidak tercantum di sana.
+            if (!body.contains("#EXT-X-STREAM-INF")) {
+                Log.i("Minochinos", "Bukan master playlist, kualitas tidak dapat diukur")
+                return Qualities.Unknown.value
+            }
+
+            val heights = Regex("""RESOLUTION=\d+x(\d+)""", RegexOption.IGNORE_CASE)
+                .findAll(body)
+                .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
+                .toList()
+
+            if (heights.isEmpty()) {
+                Log.i("Minochinos", "Master tanpa atribut RESOLUTION, kualitas tidak dapat diukur")
+                return Qualities.Unknown.value
+            }
+
+            val max = heights.max()
+            Log.i("Minochinos", "Resolusi terukur: ${heights.sorted().reversed()} -> pakai ${max}p")
+            max
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.w("Minochinos", "Gagal mengukur resolusi (${e.message}), pakai Unknown")
+            Qualities.Unknown.value
         }
     }
 }
