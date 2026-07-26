@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 /**
  * # OppaDramaPlugin
  *
- * Entry point CloudStream plugin untuk situs OppaDrama.
+ * Entry point CloudStream plugin untuk situs OppaDrama (drama/movie Asia).
  *
  * ## SDK Pattern (CloudStream 3+)
  *
@@ -25,33 +25,26 @@ import com.lagradost.cloudstream3.plugins.Plugin
  *
  * **Provider (1):**
  *   - `OppaDramaProvider` — homepage 18 kategori, search, load series/movie,
- *     loadLinks dengan routing Abyss khusus + WebView fallback
+ *     loadLinks dengan routing Abyss khusus
  *
- * **Extractors (5 terdaftar, 1 opsional):**
- *   - `Smoothpre`         — alias EarnVids, extends core VidHidePro
- *   - `BuzzServer`        — overrider hx-redirect untuk BuzzHeavier
- *   - `EmturbovidExtractor` — M3U8 master playlist via M3u8Helper
- *   - `AbyssExtractor`    — JSON player v2 API untuk abyss.to
- *   - `MinochinosExtractor` — Regex dari JS-obfuscated page
+ * **Extractors (3) — sesuai debug aktual website, hanya server streaming valid:**
+ *   - `EmturbovidExtractor` — M3U8 master playlist via `M3u8Helper` (TurboVIP)
+ *   - `AbyssExtractor`      — JSON player v2 API untuk abyss.to (Hydrax)
+ *   - `MinochinosExtractor` — Regex dari JS-obfuscated page (FileLions)
  *
- *   - `AbyssPlayer` (TIDAK terdaftar, lihat catatan di bawah)
- *
- * **Helper (1, tidak di-register):**
- *   - `WebViewFallback` (object) — last-resort WebView sniffing via
- *     `WebViewResolver` internal core
- *
- * ## Catatan: Mengapa `AbyssPlayer` Tidak Didaftar?
- *
- * `AbyssPlayer` adalah alias `AbyssExtractor` dengan `mainUrl = "abyssplayer.com"`.
- * Tidak didaftarkan karena `OppaDramaProvider.loadLinks` sudah melakukan routing
- * eksplisit untuk semua host keluarga Abyss (`abyssHosts` list), sehingga
- * `abyssplayer.com` di-handle langsung oleh instance `AbyssExtractor()` tanpa
- * melalui registry loader.
- *
- * Konsekuensi: plugin LAIN yang ingin extract URL `abyssplayer.com` via
- * `loadExtractor()` TIDAK akan menemukan match. Tambahkan
- * `registerExtractorAPI(AbyssPlayer())` di sini bila plugin Anda akan
- * didistribusikan untuk ekosistem multi-plugin.
+ * **Catatan penting:**
+ *   - **HANYA 3 server di atas** yang didaftarkan. Server lain yang
+ *     sebelumnya ada (EarnVids/Smoothpre, BuzzServer, AbyssPlayer) sudah
+ *     dihapus dari `Extractors.kt` karena bukan server streaming —
+ *     tautan-tautan itu di `div.dlbox` adalah download-only, bukan
+ *     sumber video playable.
+ *   - Keluarga host Abyss (`abyss.to`, `abyssplayer.com`, dll) di-handle
+ *     via routing eksplisit di `OppaDramaProvider.dispatchEmbed()` yang
+ *     langsung instantiate `AbyssExtractor()`.
+ *   - **TIDAK ADA WEBVIEW**. Plugin ini 100% berbasis HTTP. Tidak ada
+ *     fallback WebView sniffing. Kalau extractor core gagal pada semua
+ *     mirror, plugin menyerah — user harus memilih server lain dari
+ *     dropdown halaman versi.
  *
  * ## Lifecycle Plugin
  *
@@ -61,7 +54,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
  *     └─→ plugin.load(context)
  *           ├─→ registerMainAPI(OppaDramaProvider())
  *           │     └─→ APIHolder.addPluginMapping(api)
- *           └─→ registerExtractorAPI(...) × 5
+ *           └─→ registerExtractorAPI(...) × 3   // TurboVIP, Hydrax, FileLions
  *                 └─→ extractorApis.add(extractor)
  *
  *   [Plugin siap dipakai oleh CloudStream UI]
@@ -69,11 +62,17 @@ import com.lagradost.cloudstream3.plugins.Plugin
  *
  * ## Patch History (lihat /workspace/fixed/CHANGES.md untuk detail)
  *
- *   - **#1** `mainUrl` HTTPS (bukan HTTP) — `OppaDramaProvider.kt`
- *   - **#2** `Jsoup` → `Ksoup` di-revert karena Ksoup belum di-expose di
- *     classpath plugin (lihat CHANGES.md untuk fix lanjutan)
- *   - **#3** `WebViewResolver` safety — `Extractors.kt`
+ *   - **#1** `mainUrl` HTTPS → di-revert ke HTTP (server tidak listen di 443)
+ *   - **#2** `Jsoup` → `Ksoup` di-revert (Ksoup belum di-expose di classpath)
+ *   - **#3** `WebViewResolver` safety → **DIHAPUS** (WebView tidak dipakai lagi)
  *   - **#4** Hardcoded IP referer di `AbyssExtractor` → `$mainUrl/`
+ *   - **#5** Multi-version movie resolution di `loadMovie()`
+ *   - **#6** **WebView fallback dihapus total** — tidak ada `WebViewFallback`
+ *     object, tidak ada `WebViewResolver` import, tidak ada last-resort
+ *     sniffing via WebView. Cleaner & lebih ringan.
+ *   - **#7** **Whitelist 3 server valid** — `Smoothpre`, `BuzzServer`,
+ *     `AbyssPlayer` dihapus dari `Extractors.kt` karena bukan streaming
+ *     (host-nya cuma muncul di `div.dlbox` sebagai download link).
  */
 @CloudstreamPlugin
 class OppaDramaPlugin : Plugin() {
@@ -84,7 +83,6 @@ class OppaDramaPlugin : Plugin() {
      * [context] adalah Android `Context` yang bisa dipakai untuk:
      *   - Akses string resources (`context.getString(R.string.xxx)`)
      *   - Akses SharedPreferences (settings persistence)
-     *   - Setup WebView (untuk plugin yang pakai WebView API)
      *
      * Method ini HARUS melakukan registrasi seluruh MainAPI/ExtractorApi
      * yang ingin dimuat ke CloudStream. Tidak ada auto-discovery di SDK
@@ -97,16 +95,17 @@ class OppaDramaPlugin : Plugin() {
         registerMainAPI(OppaDramaProvider())
 
         // ── Extractors ───────────────────────────────────────────────────
-        // Mendaftarkan extractor untuk host video yang dipakai situs.
+        // Plugin ini HANYA mendaftarkan 3 server streaming valid sesuai
+        // debug aktual website OppaDrama (27 Jul 2026). Server lain yang
+        // muncul di `div.dlbox` adalah download-only, BUKAN streaming.
+        //
+        //   1. TurboVIP   → EmturbovidExtractor (emturbovid.com)
+        //   2. Hydrax     → AbyssExtractor      (abyss.to)
+        //   3. FileLions  → MinochinosExtractor (minochinos.com)
+        //
         // URUTAN TIDAK PENTING untuk fungsionalitas, tapi `extractorApis`
         // diiterasi dari belakang (last-registered diprioritaskan) oleh
         // `loadExtractor()` — lihat implementasi di ExtractorApi.kt.
-        //
-        // Catatan: `AbyssPlayer` TIDAK didaftarkan (lihat header KDoc).
-        //         `WebViewFallback` BUKAN ExtractorApi, jadi tidak perlu
-        //         register — dipakai internal oleh `OppaDramaProvider`.
-        registerExtractorAPI(Smoothpre())
-        registerExtractorAPI(BuzzServer())
         registerExtractorAPI(EmturbovidExtractor())
         registerExtractorAPI(AbyssExtractor())
         registerExtractorAPI(MinochinosExtractor())
