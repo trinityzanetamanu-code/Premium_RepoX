@@ -392,10 +392,25 @@ class OppaDramaProvider : MainAPI() {
             }
         }
 
-        for ((idx, a) in doc.select("div.dlbox li span.e a[href]").withIndex()) {
-            val href = a.attr("href").trim()
-            if (href.isNotBlank()) rawEmbeds.add("DLBOX#$idx" to href)
-        }
+        // div.dlbox SENGAJA TIDAK DIAMBIL.
+        //
+        // Terverifikasi dari HAR (26 Jul 2026, halaman
+        // /movie-project-hail-mary-2026-web-line/): seluruh isi dlbox adalah
+        // tautan UNDUHAN, bukan pemutar streaming.
+        //
+        //   Buzzheavier  -> https://buzzheavier.com/3hxvid3be2pf
+        //   DataNodes    -> https://datanodes.to/fzjo7hpgrf1v
+        //   EarnVids     -> https://vidhidepro.com/d/daqht188fqm4   <- perhatikan /d/
+        //   GD/Telegram  -> https://fpgo.xyz/file/6a004b8b0ed6acff53ed1c12
+        //
+        // Bandingkan dengan server streaming FileLions di select.mirror:
+        //   https://minochinos.com/v/daqht188fqm4                    <- /v/, ID SAMA
+        //
+        // Jadi EarnVids dan FileLions adalah berkas yang sama; hanya jalur
+        // unduh versus jalur tonton. Mengambil dlbox berarti memanggil empat
+        // extractor yang tidak akan pernah menghasilkan stream (terukur ~12
+        // detik terbuang di logcat 10:51), lalu menyodorkan entri rusak ke
+        // daftar sumber. Situs hanya punya TIGA server streaming.
 
         // TAHAP 2 — deduplikasi.
         //
@@ -501,6 +516,7 @@ class OppaDramaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val tLoadLinks0 = System.currentTimeMillis()
         // Penanda keberhasilan pipeline utama. AtomicBoolean dipakai (bukan var
         // Boolean) demi jaminan visibilitas memori bila sebuah extractor core
         // memanggil callback dari dispatcher thread berbeda. Pada jalur sukses,
@@ -512,6 +528,8 @@ class OppaDramaProvider : MainAPI() {
         }
 
         val document = getPageOrThrow(data)
+        val tPage = System.currentTimeMillis()
+        Log.i("OppaDrama", "TIMING loadLinks tahap=ambilHalaman ${tPage - tLoadLinks0}ms url=$data")
 
         var isMovie = data.contains("/movie-")
         for (span in document.select("div.spe span")) {
@@ -530,7 +548,9 @@ class OppaDramaProvider : MainAPI() {
                 for (anchor in pseudoEpisodes) {
                     val href = anchor.attr("href")
                     if (!href.isNullOrBlank()) {
+                        val tSub0 = System.currentTimeMillis()
                         val subDocument = getPageOrThrow(href)
+                        Log.i("OppaDrama", "TIMING loadLinks tahap=halamanVersi ${System.currentTimeMillis() - tSub0}ms url=$href")
                         attemptedEmbeds += parseEmbeds(subDocument, href, subtitleCallback, trackingCallback)
                     }
                 }
