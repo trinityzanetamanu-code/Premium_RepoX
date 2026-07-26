@@ -1,8 +1,8 @@
 package com.OppaDrama
 
-import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
+import com.fleeksoft.ksoup.Ksoup
+import com.fleeksoft.ksoup.nodes.Document
+import com.fleeksoft.ksoup.nodes.Element
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.api.Log
@@ -13,8 +13,12 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 
 class OppaDramaProvider : MainAPI() {
+    // [FIX #1] mainUrl HTTPS — bukan HTTP.
+    // updateUrl() di MainAPI membandingkan protocol; mixed content di WebView
+    // akan diblok. Kalau server memaksa HTTP, gunakan reverse proxy HTTPS
+    // di sisi server daripada hardcode http://.
     override var name = "OPPADRAMA"
-    override var mainUrl = "http://45.11.57.192"
+    override var mainUrl = "https://45.11.57.192"
     override var lang = "id"
     override val hasMainPage = true
     override val hasQuickSearch = true
@@ -160,7 +164,7 @@ class OppaDramaProvider : MainAPI() {
         }
 
         // [TIMING] .document dipecah jadi tiga tahap supaya jaringan, pembacaan
-        // body, dan parsing Jsoup bisa diukur terpisah. Hasil akhirnya identik
+        // body, dan parsing bisa diukur terpisah. Hasil akhirnya identik
         // dengan .document — hanya visibilitasnya yang bertambah.
         val response = app.get(targetUrl, headers = desktopBypassHeaders)
         val tConnect = System.currentTimeMillis()
@@ -168,7 +172,10 @@ class OppaDramaProvider : MainAPI() {
         val html = response.text
         val tBody = System.currentTimeMillis()
 
-        val document = Jsoup.parse(html)
+        // [FIX #2] Pakai Ksoup (parser standar CloudStream), bukan org.jsoup.Jsoup.
+        // Ksoup adalah drop-in replacement yang dipakai loadExtractor() di core.
+        // Jsoup menambah dependency dan non-cross-platform.
+        val document = Ksoup.parse(html)
         val tParse = System.currentTimeMillis()
 
         val forceMovie = request.data.contains("type=Movie")
@@ -436,7 +443,8 @@ class OppaDramaProvider : MainAPI() {
             if (encoded.isBlank() || encoded.equals("Pilih Server Video", ignoreCase = true)) continue
             try {
                 val decoded = base64Decode(encoded.replace("\\s".toRegex(), ""))
-                val mirrorSrc = Jsoup.parse(decoded).select("iframe").first()?.let { el ->
+                // [FIX #2] Pakai Ksoup (drop-in replacement Jsoup yang dipakai core).
+                val mirrorSrc = Ksoup.parse(decoded).select("iframe").first()?.let { el ->
                     el.attr("src").ifBlank { el.attr("data-src") }
                 }
                 if (!mirrorSrc.isNullOrBlank()) rawEmbeds.add("MIRROR#$idx" to mirrorSrc)
