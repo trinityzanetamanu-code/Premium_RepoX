@@ -106,7 +106,7 @@ class OppaDramaProvider : MainAPI() {
         logDebug("load -> Opening URL: $url")
         val doc = app.get(url, headers = headersMap).document
 
-        // 1. Ekstraksi Parent URL dari Breadcrumb (Bebas nth-child, menggunakan penyeleksian logis)
+        // 1. Ekstraksi Parent URL dari Breadcrumb
         val breadcrumbLinks = doc.select(".ts-breadcrumb ol li a, .ts-breadcrumb a, .breadcrumb a")
         val parentUrl = breadcrumbLinks.map { it.attr("href") }.firstOrNull { link ->
             val fixed = fixUrl(link)
@@ -124,19 +124,18 @@ class OppaDramaProvider : MainAPI() {
         val title = doc.selectFirst(".infolimit h2, h1.entry-title, h1[itemprop=name], h1.title")?.text()?.trim() 
             ?: "OPPADRAMA"
 
-        // 3. Poster Utama (Filtering Gambar Logo Header/Icon)
+        // 3. Poster Utama
         val rawPoster = doc.selectFirst(".single-info .thumb img, .megavid .tb img, .poster img")?.let { img ->
             img.attr("data-src").ifEmpty { img.attr("src") }
         }
         val cleanPoster = if (isInvalidImage(rawPoster)) null else rawPoster
 
-        // 4. Sinopsis / Plot (Sangat Spesifik & Bebas Teks SEO)
+        // 4. Sinopsis / Plot
         val plotElement = doc.selectFirst(".single-info .desc.mindes, .desc.mindes, .entry-content .desc, .desc")
-        plotElement?.select(".colap")?.remove() // Hapus tag pelipat jika ada
+        plotElement?.select(".colap")?.remove()
         
         var plot = plotElement?.text()?.trim()
         if (plot != null && (plot.startsWith("Download dan nonton", ignoreCase = true) || plot.startsWith("Tonton streaming", ignoreCase = true))) {
-            // Fallback jika elemen teratas berisi teks SEO
             plot = doc.select(".entry-content p, .desc p")
                 .map { it.text().trim() }
                 .firstOrNull { !it.startsWith("Download dan nonton", ignoreCase = true) && !it.startsWith("Tonton streaming", ignoreCase = true) }
@@ -162,7 +161,6 @@ class OppaDramaProvider : MainAPI() {
         }
 
         return if (isMovie) {
-            // Mengambil seluruh versi rilis film (BluRay, WEBDL, HD, dll.)
             val versionElements = doc.select(".eplister ul li, .bxcl ul li, #chapterlist ul li, .episodelist ul li")
             val movieVersions = if (versionElements.isNotEmpty()) {
                 versionElements.mapNotNull { li ->
@@ -192,7 +190,6 @@ class OppaDramaProvider : MainAPI() {
                 this.addTrailer(trailerUrl)
             }
         } else {
-            // Daftar Episode untuk TV SERIES / DRAMA
             val episodeElements = doc.select(
                 ".eplister ul li, .bxcl ul li, #chapterlist ul li, .episodelist ul li, #singlepisode .episodelist ul li"
             )
@@ -250,32 +247,24 @@ class OppaDramaProvider : MainAPI() {
         val versionList = tryParseJson<List<MovieVersionData>>(data) 
             ?: listOf(MovieVersionData(data, ""))
 
-        // Deduplikasi Kuantitatif Multi-Thread
         val visitedEmbedUrls = ConcurrentHashMap.newKeySet<String>()
         val visitedStreamUrls = ConcurrentHashMap.newKeySet<String>()
         val visitedSubtitleUrls = ConcurrentHashMap.newKeySet<String>()
 
-        // Subtitle Callback Wrapper dengan Deduplikasi
         val safeSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
             if (visitedSubtitleUrls.add(sub.url)) {
                 logDebug("Subtitle emitted: [${sub.lang}] -> ${sub.url}")
                 subtitleCallback(sub)
-            } else {
-                logDebug("Subtitle skipped (Duplicate): ${sub.url}")
             }
         }
 
-        // ExtractorLink Callback Wrapper dengan Deduplikasi
         val safeLinkCallback: (ExtractorLink) -> Unit = { link ->
             if (visitedStreamUrls.add(link.url)) {
                 logDebug("Source emitted: [${link.source}] ${link.name} -> ${link.url}")
                 callback(link)
-            } else {
-                logDebug("Source skipped (Duplicate Stream URL): ${link.url}")
             }
         }
 
-        // Pemrosesan Paralel seluruh Mode Rilis menggunakan Coroutines
         coroutineScope {
             versionList.map { version ->
                 async {
@@ -287,7 +276,6 @@ class OppaDramaProvider : MainAPI() {
                         val res = app.get(pageUrl, headers = headersMap)
                         val doc = res.document
 
-                        // 1. Ekstraksi Dinamis dari Dropdown Mirror (Base64 Encoded)
                         val mirrorOptions = doc.select("select.mirror option, select[name=mirror] option")
                         logDebug("Found ${mirrorOptions.size} mirror option(s) on $pageUrl")
 
@@ -309,37 +297,46 @@ class OppaDramaProvider : MainAPI() {
                                 val iframeElements = iframeDoc.select("iframe[src], IFRAME[SRC]")
 
                                 for (iframe in iframeElements) {
-                                    var rawSrc = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
+                                    val rawSrc = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
                                     if (rawSrc.isNotBlank()) {
-                                        
-                                        // Normalisasi Domain Hydrax (abyssplayer.com -> abyss.to)
-                                        if (rawSrc.contains("abyssplayer.com")) {
-                                            rawSrc = rawSrc.replace("abyssplayer.com", "abyss.to")
-                                        }
-
                                         val fixedUrl = fixUrl(rawSrc)
 
-                                        // Deduplikasi Pre-Extractor (Stase 1)
                                         if (!visitedEmbedUrls.add(fixedUrl)) {
-                                            logDebug("Embed URL skipped (Pre-Extractor Duplicate): $fixedUrl")
                                             continue
                                         }
 
-                                        logDebug("Attempting loadExtractor for: $fixedUrl | Server: $serverName")
+                                        val countBefore = visitedStreamUrls.size
 
-                                        // Normalisasi Path TurboVIP (/t/ -> /v/)
-                                        if (rawSrc.contains("emturbovid.com/t/")) {
-                                            val altUrl = fixedUrl.replace("/t/", "/v/")
-                                            if (loadExtractor(altUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)) {
-                                                continue
-                                            }
-                                        }
-
-                                        val loaded = loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
-                                        if (!loaded && fixedUrl.contains("emturbovid.com")) {
-                                            // Fallback Unpacker Khusus TurboVIP jika Extractor Bawaan Gagal
-                                            logDebug("Calling extractTurboVipDirect fallback for $fixedUrl")
+                                        // 1. Penanganan TurboVIP (emturbovid.com)
+                                        if (fixedUrl.contains("emturbovid.com")) {
+                                            logDebug("Processing TurboVIP via extractTurboVipDirect: $fixedUrl")
                                             extractTurboVipDirect(fixedUrl, pageUrl, serverName, safeLinkCallback)
+                                        } 
+                                        // 2. Penanganan Hydrax (abyssplayer.com / abyss.to)
+                                        else if (fixedUrl.contains("abyss") || fixedUrl.contains("hydrax")) {
+                                            val mediaId = Regex("""(?:v=|\/v\/|\/)([a-zA-Z0-9_-]+)""").find(fixedUrl)?.groupValues?.get(1)
+                                            if (mediaId != null) {
+                                                logDebug("Processing Hydrax with ID: $mediaId")
+                                                loadExtractor("https://abyss.to/v/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                if (visitedStreamUrls.size == countBefore) {
+                                                    loadExtractor("https://abyss.to/?v=$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                }
+                                            }
+                                        } 
+                                        // 3. Penanganan FileLions / VidHide (minochinos.com)
+                                        else if (fixedUrl.contains("minochinos.com") || fixedUrl.contains("vidhide") || fixedUrl.contains("filelions")) {
+                                            val mediaId = Regex("""(?:v\/|\/d\/|\/v=|\/)([a-zA-Z0-9_-]+)""").find(fixedUrl)?.groupValues?.get(1)
+                                            if (mediaId != null) {
+                                                logDebug("Processing FileLions/VidHide with ID: $mediaId")
+                                                // Coba via vidhidepro.com yang terbukti berfungsi
+                                                loadExtractor("https://vidhidepro.com/v/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                if (visitedStreamUrls.size == countBefore) {
+                                                    loadExtractor("https://vidhidepro.com/d/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                }
+                                            }
+                                        } else {
+                                            // General Extractor
+                                            loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
                                         }
                                     }
                                 }
@@ -348,19 +345,21 @@ class OppaDramaProvider : MainAPI() {
                             }
                         }
 
-                        // 2. Fallback: Iframe Default di DOM (#pembed)
-                        val defaultIframes = doc.select(".player-embed iframe, #pembed iframe, .mvelement iframe")
-                        for (iframe in defaultIframes) {
-                            var src = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
-                            if (src.isNotBlank()) {
-                                if (src.contains("abyssplayer.com")) {
-                                    src = src.replace("abyssplayer.com", "abyss.to")
-                                }
-                                val fixedUrl = fixUrl(src)
-
-                                if (visitedEmbedUrls.add(fixedUrl)) {
-                                    logDebug("Attempting loadExtractor for DOM Iframe: $fixedUrl")
-                                    loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                        // Fallback: Iframe Default di DOM (#pembed) jika tidak ada link dari Base64
+                        if (visitedStreamUrls.isEmpty()) {
+                            val defaultIframes = doc.select(".player-embed iframe, #pembed iframe, .mvelement iframe")
+                            for (iframe in defaultIframes) {
+                                val src = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
+                                if (src.isNotBlank()) {
+                                    val fixedUrl = fixUrl(src)
+                                    if (visitedEmbedUrls.add(fixedUrl)) {
+                                        logDebug("Attempting loadExtractor for DOM Iframe: $fixedUrl")
+                                        if (fixedUrl.contains("emturbovid.com")) {
+                                            extractTurboVipDirect(fixedUrl, pageUrl, "TurboVIP", safeLinkCallback)
+                                        } else {
+                                            loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                        }
+                                    }
                                 }
                             }
                         }
