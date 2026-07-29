@@ -1,606 +1,143 @@
 package com.OppaDrama
 
-import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
-import com.lagradost.api.Log
-import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.coroutines.cancellation.CancellationException
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Element
 
 class OppaDramaProvider : MainAPI() {
-    // [FIX #1 — DIREVERT] mainUrl tetap HTTP, bukan HTTPS.
-    //
-    // Alasan revert: server 45.11.57.192 tidak listen di port 443. Plugin
-    // sukses load dan registrasi, TAPI runtime call gagal dengan
-    //   "java.net.ConnectException: Failed to connect to /45.11.57.192:443
-    //    ... ECONNREFUSED (Connection refused)"
-    // artinya port HTTPS di server emang tutup.
-    //
-    // Untuk align ke HTTPS yang proper, diperlukan EITHER:
-    //   1. Akses ke server untuk install reverse proxy (Caddy/nginx + Let's Encrypt)
-    //      yang forward HTTPS:443 -> HTTP:80 ke origin OppaDrama.
-    //      Lalu update mainUrl ke https://<proxy-domain>.
-    //   2. Pakai Cloudflare di depan origin (bisa kasih HTTPS tanpa setup server).
-    //   3. Pakai Clone Site feature CloudStream: user override mainUrl ke mirror
-    //      yang udah HTTPS, default mainUrl tetep HTTP.
-    //
-    // Selama salah satu di atas belum siap, default mainUrl HARUS HTTP
-    // supaya plugin tetap bisa konek ke server.
-    override var name = "OPPADRAMA"
     override var mainUrl = "http://45.11.57.192"
+    override var name = "OPPADRAMA"
     override var lang = "id"
-    override val hasMainPage = true
-    override val hasQuickSearch = true
-    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
+    
+    override val supportedTypes = setOf(
+        TvType.AsianDrama,
+        TvType.TvSeries,
+        TvType.Movie
+    )
 
-    override var sequentialMainPage = true
-    override var sequentialMainPageDelay = 1500L
+    override var hasMainPage = true
+    override var hasQuickSearch = true
 
-    // Injeksi Headers & Cookie hasil sniffing lalu lintas paket data browser desktop
-    private val desktopBypassHeaders = mapOf(
-        "User-Agent" to "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+    // Cookie proteksi anti-bot agar tidak terkena HTTP 503 / response 434-byte
+    private val headersMap = mapOf(
         "Cookie" to "user_is_human=true",
-        "Upgrade-Insecure-Requests" to "1",
-        "Cache-Control" to "max-age=0",
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
+        "User-Agent" to USER_AGENT
     )
 
-    // Adopsi penuh susunan daftar kategori terlengkap dari WordPress Dramastream Engine
+    // Katalog Halaman Utama
     override val mainPage = mainPageOf(
-        "$mainUrl/series/?status=&type=&order=update" to "Latest Update",
-        "$mainUrl/series/?status=Completed&type=Drama&order=update" to "Completed Drama",
-        "$mainUrl/series/?country%5B%5D=china&type=Drama&order=update" to "Drama China",
-        "$mainUrl/series/?country%5B%5D=japan&type=Drama&order=update" to "Drama Jepang",
-        "$mainUrl/series/?country%5B%5D=south-korea&status=&type=Drama&order=update" to "Drama Korea",
-        "$mainUrl/series/?country%5B%5D=philippines&type=Drama&order=update" to "Drama Philippines",
-        "$mainUrl/series/?country%5B%5D=taiwan&type=Drama&order=update" to "Drama Taiwan",
-        "$mainUrl/series/?country%5B%5D=thailand&type=Drama&order=update" to "Drama Thailand",
-        "$mainUrl/series/?country%5B%5D=usa&type=Drama&order=update" to "Drama Western",
-        "$mainUrl/series/?type=Movie&order=update" to "All Movies",
-        "$mainUrl/series/?country%5B%5D=south-korea&status=&type=Movie&order=update" to "Korean Movie",
-        "$mainUrl/series/?country%5B%5D=japan&type=Movie&order=update" to "Japan Movie",
-        "$mainUrl/series/?country%5B%5D=china&type=Movie&order=update" to "Chinese Movie",
-        "$mainUrl/series/?country%5B%5D=thailand&type=Movie&order=update" to "Thailand Movie",
-        "$mainUrl/series/?country%5B%5D=taiwan&type=Movie&order=update" to "Taiwan Movie",
-        "$mainUrl/series/?country%5B%5D=philippines&type=Movie&order=update" to "Philippines Movie",
-        "$mainUrl/series/?country%5B%5D=india&type=Movie&order=update" to "India Movie",
-        "$mainUrl/series/?country%5B%5D=united-states&type=Movie&order=update" to "Western Movie"
+        "$mainUrl/series/?status=Ongoing&type=Drama&order=update" to "Drama Ongoing",
+        "$mainUrl/series/?status=Completed&type=Drama&order=update" to "Drama Completed",
+        "$mainUrl/series/?type=Movie&order=update" to "Film Terbaru",
+        "$mainUrl/series/?type=TV+Show&order=update" to "Variety Show"
     )
 
-    private fun Element.extractPoster(): String? {
-        val img = this.select("img").first() ?: return null
-        val rawUrl = when {
-            img.hasAttr("data-src") -> img.attr("data-src")
-            img.hasAttr("data-lazy-src") -> img.attr("data-lazy-src")
-            img.hasAttr("srcset") -> img.attr("srcset").substringBefore(" ")
-            else -> img.attr("src")
-        }
-        if (rawUrl.isNullOrBlank()) return null
-        return rawUrl.replace(Regex("[?&]resize=\\d+,\\d+"), "")
-            .replace(Regex("[?&]quality=\\d+"), "")
-    }
-
-    private fun cleanTitle(title: String): String =
-        title.replace(Regex("\\s*(?:Episode|Ep|Eps)\\s*\\d+.*$", RegexOption.IGNORE_CASE), "").trim()
-
-    // Parser kartu hasil (dipakai bersama oleh getMainPage & search)
-    private fun Element.toCardSearchResponse(forceMovie: Boolean = false): SearchResponse? {
-        val anchor = this.select("div.bsx a").first()
-        val rawTitle = this.select("h2[itemprop=headline]").first()?.text() ?: anchor?.attr("title")
-        val link = fixUrlNull(anchor?.attr("href")) ?: return null
-        if (rawTitle.isNullOrEmpty()) return null
-
-        val poster = this.extractPoster()
-        val typeStr = this.select(".typez").first()?.text()
-        val title = cleanTitle(rawTitle)
-
-        val isMovie = forceMovie ||
-                typeStr?.contains("Movie", ignoreCase = true) == true ||
-                link.contains("/movie-")
-
-        return if (isMovie) {
-            newMovieSearchResponse(title, link, TvType.Movie) { this.posterUrl = poster }
-        } else {
-            newTvSeriesSearchResponse(title, link, TvType.AsianDrama) { this.posterUrl = poster }
-        }
-    }
-
-    /* [TIMING] Jejak akhir pemanggilan getMainPage sebelumnya. Dipakai untuk
-     * mengukur JEDA antar kategori — inilah yang memperlihatkan biaya
-     * sequentialMainPageDelay secara langsung. Hapus bersama blok TIMING. */
-    private val lastMainPageFinish = java.util.concurrent.atomic.AtomicLong(0L)
-
-    /* ── CACHE HALAMAN UTAMA ─────────────────────────────────────────────────
-     *
-     * DASAR BUKTI (logcat 26 Jul 10:35–10:45, terukur, bukan dugaan):
-     *   batch 1: 10:35:23 -> 10:35:55  = 12 kategori  (pid 2904)
-     *   batch 2: 10:38:49 -> 10:39:26  = 13 kategori  (pid 2904)
-     *   batch 3: 10:42:09 -> 10:42:45  = 11 kategori  (pid 7812)
-     *   batch 4: 10:44:43 -> 10:45:39  = 18 kategori  (pid 7812)
-     *   TOTAL 54 pemanggilan untuk 18 kategori unik, SEMUANYA p=1.
-     *
-     * Pemicunya terekam jelas:
-     *   10:35:55  mainPage kategori ke-12
-     *   10:35:57  VRI[MainActivity] WindowStopped        <- aplikasi ke background
-     *   10:38:29  handleAppVisibility visible = true     <- kembali
-     *   10:38:49  mainPage p=1 kategori ke-1             <- MULAI ULANG DARI NOL
-     *
-     * Jadi pemuatan homepage TIDAK bisa dilanjutkan. Setiap interupsi dalam
-     * jendela 53 detik membuang seluruh progres. Layar mati sebentar saja sudah
-     * cukup. Itulah kenapa terasa jauh lebih lambat daripada browser, bukan
-     * semata-mata karena jedanya.
-     *
-     * Cache ini TIDAK mengubah perilaku apa pun: hasil yang dikembalikan
-     * identik dengan hasil parsing, hanya diambil dari memori bila URL yang
-     * sama diminta lagi dalam TTL. Efeknya justru MENGURANGI request ke server,
-     * jadi aman terhadap bypass anti-bot.
-     *
-     * Cache hidup di memori proses. Batch 3 di atas memakai pid berbeda —
-     * aplikasi sempat dimatikan sistem — dan kasus seperti itu memang tidak
-     * tertolong. Tiga dari empat pengulangan terjadi dalam proses yang sama.
-     */
-    private data class CachedPage(val items: List<SearchResponse>, val at: Long)
-
-    private val mainPageCache = java.util.concurrent.ConcurrentHashMap<String, CachedPage>()
-
-    /** Konservatif: konten katalog tidak berubah secepat ini. */
-    private val mainPageCacheTtlMs = 10 * 60 * 1000L
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        val t0 = System.currentTimeMillis()
-
-        // Penanganan paginasi struktur tautan dinamis arsip kategori WordPress
-        val targetUrl = if (page > 1) {
-            request.data.replace("/series/?", "/series/page/$page/?")
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
+        val url = if (page > 1) {
+            "${request.data}&page=$page"
         } else {
             request.data
         }
 
-        // Cache hanya untuk halaman 1. Paginasi scroll selalu diambil segar.
-        if (page == 1) {
-            val cached = mainPageCache[targetUrl]
-            if (cached != null && System.currentTimeMillis() - cached.at < mainPageCacheTtlMs) {
-                val umur = (System.currentTimeMillis() - cached.at) / 1000
-                Log.i(
-                    "OppaDrama",
-                    "TIMING [${request.name}] p=1 CACHE HIT umur=${umur}s items=${cached.items.size} " +
-                            "| TOTAL=${System.currentTimeMillis() - t0}ms"
-                )
-                lastMainPageFinish.set(System.currentTimeMillis())
-                return newHomePageResponse(request.name, cached.items, hasNext = cached.items.isNotEmpty())
-            }
+        val doc = app.get(url, headers = headersMap).document
+        val items = doc.select(".listupd .bsx, .bs .bsx").mapNotNull { element ->
+            toSearchResponse(element)
         }
 
-        // [TIMING] .document dipecah jadi tiga tahap supaya jaringan, pembacaan
-        // body, dan parsing bisa diukur terpisah. Hasil akhirnya identik
-        // dengan .document — hanya visibilitasnya yang bertambah.
-        val response = app.get(targetUrl, headers = desktopBypassHeaders)
-        val tConnect = System.currentTimeMillis()
-
-        val html = response.text
-        val tBody = System.currentTimeMillis()
-
-        // [FIX #2 — DIREVERT] Pakai Jsoup (yang sudah ada di classpath plugin),
-        // bukan Ksoup. Alasan revert: Ksoup belum di-expose sebagai transitive
-        // dependency di build classpath plugin, sehingga build gagal dengan
-        // "Unresolved reference: Document" di banyak titik.
-        //
-        // Untuk align ke standar Ksoup (sesuai MainAPI.kt versi baru), tambahkan
-        //   implementation 'com.fleeksoft:ksoup:<version>'
-        // ke build.gradle module plugin ini, lalu ganti import + parse() di sini.
-        val document = Jsoup.parse(html)
-        val tParse = System.currentTimeMillis()
-
-        val forceMovie = request.data.contains("type=Movie")
-        val selected = document.select("article.bs")
-        val tSelect = System.currentTimeMillis()
-
-        var items = selected.mapNotNull { it.toCardSearchResponse(forceMovie) }
-        val tMap = System.currentTimeMillis()
-
-        // Fallback: sebagian konfigurasi WordPress menolak pola /series/page/N/
-        // dan hanya menerima query "&paged=N". Coba pola kedua bila kosong.
-        if (items.isEmpty() && page > 1) {
-            val altUrl = "${request.data}&paged=$page"
-            items = app.get(altUrl, headers = desktopBypassHeaders).document
-                .select("article.bs")
-                .mapNotNull { it.toCardSearchResponse(forceMovie) }
-            Log.d("OppaDrama", "mainPage p=$page fallback=$altUrl items=${items.size}")
-        } else {
-            Log.d("OppaDrama", "mainPage p=$page url=$targetUrl items=${items.size}")
-        }
-
-        if (page == 1 && items.isNotEmpty()) {
-            mainPageCache[targetUrl] = CachedPage(items, System.currentTimeMillis())
-        }
-
-        val out = newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
-        val tBuild = System.currentTimeMillis()
-
-        // [TIMING] Jeda sejak kategori sebelumnya selesai. Nilai ~1500 ms berarti
-        // waktu itu dihabiskan menunggu, bukan bekerja.
-        val prev = lastMainPageFinish.getAndSet(tBuild)
-        val gap = if (prev == 0L) -1L else t0 - prev
-
-        Log.i(
-            "OppaDrama",
-            "TIMING [${request.name}] p=$page " +
-                    "gap=${gap}ms | http=${tConnect - t0} body=${tBody - tConnect} " +
-                    "jsoup=${tParse - tBody} select=${tSelect - tParse} map=${tMap - tSelect} " +
-                    "build=${tBuild - tMap} | TOTAL=${tBuild - t0}ms | " +
-                    "code=${response.code} htmlLen=${html.length} nodes=${selected.size} " +
-                    "items=${items.size} | thread=${Thread.currentThread().name}"
-        )
-
-        return out
+        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
-    override suspend fun search(query: String): List<SearchResponse>? {
-        val document = app.get("$mainUrl/?s=$query", headers = desktopBypassHeaders).document
-        return document.select("article.bs").mapNotNull { it.toCardSearchResponse() }
+    override suspend fun search(query: String): List<SearchResponse> {
+        val searchUrl = "$mainUrl/?s=$query"
+        val doc = app.get(searchUrl, headers = headersMap).document
+        
+        return doc.select(".listupd .bsx, .bs .bsx").mapNotNull { element ->
+            toSearchResponse(element)
+        }
     }
 
-    override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
+    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
-    override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url, headers = desktopBypassHeaders).document
+    private fun toSearchResponse(element: Element): SearchResponse? {
+        val title = element.selectFirst(".tt, .title, a[title]")?.text()?.trim()
+            ?: element.selectFirst("a")?.attr("title")?.trim() ?: return null
+        val href = element.selectFirst("a")?.attr("href") ?: return null
+        val poster = element.selectFirst("img")?.let { img ->
+            img.attr("data-src").ifEmpty { img.attr("src") }
+        }
 
-        var isMovie = url.contains("/movie-")
-        for (span in document.select("div.spe span")) {
-            val label = span.select("b").first()?.text()?.lowercase() ?: ""
-            if (label.contains("tipe") || label.contains("type")) {
-                if (span.text().lowercase().contains("movie")) {
-                    isMovie = true
+        return newMovieSearchResponse(title, href, TvType.AsianDrama) {
+            this.posterUrl = poster
+        }
+    }
+
+    override suspend fun load(url: String): LoadResponse {
+        val doc = app.get(url, headers = headersMap).document
+
+        // Mengambil judul utama drama
+        val title = doc.selectFirst("h1.entry-title, .infolimit h2")?.text()?.trim() 
+            ?: doc.selectFirst(".title")?.text()?.trim() 
+            ?: "OPPADRAMA"
+
+        val poster = doc.selectFirst(".thumb img, .single-info .thumb img")?.let { img ->
+            img.attr("data-src").ifEmpty { img.attr("src") }
+        }
+
+        val plot = doc.selectFirst(".desc.mindes, .synopsis")?.text()?.trim()
+        val ratingText = doc.selectFirst(".rating strong")?.text()?.replace("Rating", "")?.trim()
+        val statusText = doc.selectFirst(".spe span:contains(Status)")?.text() ?: ""
+        val genres = doc.select(".genxed a").map { it.text().trim() }
+        val actors = doc.select(".spe span:contains(Artis) a").map { it.text().trim() }
+
+        // Ekstraksi Daftar Episode dari Sidebar / Episode List
+        val episodeElements = doc.select(".episodelist ul li, #singlepisode .episodelist ul li")
+        
+        val episodeList = if (episodeElements.isNotEmpty()) {
+            episodeElements.mapNotNull { li ->
+                val aTag = li.selectFirst("a") ?: return@mapNotNull null
+                val epUrl = aTag.attr("href")
+                val epTitle = li.selectFirst(".playinfo h4")?.text()?.trim() 
+                    ?: aTag.attr("title").ifEmpty { aTag.text() }
+                
+                val epNum = Regex("""(?i)Episode\s+(\d+)""").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
+
+                newEpisode(epUrl) {
+                    this.name = epTitle
+                    this.episode = epNum
                 }
             }
-        }
-
-        // Jika ini halaman episode tunggal, ambil tautan bapak serialnya
-        // lewat indeks Breadcrumb kedua
-        val breadcrumbs = document.select(".ts-breadcrumb ol li a")
-        if (breadcrumbs.size >= 3 && !isMovie) {
-            val parentUrl = fixUrlNull(breadcrumbs[1].attr("href"))
-            if (!parentUrl.isNullOrBlank() && parentUrl != url) {
-                val parentDocument = app.get(parentUrl, headers = desktopBypassHeaders).document
-                return loadSeries(parentUrl, parentDocument)
-            }
-        }
-
-        return if (isMovie) loadMovie(url, document) else loadSeries(url, document)
-    }
-
-    private suspend fun loadSeries(url: String, document: Document): LoadResponse? {
-        val title = document.select("h1.entry-title").first()?.text()?.trim() ?: return null
-        val poster = fixUrlNull(document.select("div.bigcontent img, div.thumb img").first()?.extractPoster())
-        val info = parseInfo(document)
-
-        val episodes = mutableListOf<Episode>()
-        val reversedAnchors = document.select("div.eplister ul li a").toList().reversed()
-
-        for (i in reversedAnchors.indices) {
-            val anchor = reversedAnchors[i]
-            val href = anchor.attr("href")
-            val epNumber = anchor.select("div.epl-num").first()?.text()?.trim()?.toIntOrNull() ?: (i + 1)
-            val epTitle = anchor.select("div.epl-title").first()?.text()?.trim() ?: "Episode $epNumber"
-            val epPoster = fixUrlNull(anchor.select("img").first()?.extractPoster())
-
-            episodes.add(newEpisode(href) {
-                this.name = epTitle
-                this.episode = epNumber
-                this.posterUrl = epPoster
-            })
-        }
-
-        val recommendations = document.select("div.listupd article.bs")
-            .mapNotNull { it.toRecommendation() }
-
-        val tags = document.select("div.genxed a").map { it.text().trim() }.filter { it.isNotBlank() }
-        val actorNames = document.select("div.spe span:has(b:matchesOwn(^Artis\$)) a")
-            .map { it.text().trim() }.filter { it.isNotBlank() }
-        val trailerUrl = document.select("div.bixbox.trailer iframe").first()?.attr("src")
-
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-            this.posterUrl = poster
-            this.year = info.year
-            this.plot = info.plot
-            this.showStatus = info.status
-            this.duration = info.duration
-            this.tags = tags
-            this.recommendations = recommendations
-            info.rating?.let { this.score = Score.from(it, 10) }
-            // Helper standar: menghormati setting isTrailersEnabled milik pengguna
-            addActors(actorNames)
-            addTrailer(trailerUrl)
-        }
-    }
-
-    private suspend fun loadMovie(url: String, document: Document): LoadResponse? {
-        val title = document.select("h1.entry-title").first()?.text()?.trim() ?: return null
-        val poster = fixUrlNull(document.select("div.bigcontent img, div.thumb img").first()?.extractPoster())
-        val info = parseInfo(document)
-
-        val recommendations = document.select("div.listupd article.bs")
-            .mapNotNull { it.toRecommendation() }
-
-        val tags = document.select("div.genxed a").map { it.text().trim() }.filter { it.isNotBlank() }
-        val actorNames = document.select("div.spe span:has(b:matchesOwn(^Artis\$)) a")
-            .map { it.text().trim() }.filter { it.isNotBlank() }
-        val trailerUrl = document.select("div.bixbox.trailer iframe").first()?.attr("src")
-
-        // [FIX v2 — debug structure] Resolve dataUrl ke halaman VERSI (kalau ada
-        // eplister dengan multiple li), BUKAN halaman parent yang lagi dibuka.
-        //
-        // Struktur asli OppaDrama (diverifikasi 27 Jul 2026):
-        //   PARENT URL  : /{name}-{year}/                  → ada eplister, NO player
-        //   VERSION URL : /movie-{name}-{year}-{ver}/      → ada player-embed + mirror
-        //
-        // Halaman parent TIDAK punya player-embed atau select.mirror. Server
-        // streaming (TurboVIP/Hydrax/FileLions) HANYA ada di halaman versi.
-        // Kalau dataUrl = parent URL, loadLinks() akan navigate ke parent (yang
-        // ga punya player) → nol embed.
-        //
-        // Strategi: kalau ada eplister dengan 1+ li, ambil URL versi dengan
-        // data-index terkecil (= versi pertama dipublikasi, biasanya WEBDL atau
-        // BluRay — yang paling lengkap). Fallback ke url kalau eplister kosong
-        // (= single-version URL yang langsung ke halaman versi).
-        val versionAnchors = document.select("div.eplister ul li a")
-        val resolvedDataUrl = if (versionAnchors.isNotEmpty()) {
-            val firstVersion = versionAnchors
-                .minByOrNull { it.attr("data-index").toIntOrNull() ?: Int.MAX_VALUE }
-                ?.attr("href")
-            val resolved = fixUrlNull(firstVersion) ?: url
-            Log.i(
-                "OppaDrama",
-                "MOVIE multi-version detected (${versionAnchors.size} versi). " +
-                        "dataUrl parent='$url' → versi='$resolved'"
+        } else {
+            // Jika Halaman Berupa Single Movie / Episode Langsung
+            listOf(
+                newEpisode(url) {
+                    this.name = title
+                    this.episode = 1
+                }
             )
-            resolved
-        } else {
-            url
         }
 
-        return newMovieLoadResponse(title, url, TvType.Movie, resolvedDataUrl) {
+        return newTvSeriesLoadResponse(
+            name = title,
+            url = url,
+            type = TvType.AsianDrama,
+            episodes = episodeList
+        ) {
             this.posterUrl = poster
-            this.year = info.year
-            this.plot = info.plot
-            this.duration = info.duration
-            this.tags = tags
-            this.recommendations = recommendations
-            info.rating?.let { this.score = Score.from(it, 10) }
-            addActors(actorNames)
-            addTrailer(trailerUrl)
-        }
-    }
-
-    private fun Element.toRecommendation(): SearchResponse? {
-        val anchor = this.select("a").first() ?: return null
-        val href = fixUrlNull(anchor.attr("href")) ?: return null
-        val title = anchor.attr("title")
-            .ifBlank { this.select("div.tt").first()?.text()?.trim() }
-            ?.takeIf { it.isNotBlank() } ?: return null
-        val poster = fixUrlNull(this.select("img").first()?.extractPoster())
-        val looksLikeEpisode = Regex("[-_]episode[-_]?\\d+", RegexOption.IGNORE_CASE).containsMatchIn(href)
-        val type = if (looksLikeEpisode) TvType.TvSeries else TvType.Movie
-
-        return newMovieSearchResponse(cleanTitle(title), href, type) {
-            this.posterUrl = poster
-        }
-    }
-
-    // Domain keluarga Abyss/Hydrax. Extractor core "ByseSX" mencocokkan domain ini
-    // LEBIH DULU (extractor plugin diproses setelah extractor core), lalu gagal
-    // parse API situs ini (MissingFieldException di logcat) tapi pencarian tetap
-    // dianggap selesai. Maka URL keluarga ini di-routing langsung ke AbyssExtractor
-    // sebelum menyentuh loadExtractor.
-    private val abyssHosts = listOf("abyss.to", "abyssplayer.com", "short.icu", "abysscdn.com")
-
-    /** Deteksi host keluarga Abyss dari URL yang sudah di-httpsify. */
-    private fun isAbyssUrl(fixedUrl: String): Boolean {
-        val host = fixedUrl.substringAfter("://").substringBefore("/").substringBefore(":").lowercase()
-        return abyssHosts.any { host == it || host.endsWith(".$it") }
-    }
-
-    /* ── [DIAG] Penghitung link per embed. Hapus bersama baris ber-tag EMBED. ──
-     *
-     * Meneruskan link apa adanya — tidak menyaring, tidak mengubah urutan, tidak
-     * mengubah isi. Satu-satunya efeknya adalah menghitung, sehingga kita bisa
-     * membedakan "extractor tidak pernah dipanggil" dari "extractor dipanggil
-     * tapi tidak menghasilkan apa pun".
-     */
-    private class CountingCallback(
-        private val delegate: (ExtractorLink) -> Unit
-    ) : (ExtractorLink) -> Unit {
-        private val n = AtomicInteger(0)
-        val count: Int get() = n.get()
-        override fun invoke(link: ExtractorLink) {
-            n.incrementAndGet()
-            delegate(link)
-        }
-    }
-
-    /**
-     * Routing satu URL embed ke extractor yang tepat.
-     * @return URL final (ter-httpsify) yang di-dispatch — dipakai loadLinks
-     *         sebagai daftar kandidat untuk fallback WebView.
-     */
-    private suspend fun dispatchEmbed(
-        url: String,
-        referer: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-        asal: String = "?",   // [DIAG] penanda selector asal, mis. "MIRROR#2"
-    ): String {
-        val fixed = httpsify(url)
-        val host = fixed.substringAfter("://").substringBefore("/").substringBefore(":")
-
-        // [DIAG]
-        val counter = CountingCallback(callback)
-        val mulai = System.currentTimeMillis()
-        var jalur: String
-
-        if (isAbyssUrl(fixed)) {
-            jalur = "ABYSS-LANGSUNG"
-            AbyssExtractor().getUrl(fixed, referer, subtitleCallback, counter)
-        } else {
-            val cocok = loadExtractor(fixed, referer, subtitleCallback, counter)
-            jalur = if (cocok) "loadExtractor=COCOK" else "loadExtractor=TIDAK-COCOK"
-        }
-
-        // [DIAG] Baris inilah yang mengungkap embed yang selama ini diam.
-        val durasi = System.currentTimeMillis() - mulai
-        Log.i(
-            "OppaDrama",
-            "EMBED $asal | host=$host | $jalur | ${counter.count} link | ${durasi}ms | $fixed"
-        )
-
-        return fixed
-    }
-
-    /**
-     * Mengurai seluruh sumber embed dari satu dokumen dan men-dispatch-nya.
-     * @return daftar URL embed yang telah dicoba (untuk kandidat fallback).
-     *         Alur dispatch tidak berubah dari implementasi sebelumnya.
-     */
-    private suspend fun parseEmbeds(
-        doc: Document,
-        dataUrl: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): List<String> {
-        // TAHAP 1 — kumpulkan seluruh URL embed lebih dulu, tanpa request apa pun.
-        //
-        // Player default pada halaman ini juga terdaftar sebagai opsi pertama di
-        // dropdown mirror, sehingga embed yang sama sebelumnya diproses dua kali
-        // (terlihat di logcat: 4 link Emturbovid identik muncul dua kali, terpaut
-        // ~2 detik). Mengumpulkan dulu memungkinkan deduplikasi sebelum request.
-        // [DIAG] Pasangan (asal, url) supaya tiap embed bisa dilacak balik ke
-        // selector sumbernya. Kembalikan ke mutableListOf<String>() saat bersih-bersih.
-        val rawEmbeds = mutableListOf<Pair<String, String>>()
-
-        doc.select("div.player-embed iframe").first()?.let { iframe ->
-            val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-            if (src.isNotBlank()) rawEmbeds.add("IFRAME" to src)
-        }
-
-        val mirrors = doc.select("select.mirror option[value]:not([disabled])")
-        for ((idx, option) in mirrors.withIndex()) {
-            val encoded = option.attr("value").trim()
-            if (encoded.isBlank() || encoded.equals("Pilih Server Video", ignoreCase = true)) continue
-            try {
-                val decoded = base64Decode(encoded.replace("\\s".toRegex(), ""))
-                // [FIX #2 — DIREVERT] Lihat catatan di getMainPage. Pakai Jsoup
-                // yang sudah ada di classpath. Align ke Ksoup memerlukan
-                // dependency tambahan di build.gradle.
-                val mirrorSrc = Jsoup.parse(decoded).select("iframe").first()?.let { el ->
-                    el.attr("src").ifBlank { el.attr("data-src") }
-                }
-                if (!mirrorSrc.isNullOrBlank()) rawEmbeds.add("MIRROR#$idx" to mirrorSrc)
-            } catch (e: Exception) {
-                // Jangan menelan CancellationException (mekanisme timeout core)
-                if (e is CancellationException) throw e
-                Log.e("OppaDrama", "Mirror decode gagal: ${e.message}")
+            this.plot = plot
+            this.score = Score.from10(ratingText)
+            this.showStatus = if (statusText.contains("Ongoing", ignoreCase = true)) {
+                ShowStatus.Ongoing
+            } else {
+                ShowStatus.Completed
             }
+            this.tags = genres
+            this.addActors(actors)
         }
-
-        // div.dlbox SENGAJA TIDAK DIAMBIL.
-        //
-        // Terverifikasi dari HAR (26 Jul 2026, halaman
-        // /movie-project-hail-mary-2026-web-line/): seluruh isi dlbox adalah
-        // tautan UNDUHAN, bukan pemutar streaming.
-        //
-        //   Buzzheavier  -> https://buzzheavier.com/3hxvid3be2pf
-        //   DataNodes    -> https://datanodes.to/fzjo7hpgrf1v
-        //   EarnVids     -> https://vidhidepro.com/d/daqht188fqm4   <- perhatikan /d/
-        //   GD/Telegram  -> https://fpgo.xyz/file/6a004b8b0ed6acff53ed1c12
-        //
-        // Bandingkan dengan server streaming FileLions di select.mirror:
-        //   https://minochinos.com/v/daqht188fqm4                    <- /v/, ID SAMA
-        //
-        // Jadi EarnVids dan FileLions adalah berkas yang sama; hanya jalur
-        // unduh versus jalur tonton. Mengambil dlbox berarti memanggil empat
-        // extractor yang tidak akan pernah menghasilkan stream (terukur ~12
-        // detik terbuang di logcat 10:51), lalu menyodorkan entri rusak ke
-        // daftar sumber. Situs hanya punya TIGA server streaming.
-
-        // TAHAP 2 — deduplikasi.
-        //
-        // Kunci dedup SENGAJA berupa string URL persis sesudah httpsify() + trim(),
-        // tanpa normalisasi lain. Alasannya:
-        //   - lowercase() BERBAHAYA: subdomain CDN seperti "wt4PjIIVE9AGjPL" peka
-        //     huruf besar-kecil, dua mirror bisa berbeda hanya di kapitalisasi.
-        //   - membuang query BERBAHAYA: AbyssExtractor membaca identitas video dari
-        //     parameter "v", dan token CDN juga hidup di query string.
-        // Dua string byte-identik dijamin menghasilkan request dan hasil yang sama,
-        // jadi membuang yang kedua tidak mungkin menghilangkan mirror yang berbeda.
-        // Bila ragu, biasnya ke arah aman: keduanya tetap diproses.
-        val uniqueEmbeds = rawEmbeds
-            .map { (asal, u) -> asal to httpsify(u).trim() }
-            .filter { it.second.isNotBlank() }
-            .distinctBy { it.second }   // urutan tetap, kemunculan pertama menang
-
-        val skipped = rawEmbeds.size - uniqueEmbeds.size
-        if (skipped > 0) {
-            Log.i("OppaDrama", "Dedup embed: ${rawEmbeds.size} -> ${uniqueEmbeds.size} ($skipped duplikat dilewati)")
-        }
-
-        // TAHAP 3 — dispatch. Urutannya identik dengan sebelumnya.
-        val attempted = mutableListOf<String>()
-        for ((asal, embed) in uniqueEmbeds) {
-            try {
-                attempted.add(dispatchEmbed(embed, dataUrl, subtitleCallback, callback, asal))
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                // [DIAG] embed yang melempar sekarang ikut tercatat dengan asalnya
-                Log.e("OppaDrama", "EMBED $asal | EXCEPTION ${e.javaClass.simpleName}: ${e.message} | $embed")
-            }
-        }
-
-        return attempted
     }
-
-
-    /* ── Deteksi halaman tantangan anti-bot ──────────────────────────────────
-     *
-     * Diverifikasi langsung terhadap server pada 26 Jul 2026: request tanpa
-     * cookie `user_is_human=true` TIDAK menerima 403 maupun redirect, melainkan
-     * HTTP 200 berisi halaman interstisial "Verifying your browser...".
-     *
-     * Itu bentuk kegagalan paling berbahaya bagi parser ini: statusnya sukses,
-     * Jsoup mengurainya tanpa keluhan, tetapi seluruh selector (player-embed,
-     * select.mirror, dlbox) menghasilkan nol elemen. Gejalanya di layar identik
-     * dengan "situs tidak punya sumber" padahal sebenarnya kita ditolak.
-     *
-     * Guard ini mengubah kegagalan senyap menjadi pesan yang jelas.
-     */
-    private fun Document.isAntiBotChallenge(): Boolean {
-        val body = this.body()?.text()?.lowercase() ?: return false
-        if (body.length > 2000) return false   // halaman asli jauh lebih panjang
-        return body.contains("verifying your browser") ||
-                body.contains("checking your browser") ||
-                body.contains("check your connection")
-    }
-
-    /** Ambil halaman + hentikan lebih awal bila yang datang halaman tantangan. */
-    private suspend fun getPageOrThrow(url: String): Document {
-        val document = app.get(url, headers = desktopBypassHeaders).document
-        if (document.isAntiBotChallenge()) {
-            Log.e("OppaDrama", "Diblokir anti-bot (cookie user_is_human tidak lagi diterima): $url")
-            throw ErrorLoadingException("Situs menolak permintaan (halaman verifikasi browser). Mekanisme bypass perlu diperbarui.")
-        }
-        return document
-    }
-
-    /**
-     * (WebView fallback DIHAPUS — plugin tidak punya last-resort WebView
-     *  sniffing lagi. Hanya 3 server valid: TurboVIP/Hydrax/FileLions.
-     *  Kalau extractor core gagal pada semuanya, plugin menyerah — user
-     *  harus pilih mirror lain dari dropdown halaman versi.)
-     */
 
     override suspend fun loadLinks(
         data: String,
@@ -608,115 +145,65 @@ class OppaDramaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val tLoadLinks0 = System.currentTimeMillis()
-        val document = getPageOrThrow(data)
-        val tPage = System.currentTimeMillis()
-        Log.i("OppaDrama", "TIMING loadLinks tahap=ambilHalaman ${tPage - tLoadLinks0}ms url=$data")
+        val res = app.get(data, headers = headersMap)
+        val doc = res.document
+        var linksFoundCount = 0
 
-        var isMovie = data.contains("/movie-")
-        for (span in document.select("div.spe span")) {
-            val label = span.select("b").first()?.text()?.lowercase() ?: ""
-            if (label.contains("tipe") || label.contains("type")) {
-                if (span.text().lowercase().contains("movie")) {
-                    isMovie = true
-                }
+        // 1. Ekstraksi Dinamis dari Dropdown Mirror (Base64 Encoded)
+        val mirrorOptions = doc.select("select.mirror option, select[name=mirror] option")
+        
+        for (option in mirrorOptions) {
+            val base64Value = option.attr("value").trim()
+            val serverName = option.text().trim()
+
+            if (base64Value.isBlank() || serverName.contains("Pilih Server", ignoreCase = true)) {
+                continue
             }
-        }
 
-        // [FIX v2] Deteksi dini: kalau data URL adalah parent movie (eplister ada
-        // tapi player TIDAK ada), navigate ke halaman versi dulu. Ini terjadi
-        // kalau clone site override dataUrl, atau edge case lain yang lolos dari
-        // loadMovie() resolution.
-        val parentVersionLinks = document.select("div.eplister ul li a")
-        val hasPlayer = document.select("div.player-embed").any() ||
-                document.select("select.mirror option[value]:not([disabled])").any()
+            runCatching {
+                // Dekode Base64 HTML
+                val decodedHtml = base64Decode(base64Value)
+                
+                // Parsing DOM hasil dekode dengan Jsoup untuk menangani variasi tag (IFRAME/iframe, SRC/src, dll)
+                val iframeDoc = Jsoup.parse(decodedHtml)
+                val iframeElements = iframeDoc.select("iframe[src], IFRAME[SRC]")
 
-        if (isMovie && parentVersionLinks.isNotEmpty() && !hasPlayer) {
-            // Halaman ini parent (punya eplister, ga punya player) — harus masuk
-            // ke setiap halaman versi
-            for (anchor in parentVersionLinks) {
-                val href = fixUrlNull(anchor.attr("href")) ?: continue
-                val tSub0 = System.currentTimeMillis()
-                val subDocument = getPageOrThrow(href)
-                Log.i("OppaDrama", "TIMING loadLinks tahap=halamanVersi ${System.currentTimeMillis() - tSub0}ms url=$href")
-                parseEmbeds(subDocument, href, subtitleCallback, callback)
-            }
-            return true
-        }
-
-        if (isMovie) {
-            // [BACKWARD-COMPAT] Logic lama: kalau URL contain "/movie-" dan ada
-            // eplister (kasus edge: halaman versi dengan pseudo-list), iterate.
-            // Normalnya tidak akan kena path ini karena sudah ditangani di atas.
-            val pseudoEpisodes = document.select("div.eplister ul li a")
-            if (pseudoEpisodes.isNotEmpty()) {
-                for (anchor in pseudoEpisodes) {
-                    val href = anchor.attr("href")
-                    if (!href.isNullOrBlank()) {
-                        val tSub0 = System.currentTimeMillis()
-                        val subDocument = getPageOrThrow(href)
-                        Log.i("OppaDrama", "TIMING loadLinks tahap=halamanVersi ${System.currentTimeMillis() - tSub0}ms url=$href")
-                        parseEmbeds(subDocument, href, subtitleCallback, callback)
+                for (iframe in iframeElements) {
+                    val rawSrc = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
+                    if (rawSrc.isNotBlank()) {
+                        val fixedUrl = fixUrl(rawSrc)
+                        // Panggil loadExtractor dengan memasukkan Referer halaman episode
+                        if (loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)) {
+                            linksFoundCount++
+                        }
                     }
                 }
-                return true
             }
         }
 
-        parseEmbeds(document, data, subtitleCallback, callback)
-        return true
-    }
-
-    private data class SeriesInfo(
-        val status: ShowStatus,
-        val year: Int?,
-        val plot: String?,
-        val rating: Double?,
-        val duration: Int?
-    )
-
-    private fun parseInfo(document: Document): SeriesInfo {
-        val plot = document.select("div.entry-content p, div.desc p")
-            .joinToString("\n") { it.text() }.trim().ifBlank { null }
-        var status: ShowStatus = ShowStatus.Completed
-        var year: Int? = null
-        var duration: Int? = null
-        var rating: Double? = null
-
-        for (span in document.select("div.spe > span")) {
-            val labelElement = span.select("b").first() ?: continue
-            val label = labelElement.text().trim().removeSuffix(":")
-            val value = span.text().replace(labelElement.text(), "").trim()
-
-            when (label.lowercase()) {
-                "status" -> status = if (value.lowercase().contains("ongoing")) ShowStatus.Ongoing else ShowStatus.Completed
-                "dirilis" -> {
-                    val yearMatch = Regex("(\\d{4})").find(value)?.groupValues?.getOrNull(1)
-                    year = yearMatch?.toIntOrNull()
+        // 2. Fallback Skenario 1: Ambil Iframe Default Pemutar Video di DOM jika Dropdown Kosong/Gagal
+        if (linksFoundCount == 0) {
+            val defaultIframeSrc = doc.selectFirst(".player-embed iframe, #pembed iframe")?.attr("src")
+            if (!defaultIframeSrc.isNullOrBlank()) {
+                val fixedUrl = fixUrl(defaultIframeSrc)
+                if (loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)) {
+                    linksFoundCount++
                 }
-                "durasi" -> duration = parseDurationMinutes(value)
-                "rating" -> rating = value.toDoubleOrNull()
             }
         }
 
-        if (rating == null) {
-            val ratingText = document.select("div.rating strong").first()?.text()
-            if (ratingText != null) {
-                rating = ratingText.replace("Rating", "", ignoreCase = true).trim().toDoubleOrNull()
+        // 3. Fallback Skenario 2: Ambil Tautan Langsung dari Kotak Unduhan (.dlbox)
+        val downloadLinks = doc.select(".dlbox ul li a, .bixbox.mctn .dlbox li a")
+        for (link in downloadLinks) {
+            val downloadUrl = link.attr("href")
+            if (downloadUrl.isNotBlank()) {
+                val fixedUrl = fixUrl(downloadUrl)
+                if (loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)) {
+                    linksFoundCount++
+                }
             }
         }
-        return SeriesInfo(status, year, plot, rating, duration)
-    }
 
-    private fun parseDurationMinutes(text: String?): Int? {
-        if (text.isNullOrBlank()) return null
-        val hours = Regex("(\\d+)\\s*hr").find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-        val minutes = Regex("(\\d+)\\s*min").find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-        val total = hours * 60 + minutes
-        return if (total > 0) total else null
-    }
-
-    companion object {
-        // Tidak ada konstanta — WebView fallback sudah dihapus.
+        return linksFoundCount > 0
     }
 }
