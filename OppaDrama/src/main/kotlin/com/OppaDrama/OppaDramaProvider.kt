@@ -88,7 +88,7 @@ class OppaDramaProvider : MainAPI() {
             img.attr("data-src").ifEmpty { img.attr("src") }
         }
 
-        // 3. Ekstraksi Sinopsis / Plot (Selector Diperluas)
+        // 3. Ekstraksi Sinopsis / Plot
         val plot = doc.selectFirst(
             ".desc.mindes, .desc, .mindes, .entry-content[itemprop=description], .entry-content p, .entry-content, [itemprop=description], .synopsis, .contexcerpt"
         )?.text()?.trim()
@@ -99,13 +99,10 @@ class OppaDramaProvider : MainAPI() {
         val genres = doc.select(".genxed a, .genre a, .spe span:contains(Genres) a").map { it.text().trim() }
         val actors = doc.select(".spe span:contains(Artis) a, .spe span:contains(Pemeran) a, .cast a").map { it.text().trim() }
 
-        // 5. Ekstraksi Episode (Selector Diperluas mencakup DramaStream Series & Movie)
+        // 5. Ekstraksi Episode
         val episodeElements = doc.select(
             ".eplister ul li, .bxcl ul li, #chapterlist ul li, .episodelist ul li, #singlepisode .episodelist ul li, .bixbox.episodedl ul li"
         )
-
-        // Cek apakah halaman saat ini sudah memuat video player langsung
-        val hasDirectPlayer = doc.selectFirst("select.mirror option, .player-embed iframe, #pembed iframe, .dlbox ul li a") != null
 
         val episodeList = if (episodeElements.isNotEmpty()) {
             episodeElements.mapNotNull { li ->
@@ -120,9 +117,8 @@ class OppaDramaProvider : MainAPI() {
                     this.name = epTitle
                     this.episode = epNum
                 }
-            }.reversed() // Mengurutkan dari episode terkecil/awal
+            }.reversed()
         } else {
-            // Jika Movie/Episode tunggal yang halaman nya sudah memuat player
             listOf(
                 newEpisode(url) {
                     this.name = title
@@ -213,12 +209,10 @@ class OppaDramaProvider : MainAPI() {
             if (downloadUrl.isNotBlank()) {
                 val fixedUrl = fixUrl(downloadUrl)
                 
-                // Coba lewat loadExtractor bawaan CloudStream dahulu
                 val extracted = loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)
                 if (extracted) {
                     linksFoundCount++
                 } else {
-                    // Jika extractor bawaan tidak mendukung (misal Buzzheavier/DataNodes), buat ExtractorLink langsung
                     callback(
                         newExtractorLink(
                             source = serverName,
@@ -227,7 +221,7 @@ class OppaDramaProvider : MainAPI() {
                             type = ExtractorLinkType.VIDEO
                         ) {
                             this.referer = data
-                            this.quality = getQualityFromString(qualityText)
+                            this.quality = getQualityFromName(qualityText)
                         }
                     )
                     linksFoundCount++
