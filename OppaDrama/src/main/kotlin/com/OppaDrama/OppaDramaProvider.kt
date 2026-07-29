@@ -20,7 +20,7 @@ class OppaDramaProvider : MainAPI() {
     override var hasMainPage = true
     override var hasQuickSearch = true
 
-    // Cookie proteksi anti-bot agar tidak terkena HTTP 503 / response 434-byte
+    // Header Cookie Anti-Bot agar tidak terkena HTTP 503 / 434-byte response
     private val headersMap = mapOf(
         "Cookie" to "user_is_human=true",
         "User-Agent" to USER_AGENT
@@ -79,40 +79,50 @@ class OppaDramaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = headersMap).document
 
-        // Mengambil judul utama drama
-        val title = doc.selectFirst("h1.entry-title, .infolimit h2")?.text()?.trim() 
-            ?: doc.selectFirst(".title")?.text()?.trim() 
+        // 1. Ekstraksi Judul Utama
+        val title = doc.selectFirst("h1.entry-title, h1[itemprop=name], .infolimit h2, h1.title, .entry-title")?.text()?.trim() 
             ?: "OPPADRAMA"
 
-        val poster = doc.selectFirst(".thumb img, .single-info .thumb img")?.let { img ->
+        // 2. Ekstraksi Poster
+        val poster = doc.selectFirst(".thumb img, .single-info .thumb img, .poster img, img[itemprop=image]")?.let { img ->
             img.attr("data-src").ifEmpty { img.attr("src") }
         }
 
-        val plot = doc.selectFirst(".desc.mindes, .synopsis")?.text()?.trim()
-        val ratingText = doc.selectFirst(".rating strong")?.text()?.replace("Rating", "")?.trim()
-        val statusText = doc.selectFirst(".spe span:contains(Status)")?.text() ?: ""
-        val genres = doc.select(".genxed a").map { it.text().trim() }
-        val actors = doc.select(".spe span:contains(Artis) a").map { it.text().trim() }
+        // 3. Ekstraksi Sinopsis / Plot (Selector Diperluas)
+        val plot = doc.selectFirst(
+            ".desc.mindes, .desc, .mindes, .entry-content[itemprop=description], .entry-content p, .entry-content, [itemprop=description], .synopsis, .contexcerpt"
+        )?.text()?.trim()
 
-        // Ekstraksi Daftar Episode dari Sidebar / Episode List
-        val episodeElements = doc.select(".episodelist ul li, #singlepisode .episodelist ul li")
-        
+        // 4. Metadata Tambahan
+        val ratingText = doc.selectFirst(".rating strong, .num, [itemprop=ratingValue]")?.text()?.replace("Rating", "")?.trim()
+        val statusText = doc.selectFirst(".spe span:contains(Status)")?.text() ?: ""
+        val genres = doc.select(".genxed a, .genre a, .spe span:contains(Genres) a").map { it.text().trim() }
+        val actors = doc.select(".spe span:contains(Artis) a, .spe span:contains(Pemeran) a, .cast a").map { it.text().trim() }
+
+        // 5. Ekstraksi Episode (Selector Diperluas mencakup DramaStream Series & Movie)
+        val episodeElements = doc.select(
+            ".eplister ul li, .bxcl ul li, #chapterlist ul li, .episodelist ul li, #singlepisode .episodelist ul li, .bixbox.episodedl ul li"
+        )
+
+        // Cek apakah halaman saat ini sudah memuat video player langsung
+        val hasDirectPlayer = doc.selectFirst("select.mirror option, .player-embed iframe, #pembed iframe, .dlbox ul li a") != null
+
         val episodeList = if (episodeElements.isNotEmpty()) {
             episodeElements.mapNotNull { li ->
                 val aTag = li.selectFirst("a") ?: return@mapNotNull null
                 val epUrl = aTag.attr("href")
-                val epTitle = li.selectFirst(".playinfo h4")?.text()?.trim() 
+                val epTitle = li.selectFirst(".epl-title, .playinfo h4, .lchx, a")?.text()?.trim() 
                     ?: aTag.attr("title").ifEmpty { aTag.text() }
                 
-                val epNum = Regex("""(?i)Episode\s+(\d+)""").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
+                val epNum = Regex("""(?i)(?:Eps|Episode|Ep)\s*(\d+)""").find(epTitle ?: "")?.groupValues?.get(1)?.toIntOrNull()
 
                 newEpisode(epUrl) {
                     this.name = epTitle
                     this.episode = epNum
                 }
-            }
+            }.reversed() // Mengurutkan dari episode terkecil/awal
         } else {
-            // Jika Halaman Berupa Single Movie / Episode Langsung
+            // Jika Movie/Episode tunggal yang halaman nya sudah memuat player
             listOf(
                 newEpisode(url) {
                     this.name = title
@@ -124,7 +134,7 @@ class OppaDramaProvider : MainAPI() {
         return newTvSeriesLoadResponse(
             name = title,
             url = url,
-            type = TvType.AsianDrama,
+            type = if (genres.any { it.contains("Movie", true) }) TvType.Movie else TvType.AsianDrama,
             episodes = episodeList
         ) {
             this.posterUrl = poster
@@ -162,10 +172,7 @@ class OppaDramaProvider : MainAPI() {
             }
 
             runCatching {
-                // Dekode Base64 HTML
                 val decodedHtml = base64Decode(base64Value)
-                
-                // Parsing DOM hasil dekode dengan Jsoup untuk menangani variasi tag (IFRAME/iframe, SRC/src, dll)
                 val iframeDoc = Jsoup.parse(decodedHtml)
                 val iframeElements = iframeDoc.select("iframe[src], IFRAME[SRC]")
 
@@ -173,7 +180,6 @@ class OppaDramaProvider : MainAPI() {
                     val rawSrc = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
                     if (rawSrc.isNotBlank()) {
                         val fixedUrl = fixUrl(rawSrc)
-                        // Panggil loadExtractor dengan memasukkan Referer halaman episode
                         if (loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)) {
                             linksFoundCount++
                         }
@@ -182,24 +188,48 @@ class OppaDramaProvider : MainAPI() {
             }
         }
 
-        // 2. Fallback Skenario 1: Ambil Iframe Default Pemutar Video di DOM jika Dropdown Kosong/Gagal
+        // 2. Fallback: Iframe Default di DOM (#pembed)
         if (linksFoundCount == 0) {
-            val defaultIframeSrc = doc.selectFirst(".player-embed iframe, #pembed iframe")?.attr("src")
-            if (!defaultIframeSrc.isNullOrBlank()) {
-                val fixedUrl = fixUrl(defaultIframeSrc)
-                if (loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)) {
-                    linksFoundCount++
+            val defaultIframes = doc.select(".player-embed iframe, #pembed iframe, .mvelement iframe")
+            for (iframe in defaultIframes) {
+                val src = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
+                if (src.isNotBlank()) {
+                    val fixedUrl = fixUrl(src)
+                    if (loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)) {
+                        linksFoundCount++
+                    }
                 }
             }
         }
 
-        // 3. Fallback Skenario 2: Ambil Tautan Langsung dari Kotak Unduhan (.dlbox)
-        val downloadLinks = doc.select(".dlbox ul li a, .bixbox.mctn .dlbox li a")
-        for (link in downloadLinks) {
-            val downloadUrl = link.attr("href")
+        // 3. Fallback: Tautan Langsung dari Kotak Unduhan (.dlbox)
+        val downloadLinks = doc.select(".dlbox ul li, .bixbox.mctn .dlbox li")
+        for (li in downloadLinks) {
+            val aTag = li.selectFirst("a") ?: continue
+            val downloadUrl = aTag.attr("href")
+            val serverName = li.selectFirst(".q")?.text()?.trim() ?: "Server"
+            val qualityText = li.selectFirst(".w")?.text()?.trim() ?: "HD"
+
             if (downloadUrl.isNotBlank()) {
                 val fixedUrl = fixUrl(downloadUrl)
-                if (loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)) {
+                
+                // Coba lewat loadExtractor bawaan CloudStream dahulu
+                val extracted = loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)
+                if (extracted) {
+                    linksFoundCount++
+                } else {
+                    // Jika extractor bawaan tidak mendukung (misal Buzzheavier/DataNodes), buat ExtractorLink langsung
+                    callback(
+                        newExtractorLink(
+                            source = serverName,
+                            name = "$serverName - $qualityText",
+                            url = fixedUrl,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = data
+                            this.quality = getQualityFromString(qualityText)
+                        }
+                    )
                     linksFoundCount++
                 }
             }
