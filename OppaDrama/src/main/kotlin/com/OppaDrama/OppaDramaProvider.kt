@@ -2,8 +2,10 @@ package com.OppaDrama
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class OppaDramaProvider : MainAPI() {
@@ -20,7 +22,7 @@ class OppaDramaProvider : MainAPI() {
     override var hasMainPage = true
     override var hasQuickSearch = true
 
-    // Header Cookie Anti-Bot agar tidak terkena HTTP 503 / 434-byte response
+    // Header Cookie Anti-Bot agar tidak terkena HTTP 503 / response 434-byte
     private val headersMap = mapOf(
         "Cookie" to "user_is_human=true",
         "User-Agent" to USER_AGENT
@@ -68,7 +70,8 @@ class OppaDramaProvider : MainAPI() {
             ?: element.selectFirst("a")?.attr("title")?.trim() ?: return null
         val href = element.selectFirst("a")?.attr("href") ?: return null
         val poster = element.selectFirst("img")?.let { img ->
-            img.attr("data-src").ifEmpty { img.attr("src") }
+            val src = img.attr("data-src").ifEmpty { img.attr("src") }
+            if (isLogoOrAd(src)) null else src
         }
 
         return newMovieSearchResponse(title, href, TvType.AsianDrama) {
@@ -76,36 +79,87 @@ class OppaDramaProvider : MainAPI() {
         }
     }
 
+    // Filter Khusus untuk Memastikan Gambar yang Diambil Bukan Logo / Banner Site
+    private fun isLogoOrAd(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("logo") ||
+               lower.contains("oppadrama") ||
+               lower.contains("cropped-site-icon") ||
+               lower.endsWith(".gif") ||
+               lower.contains("avatar")
+    }
+
+    private fun getValidPoster(doc: Document): String? {
+        val candidateImages = doc.select(
+            ".single-info .thumb img, .bigcontent .thumb img, .poster img, meta[property=\"og:image\"]"
+        )
+        for (img in candidateImages) {
+            val src = if (img.tagName() == "meta") {
+                img.attr("content")
+            } else {
+                img.attr("data-src").ifEmpty { img.attr("src") }
+            }
+            if (src.isNotBlank() && !isLogoOrAd(src)) {
+                return src
+            }
+        }
+        return null
+    }
+
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = headersMap).document
 
-        // 1. Ekstraksi Judul Utama
+        // 1. Judul
         val title = doc.selectFirst("h1.entry-title, h1[itemprop=name], .infolimit h2, h1.title, .entry-title")?.text()?.trim() 
             ?: "OPPADRAMA"
 
-        // 2. Ekstraksi Poster
-        val poster = doc.selectFirst(".thumb img, .single-info .thumb img, .poster img, img[itemprop=image]")?.let { img ->
-            img.attr("data-src").ifEmpty { img.attr("src") }
-        }
+        // 2. Poster Utama (Dengan Filter Anti-Logo)
+        val poster = getValidPoster(doc)
 
-        // 3. Ekstraksi Sinopsis / Plot
+        // 3. Sinopsis / Plot
         val plot = doc.selectFirst(
             ".desc.mindes, .desc, .mindes, .entry-content[itemprop=description], .entry-content p, .entry-content, [itemprop=description], .synopsis, .contexcerpt"
         )?.text()?.trim()
 
-        // 4. Metadata Tambahan
+        // 4. Metadata
         val ratingText = doc.selectFirst(".rating strong, .num, [itemprop=ratingValue]")?.text()?.replace("Rating", "")?.trim()
         val statusText = doc.selectFirst(".spe span:contains(Status)")?.text() ?: ""
         val genres = doc.select(".genxed a, .genre a, .spe span:contains(Genres) a").map { it.text().trim() }
         val actors = doc.select(".spe span:contains(Artis) a, .spe span:contains(Pemeran) a, .cast a").map { it.text().trim() }
 
-        // 5. Ekstraksi Episode
-        val episodeElements = doc.select(
-            ".eplister ul li, .bxcl ul li, #chapterlist ul li, .episodelist ul li, #singlepisode .episodelist ul li, .bixbox.episodedl ul li"
-        )
+        // 5. Ekstraksi Trailer
+        val trailerUrl = doc.selectFirst("iframe[src*=youtube.com], iframe[src*=youtu.be]")?.attr("src")
+            ?: doc.selectFirst("a[href*=youtube.com/watch], a[href*=youtu.be]")?.attr("href")
 
-        val episodeList = if (episodeElements.isNotEmpty()) {
-            episodeElements.mapNotNull { li ->
+        // 6. Deteksi Tipe Konten (Movie vs Series)
+        val isMovie = url.contains("/movie-") || 
+                      genres.any { it.contains("Movie", true) || it.contains("Film", true) } ||
+                      doc.select(".eplister ul li, .bxcl ul li, #chapterlist ul li").isEmpty()
+
+        return if (isMovie) {
+            // Menggunakan Movie Builder untuk Tombol Single Play
+            newMovieLoadResponse(
+                name = title,
+                url = url,
+                type = TvType.Movie,
+                dataUrl = url
+            ) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.score = Score.from10(ratingText)
+                this.tags = genres
+                this.addActors(actors)
+                if (!trailerUrl.isNullOrBlank()) {
+                    this.addTrailer(trailerUrl)
+                }
+            }
+        } else {
+            // Menggunakan TV Series Builder
+            val episodeElements = doc.select(
+                ".eplister ul li, .bxcl ul li, #chapterlist ul li, .episodelist ul li, #singlepisode .episodelist ul li"
+            )
+
+            val episodeList = episodeElements.mapNotNull { li ->
                 val aTag = li.selectFirst("a") ?: return@mapNotNull null
                 val epUrl = aTag.attr("href")
                 val epTitle = li.selectFirst(".epl-title, .playinfo h4, .lchx, a")?.text()?.trim() 
@@ -118,31 +172,27 @@ class OppaDramaProvider : MainAPI() {
                     this.episode = epNum
                 }
             }.reversed()
-        } else {
-            listOf(
-                newEpisode(url) {
-                    this.name = title
-                    this.episode = 1
-                }
-            )
-        }
 
-        return newTvSeriesLoadResponse(
-            name = title,
-            url = url,
-            type = if (genres.any { it.contains("Movie", true) }) TvType.Movie else TvType.AsianDrama,
-            episodes = episodeList
-        ) {
-            this.posterUrl = poster
-            this.plot = plot
-            this.score = Score.from10(ratingText)
-            this.showStatus = if (statusText.contains("Ongoing", ignoreCase = true)) {
-                ShowStatus.Ongoing
-            } else {
-                ShowStatus.Completed
+            newTvSeriesLoadResponse(
+                name = title,
+                url = url,
+                type = TvType.AsianDrama,
+                episodes = episodeList
+            ) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.score = Score.from10(ratingText)
+                this.showStatus = if (statusText.contains("Ongoing", ignoreCase = true)) {
+                    ShowStatus.Ongoing
+                } else {
+                    ShowStatus.Completed
+                }
+                this.tags = genres
+                this.addActors(actors)
+                if (!trailerUrl.isNullOrBlank()) {
+                    this.addTrailer(trailerUrl)
+                }
             }
-            this.tags = genres
-            this.addActors(actors)
         }
     }
 
@@ -156,6 +206,7 @@ class OppaDramaProvider : MainAPI() {
         val doc = res.document
         var linksFoundCount = 0
 
+        // HANYA MENGGUNAKAN SERVER STREAMING (3 SERVER)
         // 1. Ekstraksi Dinamis dari Dropdown Mirror (Base64 Encoded)
         val mirrorOptions = doc.select("select.mirror option, select[name=mirror] option")
         
@@ -184,7 +235,7 @@ class OppaDramaProvider : MainAPI() {
             }
         }
 
-        // 2. Fallback: Iframe Default di DOM (#pembed)
+        // 2. Fallback: Iframe Default di DOM (#pembed / .player-embed)
         if (linksFoundCount == 0) {
             val defaultIframes = doc.select(".player-embed iframe, #pembed iframe, .mvelement iframe")
             for (iframe in defaultIframes) {
@@ -194,37 +245,6 @@ class OppaDramaProvider : MainAPI() {
                     if (loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)) {
                         linksFoundCount++
                     }
-                }
-            }
-        }
-
-        // 3. Fallback: Tautan Langsung dari Kotak Unduhan (.dlbox)
-        val downloadLinks = doc.select(".dlbox ul li, .bixbox.mctn .dlbox li")
-        for (li in downloadLinks) {
-            val aTag = li.selectFirst("a") ?: continue
-            val downloadUrl = aTag.attr("href")
-            val serverName = li.selectFirst(".q")?.text()?.trim() ?: "Server"
-            val qualityText = li.selectFirst(".w")?.text()?.trim() ?: "HD"
-
-            if (downloadUrl.isNotBlank()) {
-                val fixedUrl = fixUrl(downloadUrl)
-                
-                val extracted = loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)
-                if (extracted) {
-                    linksFoundCount++
-                } else {
-                    callback(
-                        newExtractorLink(
-                            source = serverName,
-                            name = "$serverName - $qualityText",
-                            url = fixedUrl,
-                            type = ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = data
-                            this.quality = getQualityFromName(qualityText)
-                        }
-                    )
-                    linksFoundCount++
                 }
             }
         }
