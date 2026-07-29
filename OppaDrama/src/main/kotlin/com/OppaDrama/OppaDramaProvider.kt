@@ -4,9 +4,17 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import kotlinx.serialization.Serializable
 import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+
+@Serializable
+data class MovieVersionData(
+    val url: String,
+    val versionName: String
+)
 
 class OppaDramaProvider : MainAPI() {
     override var mainUrl = "http://45.11.57.192"
@@ -22,7 +30,7 @@ class OppaDramaProvider : MainAPI() {
     override var hasMainPage = true
     override var hasQuickSearch = true
 
-    // Header Cookie Anti-Bot agar tidak terkena HTTP 503 / response 434-byte
+    // Header Cookie Anti-Bot
     private val headersMap = mapOf(
         "Cookie" to "user_is_human=true",
         "User-Agent" to USER_AGENT
@@ -69,52 +77,29 @@ class OppaDramaProvider : MainAPI() {
         val title = element.selectFirst(".tt, .title, a[title]")?.text()?.trim()
             ?: element.selectFirst("a")?.attr("title")?.trim() ?: return null
         val href = element.selectFirst("a")?.attr("href") ?: return null
-        val poster = element.selectFirst("img")?.let { img ->
-            val src = img.attr("data-src").ifEmpty { img.attr("src") }
-            if (isLogoOrAd(src)) null else src
+        
+        val rawPoster = element.selectFirst("img")?.let { img ->
+            img.attr("data-src").ifEmpty { img.attr("src") }
         }
+        val poster = if (isInvalidImage(rawPoster)) null else rawPoster
 
         return newMovieSearchResponse(title, href, TvType.AsianDrama) {
             this.posterUrl = poster
         }
     }
 
-    // Filter Khusus untuk Memastikan Gambar yang Diambil Bukan Logo / Banner Site
-    private fun isLogoOrAd(url: String): Boolean {
-        val lower = url.lowercase()
-        return lower.contains("logo") ||
-               lower.contains("oppadrama") ||
-               lower.contains("cropped-site-icon") ||
-               lower.endsWith(".gif") ||
-               lower.contains("avatar")
-    }
-
-    private fun getValidPoster(doc: Document): String? {
-        val candidateImages = doc.select(
-            ".single-info .thumb img, .bigcontent .thumb img, .poster img, meta[property=\"og:image\"]"
-        )
-        for (img in candidateImages) {
-            val src = if (img.tagName() == "meta") {
-                img.attr("content")
-            } else {
-                img.attr("data-src").ifEmpty { img.attr("src") }
-            }
-            if (src.isNotBlank() && !isLogoOrAd(src)) {
-                return src
-            }
-        }
-        return null
-    }
-
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = headersMap).document
 
-        // 1. Judul
-        val title = doc.selectFirst("h1.entry-title, h1[itemprop=name], .infolimit h2, h1.title, .entry-title")?.text()?.trim() 
+        // 1. Judul Utama
+        val title = doc.selectFirst(".infolimit h2, h1.entry-title, h1[itemprop=name], h1.title")?.text()?.trim() 
             ?: "OPPADRAMA"
 
-        // 2. Poster Utama (Dengan Filter Anti-Logo)
-        val poster = getValidPoster(doc)
+        // 2. Poster Utama Spesifik (Menghindari Logo Header)
+        val rawPoster = doc.selectFirst(".single-info .thumb img, .megavid .tb img, .poster img")?.let { img ->
+            img.attr("data-src").ifEmpty { img.attr("src") }
+        }
+        val cleanPoster = if (isInvalidImage(rawPoster)) null else rawPoster
 
         // 3. Sinopsis / Plot
         val plot = doc.selectFirst(
@@ -124,37 +109,53 @@ class OppaDramaProvider : MainAPI() {
         // 4. Metadata
         val ratingText = doc.selectFirst(".rating strong, .num, [itemprop=ratingValue]")?.text()?.replace("Rating", "")?.trim()
         val statusText = doc.selectFirst(".spe span:contains(Status)")?.text() ?: ""
+        val typeText = doc.selectFirst(".spe span:contains(Tipe)")?.text() ?: ""
+        val epxText = doc.selectFirst(".epx")?.text() ?: ""
         val genres = doc.select(".genxed a, .genre a, .spe span:contains(Genres) a").map { it.text().trim() }
         val actors = doc.select(".spe span:contains(Artis) a, .spe span:contains(Pemeran) a, .cast a").map { it.text().trim() }
 
-        // 5. Ekstraksi Trailer
-        val trailerUrl = doc.selectFirst("iframe[src*=youtube.com], iframe[src*=youtu.be]")?.attr("src")
-            ?: doc.selectFirst("a[href*=youtube.com/watch], a[href*=youtu.be]")?.attr("href")
+        // 5. Deteksi Movie vs TV Series
+        val isMovie = typeText.contains("Movie", ignoreCase = true) || 
+                      epxText.contains("Movie", ignoreCase = true) ||
+                      title.startsWith("Movie ", ignoreCase = true) || 
+                      url.contains("/movie-", ignoreCase = true)
 
-        // 6. Deteksi Tipe Konten (Movie vs Series)
-        val isMovie = url.contains("/movie-") || 
-                      genres.any { it.contains("Movie", true) || it.contains("Film", true) } ||
-                      doc.select(".eplister ul li, .bxcl ul li, #chapterlist ul li").isEmpty()
+        // 6. Ekstraksi Trailer YouTube
+        val trailerUrl = doc.selectFirst("iframe[src*=youtube], iframe[src*=youtu.be], a.popup-youtube, a[href*=youtube.com], a[href*=youtu.be]")?.let { el ->
+            el.attr("src").ifEmpty { el.attr("href") }
+        }
 
         return if (isMovie) {
-            // Menggunakan Movie Builder untuk Tombol Single Play
+            // Mengambil seluruh versi rilis film (BluRay, WEBDL, dll.) jika ada
+            val versionElements = doc.select(".eplister ul li, .bxcl ul li, #chapterlist ul li, .episodelist ul li")
+            val movieVersions = if (versionElements.isNotEmpty()) {
+                versionElements.mapNotNull { li ->
+                    val aTag = li.selectFirst("a") ?: return@mapNotNull null
+                    val verUrl = aTag.attr("href")
+                    val verName = li.selectFirst(".playinfo h4, .epl-title, a")?.text()?.trim()
+                        ?: aTag.attr("title").ifEmpty { aTag.text() }
+                    MovieVersionData(verUrl, verName)
+                }
+            } else {
+                listOf(MovieVersionData(url, title))
+            }
+
+            // Pemutar Tunggal (Single Play Button) untuk MOVIE
             newMovieLoadResponse(
                 name = title,
                 url = url,
                 type = TvType.Movie,
-                dataUrl = url
+                dataUrl = movieVersions.toJson()
             ) {
-                this.posterUrl = poster
+                this.posterUrl = cleanPoster
                 this.plot = plot
                 this.score = Score.from10(ratingText)
                 this.tags = genres
                 this.addActors(actors)
-                if (!trailerUrl.isNullOrBlank()) {
-                    this.addTrailer(trailerUrl)
-                }
+                this.addTrailer(trailerUrl)
             }
         } else {
-            // Menggunakan TV Series Builder
+            // Daftar Episode untuk TV SERIES / DRAMA
             val episodeElements = doc.select(
                 ".eplister ul li, .bxcl ul li, #chapterlist ul li, .episodelist ul li, #singlepisode .episodelist ul li"
             )
@@ -177,9 +178,14 @@ class OppaDramaProvider : MainAPI() {
                 name = title,
                 url = url,
                 type = TvType.AsianDrama,
-                episodes = episodeList
+                episodes = if (episodeList.isNotEmpty()) episodeList else listOf(
+                    newEpisode(url) {
+                        this.name = title
+                        this.episode = 1
+                    }
+                )
             ) {
-                this.posterUrl = poster
+                this.posterUrl = cleanPoster
                 this.plot = plot
                 this.score = Score.from10(ratingText)
                 this.showStatus = if (statusText.contains("Ongoing", ignoreCase = true)) {
@@ -189,9 +195,7 @@ class OppaDramaProvider : MainAPI() {
                 }
                 this.tags = genres
                 this.addActors(actors)
-                if (!trailerUrl.isNullOrBlank()) {
-                    this.addTrailer(trailerUrl)
-                }
+                this.addTrailer(trailerUrl)
             }
         }
     }
@@ -202,47 +206,82 @@ class OppaDramaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val res = app.get(data, headers = headersMap)
-        val doc = res.document
         var linksFoundCount = 0
 
-        // HANYA MENGGUNAKAN SERVER STREAMING (3 SERVER)
-        // 1. Ekstraksi Dinamis dari Dropdown Mirror (Base64 Encoded)
-        val mirrorOptions = doc.select("select.mirror option, select[name=mirror] option")
-        
-        for (option in mirrorOptions) {
-            val base64Value = option.attr("value").trim()
-            val serverName = option.text().trim()
+        // Parse list versi rilis Movie jika berupa JSON Array, atau anggap single URL
+        val versionList = tryParseJson<List<MovieVersionData>>(data) 
+            ?: listOf(MovieVersionData(data, ""))
 
-            if (base64Value.isBlank() || serverName.contains("Pilih Server", ignoreCase = true)) {
-                continue
-            }
+        for (version in versionList) {
+            val pageUrl = version.url
+            val labelSuffix = if (version.versionName.isNotBlank()) " (${version.versionName})" else ""
 
-            runCatching {
-                val decodedHtml = base64Decode(base64Value)
-                val iframeDoc = Jsoup.parse(decodedHtml)
-                val iframeElements = iframeDoc.select("iframe[src], IFRAME[SRC]")
+            val res = app.get(pageUrl, headers = headersMap)
+            val doc = res.document
 
-                for (iframe in iframeElements) {
-                    val rawSrc = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
-                    if (rawSrc.isNotBlank()) {
-                        val fixedUrl = fixUrl(rawSrc)
-                        if (loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)) {
-                            linksFoundCount++
+            // 1. Ekstraksi Dinamis dari Dropdown Mirror (Base64 Encoded)
+            val mirrorOptions = doc.select("select.mirror option, select[name=mirror] option")
+            
+            for (option in mirrorOptions) {
+                val base64Value = option.attr("value").trim()
+                var serverName = option.text().trim()
+
+                if (base64Value.isBlank() || serverName.contains("Pilih Server", ignoreCase = true)) {
+                    continue
+                }
+
+                if (labelSuffix.isNotBlank()) {
+                    serverName += labelSuffix
+                }
+
+                runCatching {
+                    val decodedHtml = base64Decode(base64Value)
+                    val iframeDoc = Jsoup.parse(decodedHtml)
+                    val iframeElements = iframeDoc.select("iframe[src], IFRAME[SRC]")
+
+                    for (iframe in iframeElements) {
+                        var rawSrc = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
+                        if (rawSrc.isNotBlank()) {
+                            
+                            // Normalisasi Domain Hydrax (abyssplayer.com -> abyss.to)
+                            if (rawSrc.contains("abyssplayer.com")) {
+                                rawSrc = rawSrc.replace("abyssplayer.com", "abyss.to")
+                            }
+
+                            val fixedUrl = fixUrl(rawSrc)
+
+                            // Normalisasi Path TurboVIP (/t/ -> /v/)
+                            if (rawSrc.contains("emturbovid.com/t/")) {
+                                val altUrl = fixedUrl.replace("/t/", "/v/")
+                                if (loadExtractor(altUrl, referer = pageUrl, subtitleCallback, callback)) {
+                                    linksFoundCount++
+                                    continue
+                                }
+                            }
+
+                            if (loadExtractor(fixedUrl, referer = pageUrl, subtitleCallback, callback)) {
+                                linksFoundCount++
+                            } else if (fixedUrl.contains("emturbovid.com")) {
+                                // Fallback Unpacker Khusus TurboVIP
+                                if (extractTurboVipDirect(fixedUrl, pageUrl, serverName, callback)) {
+                                    linksFoundCount++
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // 2. Fallback: Iframe Default di DOM (#pembed / .player-embed)
-        if (linksFoundCount == 0) {
+            // 2. Fallback: Iframe Default di DOM (#pembed)
             val defaultIframes = doc.select(".player-embed iframe, #pembed iframe, .mvelement iframe")
             for (iframe in defaultIframes) {
-                val src = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
+                var src = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
                 if (src.isNotBlank()) {
+                    if (src.contains("abyssplayer.com")) {
+                        src = src.replace("abyssplayer.com", "abyss.to")
+                    }
                     val fixedUrl = fixUrl(src)
-                    if (loadExtractor(fixedUrl, referer = data, subtitleCallback, callback)) {
+                    if (loadExtractor(fixedUrl, referer = pageUrl, subtitleCallback, callback)) {
                         linksFoundCount++
                     }
                 }
@@ -250,5 +289,46 @@ class OppaDramaProvider : MainAPI() {
         }
 
         return linksFoundCount > 0
+    }
+
+    // Custom Unpacker Khusus TurboVIP
+    private suspend fun extractTurboVipDirect(
+        url: String,
+        referer: String,
+        serverName: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return runCatching {
+            val html = app.get(url, referer = referer).text
+            val unpacked = getAndUnpack(html)
+            
+            val m3u8Url = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""").find(unpacked)?.groupValues?.get(1)
+                ?: Regex("""file:\s*"([^"]+)"""").find(unpacked)?.groupValues?.get(1)
+
+            if (!m3u8Url.isNullOrBlank()) {
+                callback(
+                    newExtractorLink(
+                        source = serverName,
+                        name = serverName,
+                        url = m3u8Url,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = url
+                        this.headers = mapOf("User-Agent" to USER_AGENT)
+                    }
+                )
+                true
+            } else false
+        }.getOrElse { false }
+    }
+
+    private fun isInvalidImage(url: String?): Boolean {
+        if (url.isNullOrBlank()) return true
+        val lower = url.lowercase()
+        return lower.contains("logo") || 
+               lower.contains("oppadrama") || 
+               lower.contains("cropped-site-icon") || 
+               lower.contains("loading.gif") ||
+               lower.contains("gravatar.com")
     }
 }
