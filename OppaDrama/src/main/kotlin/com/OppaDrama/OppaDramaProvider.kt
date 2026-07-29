@@ -9,6 +9,8 @@ import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
@@ -34,6 +36,12 @@ class OppaDramaProvider : MainAPI() {
     override var hasMainPage = true
     override var hasQuickSearch = true
 
+    // Set 'true' saat proses troubleshooting, 'false' untuk rilis produksi
+    private val DEBUG = false
+
+    // Pembatas Concurrency: Maksimal 3 request paralel bersamaan
+    private val concurrencySemaphore = Semaphore(3)
+
     // Header Cookie Anti-Bot
     private val headersMap = mapOf(
         "Cookie" to "user_is_human=true",
@@ -41,7 +49,9 @@ class OppaDramaProvider : MainAPI() {
     )
 
     private fun logDebug(message: String) {
-        println("[OppaDrama Debug] $message")
+        if (DEBUG) {
+            println("[OppaDrama Debug] $message")
+        }
     }
 
     // Katalog Halaman Utama
@@ -106,7 +116,7 @@ class OppaDramaProvider : MainAPI() {
         logDebug("load -> Opening URL: $url")
         val doc = app.get(url, headers = headersMap).document
 
-        // 1. Ekstraksi Parent URL dari Breadcrumb
+        // 1. Ekstraksi Parent URL dari Breadcrumb (Bebas posisional nth-child)
         val breadcrumbLinks = doc.select(".ts-breadcrumb ol li a, .ts-breadcrumb a, .breadcrumb a")
         val parentUrl = breadcrumbLinks.map { it.attr("href") }.firstOrNull { link ->
             val fixed = fixUrl(link)
@@ -124,7 +134,7 @@ class OppaDramaProvider : MainAPI() {
         val title = doc.selectFirst(".infolimit h2, h1.entry-title, h1[itemprop=name], h1.title")?.text()?.trim() 
             ?: "OPPADRAMA"
 
-        // 3. Poster Utama Spesifik
+        // 3. Poster Utama
         val rawPoster = doc.selectFirst(".single-info .thumb img, .megavid .tb img, .poster img")?.let { img ->
             img.attr("data-src").ifEmpty { img.attr("src") }
         }
@@ -259,113 +269,126 @@ class OppaDramaProvider : MainAPI() {
             }
         }
 
+        // Post-Extractor Deduplication: Deduplikasi strictly pada URL stream akhir
         val safeLinkCallback: (ExtractorLink) -> Unit = { link ->
             if (visitedStreamUrls.add(link.url)) {
                 logDebug("Source emitted: [${link.source}] ${link.name} -> ${link.url}")
                 callback(link)
+            } else {
+                logDebug("Stream URL skipped (Duplicate Stream Link): ${link.url}")
             }
         }
 
         coroutineScope {
             versionList.map { version ->
                 async {
-                    val pageUrl = version.url
-                    val labelSuffix = if (version.versionName.isNotBlank()) " (${version.versionName})" else ""
-                    logDebug("Processing Mode/Version: $pageUrl | Label: $labelSuffix")
+                    // Terapkan batas concurrency request
+                    concurrencySemaphore.withPermit {
+                        val pageUrl = version.url
+                        val labelSuffix = if (version.versionName.isNotBlank()) " (${version.versionName})" else ""
+                        logDebug("Processing Mode/Version: $pageUrl | Label: $labelSuffix")
 
-                    runCatching {
-                        val res = app.get(pageUrl, headers = headersMap)
-                        val doc = res.document
+                        runCatching {
+                            val res = app.get(pageUrl, headers = headersMap)
+                            val doc = res.document
 
-                        val mirrorOptions = doc.select("select.mirror option, select[name=mirror] option")
-                        logDebug("Found ${mirrorOptions.size} mirror option(s) on $pageUrl")
+                            val mirrorOptions = doc.select("select.mirror option, select[name=mirror] option")
+                            logDebug("Found ${mirrorOptions.size} mirror option(s) on $pageUrl")
 
-                        for (option in mirrorOptions) {
-                            val base64Value = option.attr("value").trim()
-                            var serverName = option.text().trim()
+                            for (option in mirrorOptions) {
+                                val base64Value = option.attr("value").trim()
+                                var serverName = option.text().trim()
 
-                            if (base64Value.isBlank() || serverName.contains("Pilih Server", ignoreCase = true)) {
-                                continue
-                            }
+                                if (base64Value.isBlank() || serverName.contains("Pilih Server", ignoreCase = true)) {
+                                    continue
+                                }
 
-                            if (labelSuffix.isNotBlank()) {
-                                serverName += labelSuffix
-                            }
+                                if (labelSuffix.isNotBlank()) {
+                                    serverName += labelSuffix
+                                }
 
-                            runCatching {
-                                val decodedHtml = base64Decode(base64Value)
-                                val iframeDoc = Jsoup.parse(decodedHtml)
-                                val iframeElements = iframeDoc.select("iframe[src], IFRAME[SRC]")
+                                runCatching {
+                                    val decodedHtml = base64Decode(base64Value)
+                                    val iframeDoc = Jsoup.parse(decodedHtml)
+                                    val iframeElements = iframeDoc.select("iframe[src], IFRAME[SRC]")
 
-                                for (iframe in iframeElements) {
-                                    val rawSrc = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
-                                    if (rawSrc.isNotBlank()) {
-                                        val fixedUrl = fixUrl(rawSrc)
+                                    for (iframe in iframeElements) {
+                                        val rawSrc = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
+                                        if (rawSrc.isNotBlank()) {
+                                            val fixedUrl = fixUrl(rawSrc)
 
-                                        // Stase 1 Deduplikasi Embed
-                                        if (!visitedEmbedUrls.add(fixedUrl)) {
-                                            logDebug("Embed URL skipped (Pre-Extractor Duplicate): $fixedUrl")
-                                            continue
+                                            // Pre-Extractor Deduplication
+                                            if (!visitedEmbedUrls.add(fixedUrl)) {
+                                                logDebug("Embed URL skipped (Pre-Extractor Duplicate): $fixedUrl")
+                                                continue
+                                            }
+
+                                            val countBefore = visitedStreamUrls.size
+
+                                            // 1. Penanganan TurboVIP (Hierarki Strict Fallback)
+                                            if (fixedUrl.contains("emturbovid.com") || fixedUrl.contains("turboviplay.com")) {
+                                                logDebug("Processing TurboVIP: $fixedUrl")
+                                                extractTurboVipWithFallback(fixedUrl, pageUrl, serverName, safeSubtitleCallback, safeLinkCallback)
+                                            } 
+                                            // 2. Penanganan Hydrax (Dengan Validasi Media ID)
+                                            else if (fixedUrl.contains("abyss") || fixedUrl.contains("hydrax")) {
+                                                val mediaId = Regex("""(?:v=|\/v\/|\/)([a-zA-Z0-9_-]+)""").find(fixedUrl)?.groupValues?.get(1)
+                                                if (!mediaId.isNullOrBlank()) {
+                                                    logDebug("[Hydrax] Media ID extracted: $mediaId -> Trying normalized abyss.to")
+                                                    loadExtractor("https://abyss.to/v/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                    if (visitedStreamUrls.size == countBefore) {
+                                                        loadExtractor("https://abyss.to/?v=$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                    }
+                                                } else {
+                                                    logDebug("[Hydrax] Media ID extraction failed. Fallback to raw URL: $fixedUrl")
+                                                    loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                }
+                                            } 
+                                            // 3. Penanganan VidHidePro / Minochinos (Dengan Validasi Media ID)
+                                            else if (fixedUrl.contains("minochinos.com") || fixedUrl.contains("vidhide") || fixedUrl.contains("filelions")) {
+                                                val mediaId = Regex("""(?:v\/|\/d\/|\/v=|\/)([a-zA-Z0-9_-]+)""").find(fixedUrl)?.groupValues?.get(1)
+                                                if (!mediaId.isNullOrBlank()) {
+                                                    logDebug("[VidHide] Media ID extracted: $mediaId -> Trying normalized vidhidepro.com")
+                                                    loadExtractor("https://vidhidepro.com/v/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                    if (visitedStreamUrls.size == countBefore) {
+                                                        loadExtractor("https://vidhidepro.com/d/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                    }
+                                                } else {
+                                                    logDebug("[VidHide] Media ID extraction failed. Fallback to raw URL: $fixedUrl")
+                                                    loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                }
+                                            } else {
+                                                // General Fallback
+                                                loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                            }
                                         }
+                                    }
+                                }.onFailure { err ->
+                                    logDebug("Failed to decode Base64 mirror: ${err.message}")
+                                }
+                            }
 
-                                        val countBefore = visitedStreamUrls.size
-
-                                        // 1. Penanganan TurboVIP (emturbovid.com)
-                                        if (fixedUrl.contains("emturbovid.com") || fixedUrl.contains("turboviplay.com")) {
-                                            logDebug("Processing TurboVIP via extractTurboVipDirect: $fixedUrl")
-                                            extractTurboVipDirect(fixedUrl, pageUrl, serverName, safeLinkCallback)
-                                        } 
-                                        // 2. Penanganan Hydrax (abyssplayer.com / abyss.to)
-                                        else if (fixedUrl.contains("abyss") || fixedUrl.contains("hydrax")) {
-                                            val mediaId = Regex("""(?:v=|\/v\/|\/)([a-zA-Z0-9_-]+)""").find(fixedUrl)?.groupValues?.get(1)
-                                            if (mediaId != null) {
-                                                logDebug("Processing Hydrax with ID: $mediaId")
-                                                loadExtractor("https://abyss.to/v/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
-                                                if (visitedStreamUrls.size == countBefore) {
-                                                    loadExtractor("https://abyss.to/?v=$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
-                                                }
+                            // Secondary Fallback: Iframe Default di DOM (#pembed)
+                            if (visitedStreamUrls.isEmpty()) {
+                                val defaultIframes = doc.select(".player-embed iframe, #pembed iframe, .mvelement iframe")
+                                for (iframe in defaultIframes) {
+                                    val src = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
+                                    if (src.isNotBlank()) {
+                                        val fixedUrl = fixUrl(src)
+                                        if (visitedEmbedUrls.add(fixedUrl)) {
+                                            logDebug("Attempting loadExtractor for DOM Iframe: $fixedUrl")
+                                            if (fixedUrl.contains("emturbovid.com") || fixedUrl.contains("turboviplay.com")) {
+                                                extractTurboVipWithFallback(fixedUrl, pageUrl, "TurboVIP", safeSubtitleCallback, safeLinkCallback)
+                                            } else {
+                                                loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
                                             }
-                                        } 
-                                        // 3. Penanganan FileLions / VidHide (minochinos.com)
-                                        else if (fixedUrl.contains("minochinos.com") || fixedUrl.contains("vidhide") || fixedUrl.contains("filelions")) {
-                                            val mediaId = Regex("""(?:v\/|\/d\/|\/v=|\/)([a-zA-Z0-9_-]+)""").find(fixedUrl)?.groupValues?.get(1)
-                                            if (mediaId != null) {
-                                                logDebug("Processing FileLions/VidHide with ID: $mediaId")
-                                                loadExtractor("https://vidhidepro.com/v/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
-                                                if (visitedStreamUrls.size == countBefore) {
-                                                    loadExtractor("https://vidhidepro.com/d/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
-                                                }
-                                            }
-                                        } else {
-                                            loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
                                         }
                                     }
                                 }
-                            }.onFailure { err ->
-                                logDebug("Failed to decode Base64 mirror: ${err.message}")
                             }
+                        }.onFailure { err ->
+                            logDebug("Failed to process page $pageUrl: ${err.message}")
                         }
-
-                        // Fallback: Iframe Default di DOM (#pembed) jika tidak ada link dari Base64
-                        if (visitedStreamUrls.isEmpty()) {
-                            val defaultIframes = doc.select(".player-embed iframe, #pembed iframe, .mvelement iframe")
-                            for (iframe in defaultIframes) {
-                                val src = iframe.attr("src").ifEmpty { iframe.attr("SRC") }
-                                if (src.isNotBlank()) {
-                                    val fixedUrl = fixUrl(src)
-                                    if (visitedEmbedUrls.add(fixedUrl)) {
-                                        logDebug("Attempting loadExtractor for DOM Iframe: $fixedUrl")
-                                        if (fixedUrl.contains("emturbovid.com") || fixedUrl.contains("turboviplay.com")) {
-                                            extractTurboVipDirect(fixedUrl, pageUrl, "TurboVIP", safeLinkCallback)
-                                        } else {
-                                            loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }.onFailure { err ->
-                        logDebug("Failed to process page $pageUrl: ${err.message}")
                     }
                 }
             }.awaitAll()
@@ -375,21 +398,25 @@ class OppaDramaProvider : MainAPI() {
         return visitedStreamUrls.isNotEmpty()
     }
 
-    // Custom Unpacker Khusus TurboVIP (Membaca atribut data-hash terlebih dahulu)
-    private suspend fun extractTurboVipDirect(
+    // Ekstraksi TurboVIP Berbasis Hierarki Strict Fallback
+    private suspend fun extractTurboVipWithFallback(
         url: String,
         referer: String,
         serverName: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return runCatching {
             val doc = app.get(url, referer = referer, headers = headersMap).document
             
-            // Primary: Ambil M3U8 langsung dari atribut data-hash pada #video_player
+            // Level 1: Baca data-hash langsung dari DOM #video_player
             var m3u8Url = doc.selectFirst("#video_player[data-hash]")?.attr("data-hash")?.trim()
 
-            // Secondary: Fallback JS Unpacker jika data-hash dihilangkan
-            if (m3u8Url.isNullOrBlank()) {
+            if (!m3u8Url.isNullOrBlank()) {
+                logDebug("[TurboVIP Level 1 Success] Found M3U8 via data-hash: $m3u8Url")
+            } else {
+                // Level 2 & 3: JS Unpacker -> Regex M3U8
+                logDebug("[TurboVIP Level 1 Failed] Trying Level 2 JS Unpacker")
                 val html = doc.html()
                 val unpacked = getAndUnpack(html)
                 m3u8Url = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""").find(unpacked)?.groupValues?.get(1)
@@ -398,7 +425,6 @@ class OppaDramaProvider : MainAPI() {
 
             if (!m3u8Url.isNullOrBlank()) {
                 val fixedM3u8 = fixUrl(m3u8Url)
-                logDebug("extractTurboVipDirect -> Direct M3U8 found: $fixedM3u8")
                 callback(
                     newExtractorLink(
                         source = serverName,
@@ -412,8 +438,10 @@ class OppaDramaProvider : MainAPI() {
                 )
                 true
             } else {
-                logDebug("extractTurboVipDirect -> No M3U8 URL found on $url")
-                false
+                // Level 4: loadExtractor bawaan CloudStream sebagai pertahanan terakhir
+                logDebug("[TurboVIP Level 2 Failed] Trying Level 4 loadExtractor built-in")
+                val altUrl = if (url.contains("/t/")) url.replace("/t/", "/v/") else url
+                loadExtractor(altUrl, referer = url, subtitleCallback, callback)
             }
         }.getOrElse { false }
     }
