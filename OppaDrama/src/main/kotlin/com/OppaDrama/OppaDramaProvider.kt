@@ -124,7 +124,7 @@ class OppaDramaProvider : MainAPI() {
         val title = doc.selectFirst(".infolimit h2, h1.entry-title, h1[itemprop=name], h1.title")?.text()?.trim() 
             ?: "OPPADRAMA"
 
-        // 3. Poster Utama
+        // 3. Poster Utama Spesifik
         val rawPoster = doc.selectFirst(".single-info .thumb img, .megavid .tb img, .poster img")?.let { img ->
             img.attr("data-src").ifEmpty { img.attr("src") }
         }
@@ -247,6 +247,7 @@ class OppaDramaProvider : MainAPI() {
         val versionList = tryParseJson<List<MovieVersionData>>(data) 
             ?: listOf(MovieVersionData(data, ""))
 
+        // Deduplikasi Thread-Safe
         val visitedEmbedUrls = ConcurrentHashMap.newKeySet<String>()
         val visitedStreamUrls = ConcurrentHashMap.newKeySet<String>()
         val visitedSubtitleUrls = ConcurrentHashMap.newKeySet<String>()
@@ -301,14 +302,16 @@ class OppaDramaProvider : MainAPI() {
                                     if (rawSrc.isNotBlank()) {
                                         val fixedUrl = fixUrl(rawSrc)
 
+                                        // Stase 1 Deduplikasi Embed
                                         if (!visitedEmbedUrls.add(fixedUrl)) {
+                                            logDebug("Embed URL skipped (Pre-Extractor Duplicate): $fixedUrl")
                                             continue
                                         }
 
                                         val countBefore = visitedStreamUrls.size
 
                                         // 1. Penanganan TurboVIP (emturbovid.com)
-                                        if (fixedUrl.contains("emturbovid.com")) {
+                                        if (fixedUrl.contains("emturbovid.com") || fixedUrl.contains("turboviplay.com")) {
                                             logDebug("Processing TurboVIP via extractTurboVipDirect: $fixedUrl")
                                             extractTurboVipDirect(fixedUrl, pageUrl, serverName, safeLinkCallback)
                                         } 
@@ -328,14 +331,12 @@ class OppaDramaProvider : MainAPI() {
                                             val mediaId = Regex("""(?:v\/|\/d\/|\/v=|\/)([a-zA-Z0-9_-]+)""").find(fixedUrl)?.groupValues?.get(1)
                                             if (mediaId != null) {
                                                 logDebug("Processing FileLions/VidHide with ID: $mediaId")
-                                                // Coba via vidhidepro.com yang terbukti berfungsi
                                                 loadExtractor("https://vidhidepro.com/v/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
                                                 if (visitedStreamUrls.size == countBefore) {
                                                     loadExtractor("https://vidhidepro.com/d/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
                                                 }
                                             }
                                         } else {
-                                            // General Extractor
                                             loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
                                         }
                                     }
@@ -354,7 +355,7 @@ class OppaDramaProvider : MainAPI() {
                                     val fixedUrl = fixUrl(src)
                                     if (visitedEmbedUrls.add(fixedUrl)) {
                                         logDebug("Attempting loadExtractor for DOM Iframe: $fixedUrl")
-                                        if (fixedUrl.contains("emturbovid.com")) {
+                                        if (fixedUrl.contains("emturbovid.com") || fixedUrl.contains("turboviplay.com")) {
                                             extractTurboVipDirect(fixedUrl, pageUrl, "TurboVIP", safeLinkCallback)
                                         } else {
                                             loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
@@ -374,7 +375,7 @@ class OppaDramaProvider : MainAPI() {
         return visitedStreamUrls.isNotEmpty()
     }
 
-    // Custom Unpacker Khusus TurboVIP
+    // Custom Unpacker Khusus TurboVIP (Membaca atribut data-hash terlebih dahulu)
     private suspend fun extractTurboVipDirect(
         url: String,
         referer: String,
@@ -382,28 +383,36 @@ class OppaDramaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return runCatching {
-            val html = app.get(url, referer = referer).text
-            val unpacked = getAndUnpack(html)
+            val doc = app.get(url, referer = referer, headers = headersMap).document
             
-            val m3u8Url = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""").find(unpacked)?.groupValues?.get(1)
-                ?: Regex("""file:\s*"([^"]+)"""").find(unpacked)?.groupValues?.get(1)
+            // Primary: Ambil M3U8 langsung dari atribut data-hash pada #video_player
+            var m3u8Url = doc.selectFirst("#video_player[data-hash]")?.attr("data-hash")?.trim()
+
+            // Secondary: Fallback JS Unpacker jika data-hash dihilangkan
+            if (m3u8Url.isNullOrBlank()) {
+                val html = doc.html()
+                val unpacked = getAndUnpack(html)
+                m3u8Url = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""").find(unpacked)?.groupValues?.get(1)
+                    ?: Regex("""file:\s*"([^"]+)"""").find(unpacked)?.groupValues?.get(1)
+            }
 
             if (!m3u8Url.isNullOrBlank()) {
-                logDebug("extractTurboVipDirect -> Direct M3U8 found: $m3u8Url")
+                val fixedM3u8 = fixUrl(m3u8Url)
+                logDebug("extractTurboVipDirect -> Direct M3U8 found: $fixedM3u8")
                 callback(
                     newExtractorLink(
                         source = serverName,
                         name = serverName,
-                        url = m3u8Url,
+                        url = fixedM3u8,
                         type = ExtractorLinkType.M3U8
                     ) {
-                        this.referer = url
+                        this.referer = "https://turboviplay.com/"
                         this.headers = mapOf("User-Agent" to USER_AGENT)
                     }
                 )
                 true
             } else {
-                logDebug("extractTurboVipDirect -> No M3U8 link found in unpacked JS")
+                logDebug("extractTurboVipDirect -> No M3U8 URL found on $url")
                 false
             }
         }.getOrElse { false }
