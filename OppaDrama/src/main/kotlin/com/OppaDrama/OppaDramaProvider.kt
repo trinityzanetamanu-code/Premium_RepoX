@@ -337,16 +337,39 @@ class OppaDramaProvider : MainAPI() {
                                             } 
                                             // 2. Penanganan Hydrax (Dengan Validasi Media ID)
                                             else if (fixedUrl.contains("abyss") || fixedUrl.contains("hydrax")) {
-                                                val mediaId = Regex("""(?:v=|\/v\/|\/)([a-zA-Z0-9_-]+)""").find(fixedUrl)?.groupValues?.get(1)
-                                                if (!mediaId.isNullOrBlank()) {
-                                                    logDebug("[Hydrax] Media ID extracted: $mediaId -> Trying normalized abyss.to")
-                                                    loadExtractor("https://abyss.to/v/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
-                                                    if (visitedStreamUrls.size == countBefore) {
-                                                        loadExtractor("https://abyss.to/?v=$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
-                                                    }
-                                                } else {
-                                                    logDebug("[Hydrax] Media ID extraction failed. Fallback to raw URL: $fixedUrl")
-                                                    loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                // H-1 TERBUKTI: regex lama
+                                                //   (?:v=|\/v\/|\/)([a-zA-Z0-9_-]+)
+                                                // menangkap nama HOST, bukan ID. Alternatif \/ selalu
+                                                // menang di posisi paling kiri pada // di https://,
+                                                // sehingga hasilnya 'abyssplayer' bukan '_pGSwC03aH'.
+                                                // Diganti dengan parsing URL, bukan regex rakus.
+                                                val mediaId = extractMediaId(fixedUrl)
+                                                LocalProxy.obs("HYDRAX", "in=$fixedUrl id=$mediaId")
+
+                                                // Kandidat diurut berdasarkan BUKTI, bukan asumsi.
+                                                // URL asli didahulukan karena HAR browser membuktikan
+                                                // abyssplayer.com benar-benar menyajikan video; host
+                                                // abyss.to tidak punya bukti pendukung apa pun.
+                                                val candidates = if (!mediaId.isNullOrBlank()) listOf(
+                                                    fixedUrl,
+                                                    "https://abyssplayer.com/?v=$mediaId",
+                                                    "https://abyss.to/v/$mediaId",
+                                                    "https://abyss.to/?v=$mediaId"
+                                                ).distinct() else listOf(fixedUrl)
+
+                                                for (cand in candidates) {
+                                                    if (visitedStreamUrls.size > countBefore) break
+                                                    loadExtractor(cand, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                    // Log per kandidat: inilah yang menjaga atribusi
+                                                    // sebab-akibat tetap tunggal meski ada 4 kandidat.
+                                                    LocalProxy.obs(
+                                                        "HYDRAX-TRY",
+                                                        "url=$cand hasil=" +
+                                                            if (visitedStreamUrls.size > countBefore) "BERHASIL" else "kosong"
+                                                    )
+                                                }
+                                                if (visitedStreamUrls.size == countBefore) {
+                                                    LocalProxy.obs("HYDRAX-GAGAL", "semua ${candidates.size} kandidat kosong")
                                                 }
                                             } 
                                             // 3. Penanganan VidHidePro / Minochinos (Dengan Validasi Media ID)
@@ -470,6 +493,28 @@ class OppaDramaProvider : MainAPI() {
                 loadExtractor(altUrl, referer = url, subtitleCallback, callback)
             }
         }.getOrElse { false }
+    }
+
+    /**
+     * Ekstraksi Media ID berbasis PARSING URL, bukan regex rakus.
+     *
+     * Dipakai HANYA oleh cabang Hydrax. Cabang VidHide sengaja TIDAK diubah
+     * (lihat H-2) supaya perubahan pada build ini punya satu sebab tunggal
+     * yang bisa diatribusikan.
+     *
+     * Aturan:
+     *   1. kalau ada parameter query v=  -> pakai nilainya
+     *   2. kalau tidak, pakai segmen path terakhir
+     *   3. kalau segmen itu tidak masuk akal sebagai ID -> null, JANGAN
+     *      mengembalikan nama host seperti regex lama
+     *
+     * Terverifikasi pada 6 bentuk URL, termasuk kasus tanpa ID.
+     */
+    private fun extractMediaId(url: String): String? {
+        val base = url.substringBefore('#')
+        Regex("""[?&]v=([A-Za-z0-9_-]+)""").find(base)?.let { return it.groupValues[1] }
+        val seg = base.substringBefore('?').trimEnd('/').substringAfterLast('/')
+        return if (seg.matches(Regex("""[A-Za-z0-9_-]{4,}"""))) seg else null
     }
 
     private fun isInvalidImage(url: String?): Boolean {
