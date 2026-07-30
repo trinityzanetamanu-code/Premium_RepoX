@@ -11,51 +11,54 @@ import java.net.SocketException
 import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * MILESTONE 2 — HTTP passthrough. MENGGANTIKAN LocalServer.kt (hapus file itu).
+ * M3 + M4 — proxy lokal dengan pemindaian sync dinamis dan pemotongan prefix.
+ * MENGGANTIKAN LocalServer.kt dan versi M2 LocalProxy. Hapus keduanya.
  *
- * Ruang lingkup: byte keluar WAJIB identik dengan byte upstream.
- * TIDAK ada scanner. TIDAK ada strip. Itu M3 dan M4.
+ * TIGA HAL YANG DIKERJAKAN:
  *
- * Perubahan desain dari M1, beserta alasannya:
+ *  1. PENULISAN ULANG PLAYLIST. Ini yang tidak ada di rencana milestone dan
+ *     tanpanya seluruh desain tidak mungkin bekerja. URI segmen di playlist
+ *     adalah URL absolut ke lh3.googleusercontent.com; kalau tidak ditulis
+ *     ulang, ExoPlayer mengambilnya LANGSUNG dan proxy dilewati sepenuhnya.
+ *     Setiap URI diganti menjadi http://127.0.0.1:PORT/p?u=<encoded>.
+ *     Master -> variant -> segmen bekerja rekursif dengan sendirinya.
  *
- *  - PORT DETERMINISTIK. M1 memakai port 0 sehingga OS memilih port acak tiap
- *    start. Untuk M2 itu berbahaya: kalau plugin dimuat ulang saat film sedang
- *    berjalan, port berganti dan URL yang sudah dipegang ExoPlayer jadi mati.
- *    Dengan port preferensi + fallback berurutan, nomornya stabil lintas reload
- *    dan pertanyaan lifecycle R2 tidak lagi memengaruhi arsitektur.
+ *  2. SCANNER SYNC DINAMIS. Mencari 0x47 ber-alignment 188 byte, sama seperti
+ *     yang divalidasi di Python pada 74 segmen lintas 2 judul / 4 varian.
+ *     Angka 941 TIDAK di-hardcode di mana pun: ia properti satu aset gambar
+ *     (806 PNG + 135 padding), bukan bagian spesifikasi MPEG-TS/HLS.
+ *     Kalau TurboVIP mengganti wrapper, scanner tetap benar.
  *
- *  - ALLOWLIST BERBASIS SUFFIX DOMAIN, bukan host literal. F-34 membuktikan
- *    host CDN berbeda per judul (g282/g269 vs g266/g279) sementara wrapper
- *    tidak. Allowlist host literal akan pecah di judul kedua.
+ *  3. PEMOTONGAN STREAMING. Memori konstan. Hanya jendela pemindaian yang
+ *     ditampung; sisanya dipompa langsung.
  *
- *  - REDIRECT DIIKUTI MANUAL, dengan pemeriksaan allowlist DI SETIAP HOP.
- *    instanceFollowRedirects=true akan mengikuti Location ke host mana pun dan
- *    itu melubangi allowlist-nya sendiri.
- *
- *  - MEMORI KONSTAN. Buffer tetap, tidak pernah menampung seluruh segmen.
- *
- *  - Range DITERUSKAN VERBATIM. Ini bukan pekerjaan M5, ini konsekuensi dari
- *    passthrough yang setia: menghapus header justru membuat byte tidak
- *    identik. Penerjemahan offset Range baru menjadi pekerjaan nyata di M4.
+ * FAIL-SAFE: kalau sync tidak ditemukan, byte diteruskan APA ADANYA tanpa
+ * dipotong. Lebih baik gagal seperti sebelumnya daripada merusak stream yang
+ * sebetulnya sehat.
  */
 object LocalProxy {
 
     private const val PREFERRED_PORT = 47821
     private const val PORT_FALLBACK_TRIES = 12
     private const val BUF = 64 * 1024
+    private const val SCAN_WINDOW = 64 * 1024
+    private const val PROBE_BYTES = 8192
     private const val MAX_REDIRECTS = 5
+    private const val PKT = 188
+    private const val SYNC = 0x47.toByte()
+    private const val NEED_PACKETS = 8
 
-    /** Suffix domain yang diizinkan. Awalan '.' berarti cocokkan sebagai suffix. */
     private val ALLOWED = listOf(
         ".turbosplayer.com",
         ".googleusercontent.com",
+        ".turboviplay.com",
         "cdn.turboviplay.com",
-        "turbovidhls.com",
-        ".turboviplay.com"
+        "turbovidhls.com"
     )
 
     private const val UA =
@@ -78,7 +81,13 @@ object LocalProxy {
     val swallowed = AtomicInteger(0)
     val proxied = AtomicInteger(0)
     val denied = AtomicInteger(0)
+    val playlists = AtomicInteger(0)
+    val stripped = AtomicInteger(0)
+    val noSync = AtomicInteger(0)
     val bytesOut = AtomicLong(0)
+
+    /** offset hasil PENEMUAN per URL, bukan asumsi. Dipakai untuk Range. */
+    private val offsetCache = ConcurrentHashMap<String, Int>()
 
     @Volatile
     private var socket: ServerSocket? = null
@@ -89,45 +98,44 @@ object LocalProxy {
     val uptimeSec: Long
         get() = if (startedAtMs == 0L) 0L else (System.currentTimeMillis() - startedAtMs) / 1000
 
+    val lastOffsets: String
+        get() = offsetCache.values.distinct().sorted().joinToString(",").ifEmpty { "-" }
+
     // ------------------------------------------------------------- lifecycle
 
     @Synchronized
     fun start(): Boolean {
         if (isRunning) return true
-        val loopback = InetAddress.getByName("127.0.0.1")
-        var bound: ServerSocket? = null
+        val lo = InetAddress.getByName("127.0.0.1")
+        var ss: ServerSocket? = null
         var lastEx: Throwable? = null
-
-        // port deterministik dulu, lalu fallback berurutan, terakhir port 0
         for (i in 0 until PORT_FALLBACK_TRIES) {
-            bound = try {
-                ServerSocket(PREFERRED_PORT + i, 64, loopback)
+            ss = try {
+                ServerSocket(PREFERRED_PORT + i, 64, lo)
             } catch (e: Throwable) {
                 lastEx = e; null
             }
-            if (bound != null) break
+            if (ss != null) break
         }
-        if (bound == null) {
-            bound = try {
-                ServerSocket(0, 64, loopback)
-            } catch (e: Throwable) {
-                lastEx = e; null
-            }
+        if (ss == null) ss = try {
+            ServerSocket(0, 64, lo)
+        } catch (e: Throwable) {
+            lastEx = e; null
         }
-        if (bound == null) {
+        if (ss == null) {
             lastError = "bind: ${lastEx?.javaClass?.simpleName}: ${lastEx?.message}"
             obs("START-FAIL", lastError!!)
             port = -1
             return false
         }
-
-        socket = bound
-        port = bound.localPort
+        socket = ss
+        port = ss.localPort
         startedAtMs = System.currentTimeMillis()
         served.set(0); swallowed.set(0); proxied.set(0); denied.set(0)
-        bytesOut.set(0); lastError = null
+        playlists.set(0); stripped.set(0); noSync.set(0); bytesOut.set(0)
+        offsetCache.clear(); lastError = null
 
-        Thread({ acceptLoop(bound) }, "OppaDrama-proxy").apply {
+        Thread({ acceptLoop(ss) }, "OppaDrama-proxy").apply {
             isDaemon = true
             start()
         }
@@ -142,29 +150,55 @@ object LocalProxy {
         } catch (_: Throwable) {
         }
         socket = null
-        obs("STOP", "served=${served.get()} proxied=${proxied.get()}")
+        obs("STOP", "served=${served.get()} stripped=${stripped.get()}")
     }
 
     // ------------------------------------------------------------------- URL
 
-    /** Bangun URL proxy. WAJIB dipanggil saat emit, jangan di-cache. */
+    /** Bangun URL proxy. WAJIB dipanggil saat emit, jangan pernah di-cache. */
     fun proxyUrl(upstream: String): String? {
         if (!isRunning || port <= 0) return null
-        val enc = URLEncoder.encode(upstream, "UTF-8")
-        return "http://127.0.0.1:$port/p?u=$enc"
+        return "http://127.0.0.1:$port/p?u=" + URLEncoder.encode(upstream, "UTF-8")
     }
 
-    fun isAllowed(rawUrl: String): Boolean {
+    fun isAllowed(raw: String): Boolean {
         val host = try {
-            URL(rawUrl).host?.lowercase() ?: return false
+            URL(raw).host?.lowercase() ?: return false
         } catch (_: Throwable) {
             return false
         }
         if (host.isEmpty()) return false
-        return ALLOWED.any { entry ->
-            if (entry.startsWith(".")) host == entry.substring(1) || host.endsWith(entry)
-            else host == entry
+        return ALLOWED.any { e ->
+            if (e.startsWith(".")) host == e.substring(1) || host.endsWith(e) else host == e
         }
+    }
+
+    // --------------------------------------------------------------- scanner
+
+    /**
+     * Cari offset paket TS pertama: 0x47 yang berulang tiap 188 byte
+     * sebanyak NEED_PACKETS kali. Identik dengan algoritma yang divalidasi
+     * di tv5/tv6. Return -1 kalau tidak ditemukan.
+     */
+    fun findSync(b: ByteArray, len: Int, need: Int = NEED_PACKETS): Int {
+        val limit = len - PKT * need
+        if (limit <= 0) return -1
+        var i = 0
+        while (i < limit) {
+            if (b[i] == SYNC) {
+                var ok = true
+                var k = 1
+                while (k < need) {
+                    if (b[i + k * PKT] != SYNC) {
+                        ok = false; break
+                    }
+                    k++
+                }
+                if (ok) return i
+            }
+            i++
+        }
+        return -1
     }
 
     // ---------------------------------------------------------------- server
@@ -173,7 +207,7 @@ object LocalProxy {
         while (!ss.isClosed) {
             val c = try {
                 ss.accept()
-            } catch (e: Throwable) {
+            } catch (_: Throwable) {
                 if (ss.isClosed) return
                 swallowed.incrementAndGet()
                 continue
@@ -189,37 +223,110 @@ object LocalProxy {
 
     private fun readRequest(input: InputStream): Req? {
         val sb = StringBuilder()
-        var requestLine: String? = null
-        val headers = LinkedHashMap<String, String>()
+        var reqLine: String? = null
+        val h = LinkedHashMap<String, String>()
         while (true) {
             val b = input.read()
             if (b == -1) break
             if (b == '\n'.code) {
                 val line = sb.toString().trim()
                 sb.setLength(0)
-                if (requestLine == null) {
-                    requestLine = line
-                } else if (line.isEmpty()) {
-                    break
-                } else {
+                if (reqLine == null) reqLine = line
+                else if (line.isEmpty()) break
+                else {
                     val i = line.indexOf(':')
-                    if (i > 0) headers[line.substring(0, i).trim().lowercase()] =
+                    if (i > 0) h[line.substring(0, i).trim().lowercase()] =
                         line.substring(i + 1).trim()
                 }
-            } else if (b != '\r'.code) {
-                sb.append(b.toChar())
+            } else if (b != '\r'.code) sb.append(b.toChar())
+        }
+        val rl = reqLine ?: return null
+        val p = rl.split(" ").getOrNull(1) ?: return null
+        return Req(p, h)
+    }
+
+    private class Up(
+        val conn: HttpURLConnection?, val finalUrl: String, val hops: Int
+    )
+
+    /** Buka upstream, ikuti redirect MANUAL dengan cek allowlist tiap hop. */
+    private fun openUpstream(start: String, range: String?): Up {
+        var url = start
+        var hops = 0
+        while (true) {
+            val c = try {
+                (URL(url).openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = false
+                    connectTimeout = 20_000
+                    readTimeout = 30_000
+                    requestMethod = "GET"
+                    setRequestProperty("User-Agent", UA)
+                    setRequestProperty("Accept", "*/*")
+                    range?.let { setRequestProperty("Range", it) }
+                }
+            } catch (_: Throwable) {
+                return Up(null, url, hops)
+            }
+            val code = try {
+                c.responseCode
+            } catch (_: Throwable) {
+                c.disconnect(); return Up(null, url, hops)
+            }
+            if (code in 301..308 && code != 304) {
+                val loc = c.getHeaderField("Location")
+                c.disconnect()
+                if (loc.isNullOrBlank() || ++hops > MAX_REDIRECTS) return Up(null, url, hops)
+                val next = try {
+                    URL(URL(url), loc).toString()
+                } catch (_: Throwable) {
+                    return Up(null, url, hops)
+                }
+                if (!isAllowed(next)) {
+                    denied.incrementAndGet()
+                    obs("DENY-REDIRECT", "host=${hostOf(next)}")
+                    return Up(null, next, hops)
+                }
+                url = next
+                continue
+            }
+            return Up(c, url, hops)
+        }
+    }
+
+    /** Probe kecil untuk menemukan offset tanpa mengunduh seluruh segmen. */
+    private fun probeOffset(url: String): Int {
+        offsetCache[url]?.let { return it }
+        val up = openUpstream(url, "bytes=0-${PROBE_BYTES - 1}")
+        val c = up.conn ?: return -1
+        return try {
+            val buf = ByteArray(PROBE_BYTES)
+            var n = 0
+            val ins = c.inputStream
+            while (n < buf.size) {
+                val r = ins.read(buf, n, buf.size - n)
+                if (r <= 0) break
+                n += r
+            }
+            val off = findSync(buf, n)
+            if (off >= 0) offsetCache[url] = off
+            off
+        } catch (_: Throwable) {
+            -1
+        } finally {
+            try {
+                c.disconnect()
+            } catch (_: Throwable) {
             }
         }
-        val rl = requestLine ?: return null
-        val path = rl.split(" ").getOrNull(1) ?: return null
-        return Req(path, headers)
     }
 
     private fun handle(client: Socket) {
-        var upstreamUrl = "-"
+        var upUrl = "-"
         var status = -1
         var lenAsli = -1L
+        var offset = 0
         var sent = 0L
+        var kind = "-"
         val t0 = System.currentTimeMillis()
         try {
             client.soTimeout = 30_000
@@ -230,107 +337,134 @@ object LocalProxy {
             served.incrementAndGet()
             val out = client.getOutputStream()
 
-            val qIdx = req.path.indexOf('?')
-            val route = if (qIdx >= 0) req.path.substring(0, qIdx) else req.path
-            val query = if (qIdx >= 0) req.path.substring(qIdx + 1) else ""
+            val q = req.path.indexOf('?')
+            val route = if (q >= 0) req.path.substring(0, q) else req.path
+            val query = if (q >= 0) req.path.substring(q + 1) else ""
 
             if (route == "/ping" || route == "/") {
                 val body = buildString {
                     append("ok\nport=$port\nserved=${served.get()}\n")
                     append("uptime_sec=$uptimeSec\nstarted_at_ms=$startedAtMs\n")
-                    append("proxied=${proxied.get()}\ndenied=${denied.get()}\n")
+                    append("playlists=${playlists.get()}\nstripped=${stripped.get()}\n")
+                    append("no_sync=${noSync.get()}\ndenied=${denied.get()}\n")
                     append("swallowed=${swallowed.get()}\nbytes_out=${bytesOut.get()}\n")
+                    append("offsets_ditemukan=$lastOffsets\n")
                 }.toByteArray()
                 writeHead(out, 200, "text/plain; charset=utf-8", body.size.toLong(), null)
                 out.write(body); out.flush()
-                obs("PING", "served=${served.get()} uptime=${uptimeSec}s")
                 return
             }
-
             if (route != "/p") {
                 val b = "not found\n".toByteArray()
                 writeHead(out, 404, "text/plain", b.size.toLong(), null)
-                out.write(b); out.flush()
-                return
+                out.write(b); out.flush(); return
             }
 
-            upstreamUrl = param(query, "u") ?: run {
+            upUrl = param(query, "u") ?: run {
                 val b = "missing u\n".toByteArray()
                 writeHead(out, 400, "text/plain", b.size.toLong(), null)
-                out.write(b); out.flush()
-                return
+                out.write(b); out.flush(); return
             }
-
-            if (!isAllowed(upstreamUrl)) {
+            if (!isAllowed(upUrl)) {
                 denied.incrementAndGet()
                 val b = "host not allowed\n".toByteArray()
                 writeHead(out, 403, "text/plain", b.size.toLong(), null)
                 out.write(b); out.flush()
-                obs("DENY", "host=${hostOf(upstreamUrl)}")
+                obs("DENY", "host=${hostOf(upUrl)}")
                 return
             }
 
-            // ---- upstream, redirect diikuti manual + allowlist per hop ----
-            var url = upstreamUrl
-            var conn: HttpURLConnection? = null
-            var hops = 0
-            while (true) {
-                val c = (URL(url).openConnection() as HttpURLConnection).apply {
-                    instanceFollowRedirects = false
-                    connectTimeout = 20_000
-                    readTimeout = 30_000
-                    requestMethod = "GET"
-                    setRequestProperty("User-Agent", UA)
-                    setRequestProperty("Accept", "*/*")
-                    req.headers["range"]?.let { setRequestProperty("Range", it) }
+            val clientRange = req.headers["range"]
+
+            // ---------- cabang 1: Range diminta klien ----------
+            if (clientRange != null) {
+                kind = "range"
+                val off = probeOffset(upUrl)
+                offset = if (off > 0) off else 0
+                val translated = translateRange(clientRange, offset)
+                val up = openUpstream(upUrl, translated)
+                val c = up.conn ?: run {
+                    val b = "upstream refused\n".toByteArray()
+                    writeHead(out, 502, "text/plain", b.size.toLong(), null)
+                    out.write(b); out.flush(); return
                 }
-                val code = c.responseCode
-                if (code in 301..308 && code != 304) {
-                    val loc = c.getHeaderField("Location")
-                    c.disconnect()
-                    if (loc.isNullOrBlank() || ++hops > MAX_REDIRECTS) {
-                        conn = null; break
-                    }
-                    val next = URL(URL(url), loc).toString()
-                    if (!isAllowed(next)) {
-                        denied.incrementAndGet()
-                        obs("DENY-REDIRECT", "host=${hostOf(next)}")
-                        conn = null; break
-                    }
-                    url = next
-                    continue
-                }
-                conn = c
-                break
+                status = c.responseCode
+                lenAsli = c.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
+                val cr = c.getHeaderField("Content-Range")
+                writeHead(
+                    out, status, c.contentType ?: "video/mp2t", lenAsli,
+                    rewriteContentRange(cr, offset)
+                )
+                sent = pump(safeStream(c), out)
+                out.flush()
+                proxied.incrementAndGet(); bytesOut.addAndGet(sent)
+                c.disconnect()
+                return
             }
 
-            if (conn == null) {
+            // ---------- ambil upstream ----------
+            val up = openUpstream(upUrl, null)
+            val c = up.conn ?: run {
                 val b = "upstream refused\n".toByteArray()
                 writeHead(out, 502, "text/plain", b.size.toLong(), null)
                 out.write(b); out.flush()
-                obs("PROXY-FAIL", "url=${shortUrl(upstreamUrl)} hops=$hops")
+                obs("PROXY-FAIL", "url=${shortUrl(upUrl)} hops=${up.hops}")
+                return
+            }
+            status = c.responseCode
+            lenAsli = c.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
+            val ctype = c.contentType ?: "application/octet-stream"
+            val ins = safeStream(c)
+
+            // baca jendela awal: cukup untuk membedakan playlist vs media,
+            // dan cukup untuk menemukan sync
+            val win = ByteArray(SCAN_WINDOW)
+            var wn = 0
+            while (wn < win.size) {
+                val r = ins.read(win, wn, win.size - wn)
+                if (r <= 0) break
+                wn += r
+            }
+
+            // ---------- cabang 2: playlist -> tulis ulang ----------
+            if (looksLikePlaylist(ctype, up.finalUrl, win, wn)) {
+                kind = "playlist"
+                // playlist kecil: aman dibaca penuh
+                val rest = ins.readBytes()
+                val whole = ByteArray(wn + rest.size)
+                System.arraycopy(win, 0, whole, 0, wn)
+                System.arraycopy(rest, 0, whole, wn, rest.size)
+                val body = rewritePlaylist(String(whole, Charsets.UTF_8), up.finalUrl)
+                    .toByteArray(Charsets.UTF_8)
+                // Content-Length WAJIB dihitung ulang: body berubah.
+                writeHead(out, status, "application/vnd.apple.mpegurl", body.size.toLong(), null)
+                out.write(body); out.flush()
+                sent = body.size.toLong()
+                playlists.incrementAndGet(); proxied.incrementAndGet()
+                bytesOut.addAndGet(sent)
+                c.disconnect()
                 return
             }
 
-            status = conn.responseCode
-            lenAsli = conn.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
-            val ctype = conn.contentType ?: "application/octet-stream"
-            val contentRange = conn.getHeaderField("Content-Range")
-
-            // M2: Content-Length diteruskan APA ADANYA. Di M4 nilai ini
-            // menjadi lenAsli - offset.
-            writeHead(out, status, ctype, lenAsli, contentRange)
-
-            val ins: InputStream = try {
-                conn.inputStream
-            } catch (_: Throwable) {
-                conn.errorStream ?: return
+            // ---------- cabang 3: media -> cari sync, potong ----------
+            kind = "media"
+            offset = findSync(win, wn)
+            if (offset < 0) {
+                // FAIL-SAFE: tidak ditemukan sync, teruskan tanpa dipotong
+                noSync.incrementAndGet()
+                offset = 0
+                kind = "media-nosync"
+            } else {
+                offsetCache[upUrl] = offset
+                if (offset > 0) stripped.incrementAndGet()
             }
-            sent = pump(ins, out)
+            val newLen = if (lenAsli >= 0) (lenAsli - offset).coerceAtLeast(0) else -1L
+            writeHead(out, status, ctype, newLen, null)
+            if (wn > offset) out.write(win, offset, wn - offset)
+            sent = (wn - offset).toLong().coerceAtLeast(0) + pump(ins, out)
             out.flush()
-            proxied.incrementAndGet()
-            bytesOut.addAndGet(sent)
-            conn.disconnect()
+            proxied.incrementAndGet(); bytesOut.addAndGet(sent)
+            c.disconnect()
         } catch (_: SocketException) {
             swallowed.incrementAndGet()
         } catch (_: IOException) {
@@ -343,18 +477,90 @@ object LocalProxy {
                 client.close()
             } catch (_: Throwable) {
             }
-            if (upstreamUrl != "-") {
-                // MODE OBSERVASI. Field tetap. offset=0 pada M2 karena belum ada
-                // strip; M4 mengisinya dengan offset sync nyata. Format tidak
-                // berubah supaya perbandingan lintas milestone tetap sah.
-                obs(
-                    "PROXY",
-                    "url=${shortUrl(upstreamUrl)} status=$status offset=0 " +
-                        "len_asli=$lenAsli len_kirim=$sent " +
-                        "ms=${System.currentTimeMillis() - t0}"
-                )
+            if (upUrl != "-") obs(
+                "PROXY",
+                "kind=$kind url=${shortUrl(upUrl)} status=$status offset=$offset " +
+                    "len_asli=$lenAsli len_kirim=$sent ms=${System.currentTimeMillis() - t0}"
+            )
+        }
+    }
+
+    // -------------------------------------------------------------- playlist
+
+    private fun looksLikePlaylist(ctype: String, url: String, b: ByteArray, n: Int): Boolean {
+        if (ctype.contains("mpegurl", true) || ctype.contains("m3u", true)) return true
+        if (url.substringBefore('?').endsWith(".m3u8", true)) return true
+        if (n >= 7) {
+            val head = String(b, 0, minOf(n, 16), Charsets.ISO_8859_1)
+            if (head.trimStart().startsWith("#EXTM3U")) return true
+        }
+        return false
+    }
+
+    private val uriTagRe = Regex("""URI="([^"]+)"""")
+
+    private fun rewritePlaylist(body: String, base: String): String {
+        val sb = StringBuilder(body.length + 4096)
+        for (raw in body.split("\n")) {
+            val line = raw.trim()
+            when {
+                line.isEmpty() -> sb.append("\n")
+                line.startsWith("#") -> {
+                    val m = uriTagRe.find(line)
+                    if (m != null) {
+                        val abs = resolve(base, m.groupValues[1])
+                        val prox = if (isAllowed(abs)) proxyUrl(abs) ?: abs else abs
+                        sb.append(line.replace(m.value, "URI=\"$prox\"")).append("\n")
+                    } else sb.append(line).append("\n")
+                }
+                else -> {
+                    val abs = resolve(base, line)
+                    val prox = if (isAllowed(abs)) proxyUrl(abs) ?: abs else abs
+                    sb.append(prox).append("\n")
+                }
             }
         }
+        return sb.toString()
+    }
+
+    private fun resolve(base: String, rel: String): String = try {
+        URL(URL(base), rel).toString()
+    } catch (_: Throwable) {
+        rel
+    }
+
+    // ----------------------------------------------------------------- range
+
+    /** bytes=A-B klien  ->  bytes=(A+off)-(B+off) upstream */
+    private fun translateRange(clientRange: String, off: Int): String {
+        if (off <= 0) return clientRange
+        val m = Regex("""bytes=(\d*)-(\d*)""").find(clientRange) ?: return clientRange
+        val a = m.groupValues[1].toLongOrNull()
+        val b = m.groupValues[2].toLongOrNull()
+        return when {
+            a != null && b != null -> "bytes=${a + off}-${b + off}"
+            a != null -> "bytes=${a + off}-"
+            else -> clientRange           // suffix range: biarkan apa adanya
+        }
+    }
+
+    /** bytes X-Y/Z upstream  ->  bytes (X-off)-(Y-off)/(Z-off) untuk klien */
+    private fun rewriteContentRange(cr: String?, off: Int): String? {
+        if (cr == null || off <= 0) return cr
+        val m = Regex("""bytes\s+(\d+)-(\d+)/(\d+|\*)""").find(cr) ?: return cr
+        val x = m.groupValues[1].toLongOrNull() ?: return cr
+        val y = m.groupValues[2].toLongOrNull() ?: return cr
+        val z = m.groupValues[3]
+        val zz = if (z == "*") "*" else ((z.toLongOrNull() ?: 0L) - off).coerceAtLeast(0).toString()
+        return "bytes ${(x - off).coerceAtLeast(0)}-${(y - off).coerceAtLeast(0)}/$zz"
+    }
+
+    // ----------------------------------------------------------------- utils
+
+    private fun safeStream(c: HttpURLConnection): InputStream = try {
+        c.inputStream
+    } catch (_: Throwable) {
+        c.errorStream ?: java.io.ByteArrayInputStream(ByteArray(0))
     }
 
     private fun pump(ins: InputStream, out: OutputStream): Long {
@@ -391,12 +597,10 @@ object LocalProxy {
     private fun param(query: String, key: String): String? {
         for (pair in query.split('&')) {
             val i = pair.indexOf('=')
-            if (i > 0 && pair.substring(0, i) == key) {
-                return try {
-                    URLDecoder.decode(pair.substring(i + 1), "UTF-8")
-                } catch (_: Throwable) {
-                    null
-                }
+            if (i > 0 && pair.substring(0, i) == key) return try {
+                URLDecoder.decode(pair.substring(i + 1), "UTF-8")
+            } catch (_: Throwable) {
+                null
             }
         }
         return null
@@ -408,11 +612,7 @@ object LocalProxy {
         "?"
     }
 
-    private fun shortUrl(u: String): String {
-        val h = hostOf(u)
-        val tail = u.takeLast(28)
-        return "$h..$tail"
-    }
+    private fun shortUrl(u: String) = "${hostOf(u)}..${u.takeLast(24)}"
 
     fun obs(event: String, detail: String) {
         println("[OppaDrama/OBS] $event $detail")
