@@ -7,19 +7,21 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class OppaDramaPlugin : Plugin() {
     override fun load(context: Context) {
-        // MILESTONE 1: dijalankan SEBELUM registrasi provider, supaya kalau
-        // start() melempar, kegagalannya terisolasi dan provider produksi
-        // tetap terdaftar. Provider utama tidak bergantung pada server ini
-        // sama sekali pada tahap M1.
-        val ok = runCatching { LocalServer.start() }.getOrElse { e ->
-            LocalServer.obs("START-THROW", "${e.javaClass.simpleName}: ${e.message}")
+        // M2: LocalProxy MENGGANTIKAN LocalServer. Pastikan LocalServer.kt
+        // sudah dihapus dari project, jangan sampai dua socket hidup bersamaan.
+        //
+        // start() dipanggil di dalam runCatching SEBELUM registrasi provider,
+        // supaya kalau bind gagal, provider produksi tetap terdaftar dan Anda
+        // tidak kehilangan fungsi yang sudah berjalan.
+        val ok = runCatching { LocalProxy.start() }.getOrElse { e ->
+            LocalProxy.obs("START-THROW", "${e.javaClass.simpleName}: ${e.message}")
             false
         }
-        LocalServer.obs("PLUGIN-LOAD", "server_started=$ok port=${LocalServer.port}")
+        LocalProxy.obs("PLUGIN-LOAD", "started=$ok port=${LocalProxy.port}")
 
         registerMainAPI(OppaDramaProvider())
 
-        // Hapus baris ini setelah M1 selesai diverifikasi.
+        // Hapus setelah M2 diverifikasi.
         registerMainAPI(OppaDramaDiagProvider())
     }
 }
