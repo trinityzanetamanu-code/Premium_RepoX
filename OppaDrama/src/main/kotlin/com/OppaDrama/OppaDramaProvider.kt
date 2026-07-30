@@ -357,8 +357,18 @@ class OppaDramaProvider : MainAPI() {
                                                     "https://abyss.to/?v=$mediaId"
                                                 ).distinct() else listOf(fixedUrl)
 
+                                                // Extractor sendiri didahulukan. H-3 membuktikan
+                                                // loadExtractor tidak punya penangan untuk host ini,
+                                                // jadi kandidat di bawah hanya jaring pengaman.
+                                                val hxOk = try {
+                                                    extractHydrax(fixedUrl, pageUrl, serverName, safeLinkCallback)
+                                                } catch (e: Exception) {
+                                                    LocalProxy.obs("HX-ERROR", "${e.javaClass.simpleName}: ${e.message}")
+                                                    false
+                                                }
+
                                                 for (cand in candidates) {
-                                                    if (visitedStreamUrls.size > countBefore) break
+                                                    if (hxOk || visitedStreamUrls.size > countBefore) break
                                                     loadExtractor(cand, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
                                                     // Log per kandidat: inilah yang menjaga atribusi
                                                     // sebab-akibat tetap tunggal meski ada 4 kandidat.
@@ -510,6 +520,113 @@ class OppaDramaProvider : MainAPI() {
      *
      * Terverifikasi pada 6 bentuk URL, termasuk kasus tanpa ID.
      */
+    /**
+     * Extractor Hydrax sendiri, dibangun bertahap.
+     *
+     * H-3 membuktikan CloudStream tidak punya extractor yang cocok untuk
+     * abyssplayer.com / abyss.to (nol request jaringan pada 3 bentuk URL).
+     * Fungsi ini menggantikan ketergantungan itu.
+     *
+     * Setiap tahap melapor lewat obs, sehingga run-nya sendiri yang
+     * menunjukkan sampai mana ia berhasil - bukan prediksi.
+     *
+     *   HX-1  ambil halaman embed
+     *   HX-2  temukan blob base64 config
+     *   HX-3  dekode base64 + baca struktur config
+     *   HX-4  hasilkan URL media
+     *
+     * CATATAN ENKODING PENTING:
+     * JSON hasil dekode base64 BUKAN UTF-8 valid - ia mencampur escape
+     * \uXXXX dengan byte mentah tinggi. Memakai .text / UTF-8 akan
+     * merusaknya persis seperti bug hx2 (347 byte hancur jadi U+FFFD).
+     * Karena itu di sini dipakai ISO_8859_1 yang memetakan byte 0..255
+     * ke char 0..255 secara lossless.
+     *
+     * @return true kalau berhasil menghasilkan minimal satu link
+     */
+    private suspend fun extractHydrax(
+        embedUrl: String,
+        pageUrl: String,
+        serverName: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        // ---------------- HX-1 ----------------
+        val html = try {
+            app.get(
+                embedUrl,
+                referer = pageUrl,
+                headers = mapOf("User-Agent" to USER_AGENT)
+            ).text
+        } catch (e: Exception) {
+            LocalProxy.obs("HX-1-GAGAL", "${e.javaClass.simpleName}: ${e.message}")
+            return false
+        }
+        LocalProxy.obs("HX-1-OK", "html=${html.length} char")
+        if (html.isBlank()) return false
+
+        // ---------------- HX-2 ----------------
+        val b64 = Regex("""["']([A-Za-z0-9+/=]{200,})["']""")
+            .find(html)?.groupValues?.get(1)
+        if (b64.isNullOrBlank()) {
+            LocalProxy.obs("HX-2-GAGAL", "blob base64 config tidak ditemukan")
+            return false
+        }
+        LocalProxy.obs("HX-2-OK", "b64=${b64.length} char")
+
+        // ---------------- HX-3 ----------------
+        val rawBytes = try {
+            android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+        } catch (e: Exception) {
+            LocalProxy.obs("HX-3-GAGAL", "base64 decode: ${e.message}")
+            return false
+        }
+        // ISO_8859_1, BUKAN UTF-8. Lihat catatan enkoding di atas.
+        val json = String(rawBytes, Charsets.ISO_8859_1)
+        val slug = Regex(""""slug"\s*:\s*"([^"]*)"""").find(json)?.groupValues?.get(1)
+        val md5id = Regex(""""md5_id"\s*:\s*(\d+)""").find(json)?.groupValues?.get(1)
+        val mediaLen = Regex(""""media"\s*:\s*"((?:\\.|[^"\\])*)"""")
+            .find(json)?.groupValues?.get(1)?.length ?: -1
+        LocalProxy.obs(
+            "HX-3-OK",
+            "json=${rawBytes.size}B slug=$slug md5_id=$md5id media_field=$mediaLen"
+        )
+
+        // ---------------- HX-4 ----------------
+        // Cek termurah lebih dulu: apakah ada URL http yang tersimpan polos
+        // di mana pun dalam config. Kalau ada, tidak perlu dekode apa pun.
+        val plain = Regex("""https?://[^\s"'\\<>]{12,}""").findAll(json)
+            .map { it.value }
+            .filter { u ->
+                !u.contains("blogger.googleusercontent") &&
+                    !u.contains("oppa.biz") &&
+                    !u.contains("iamcdn.net")
+            }
+            .distinct().toList()
+
+        if (plain.isNotEmpty()) {
+            LocalProxy.obs("HX-4-URL-POLOS", "ditemukan ${plain.size}: ${plain.take(3)}")
+            plain.forEach { u ->
+                callback(
+                    newExtractorLink(
+                        source = serverName,
+                        name = "$serverName [direct]",
+                        url = u,
+                        type = ExtractorLinkType.VIDEO
+                    ) { this.referer = embedUrl }
+                )
+            }
+            return true
+        }
+
+        LocalProxy.obs(
+            "HX-4-BERHENTI",
+            "tidak ada URL polos di config. URL media ada di field 'media' " +
+                "($mediaLen char terenkode) dan perlu didekode. " +
+                "Inilah titik berhenti extractor."
+        )
+        return false
+    }
+
     private fun extractMediaId(url: String): String? {
         val base = url.substringBefore('#')
         Regex("""[?&]v=([A-Za-z0-9_-]+)""").find(base)?.let { return it.groupValues[1] }
