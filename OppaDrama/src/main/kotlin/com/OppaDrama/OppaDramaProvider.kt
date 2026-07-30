@@ -39,6 +39,11 @@ class OppaDramaProvider : MainAPI() {
     // Set 'true' saat proses troubleshooting, 'false' untuk rilis produksi
     private val DEBUG = false
 
+    // Routing TurboVIP lewat proxy lokal (LocalProxy) yang memotong prefix
+    // PNG 806+135 byte. Set 'false' untuk kembali ke perilaku lama TANPA
+    // build ulang -- berguna untuk A/B: langsung vs lewat proxy.
+    private val USE_PROXY = true
+
     // Pembatas Concurrency: Maksimal 3 request paralel bersamaan
     private val concurrencySemaphore = Semaphore(3)
 
@@ -425,15 +430,36 @@ class OppaDramaProvider : MainAPI() {
 
             if (!m3u8Url.isNullOrBlank()) {
                 val fixedM3u8 = fixUrl(m3u8Url)
+
+                // Segmen TurboVIP dibungkus PNG (806 byte) + padding 0xFF (135 byte).
+                // TsExtractor ExoPlayer gagal dengan "Cannot find sync byte" karena
+                // paket TS pertama baru mulai di offset 941. LocalProxy memotong
+                // prefix itu dan menulis ulang URI segmen di playlist supaya ikut
+                // lewat proxy. Offset dicari dinamis, TIDAK di-hardcode.
+                val servedUrl = if (USE_PROXY) {
+                    LocalProxy.proxyUrl(fixedM3u8) ?: fixedM3u8
+                } else {
+                    fixedM3u8
+                }
+                val viaProxy = servedUrl != fixedM3u8
+                logDebug("[TurboVIP] serve=$servedUrl viaProxy=$viaProxy")
+
                 callback(
                     newExtractorLink(
                         source = serverName,
-                        name = serverName,
-                        url = fixedM3u8,
+                        name = if (viaProxy) "$serverName [proxy]" else serverName,
+                        url = servedUrl,
                         type = ExtractorLinkType.M3U8
                     ) {
-                        this.referer = "https://turboviplay.com/"
-                        this.headers = mapOf("User-Agent" to USER_AGENT)
+                        if (viaProxy) {
+                            // Header upstream diurus LocalProxy sendiri. Memaksa
+                            // referer turboviplay.com ke 127.0.0.1 tidak ada gunanya,
+                            // dan H-5/H-6 sudah terbukti: header tidak mengubah byte.
+                            this.referer = ""
+                        } else {
+                            this.referer = "https://turboviplay.com/"
+                            this.headers = mapOf("User-Agent" to USER_AGENT)
+                        }
                     }
                 )
                 true
