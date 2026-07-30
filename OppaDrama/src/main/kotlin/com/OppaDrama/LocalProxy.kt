@@ -480,7 +480,7 @@ object LocalProxy {
             if (upUrl != "-") obs(
                 "PROXY",
                 "kind=$kind url=${shortUrl(upUrl)} status=$status offset=$offset " +
-                    "len_asli=$lenAsli len_kirim=$sent ms=${System.currentTimeMillis() - t0}"
+                    "len_upstream=$lenAsli len_kirim=$sent ms=${System.currentTimeMillis() - t0}"
             )
         }
     }
