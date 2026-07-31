@@ -66,6 +66,18 @@ class OppaDramaProvider : MainAPI() {
         }
     }
 
+    private fun getQualityFromString(quality: String?): Int {
+        return when {
+            quality.isNullOrBlank() -> Qualities.Unknown.value
+            quality.contains("2160") || quality.contains("4k", ignoreCase = true) -> Qualities.P2160.value
+            quality.contains("1080") -> Qualities.P1080.value
+            quality.contains("720") -> Qualities.P720.value
+            quality.contains("480") -> Qualities.P480.value
+            quality.contains("360") -> Qualities.P360.value
+            else -> Qualities.Unknown.value
+        }
+    }
+
     // Katalog Halaman Utama
     override val mainPage = mainPageOf(
         "$mainUrl/series/?status=Ongoing&type=Drama&order=update" to "Drama Ongoing",
@@ -478,7 +490,7 @@ class OppaDramaProvider : MainAPI() {
     }
 
     /**
-     * Extractor Hydrax - Tahap 1 & 2 Eksperimen Empiris (Mendukung Variasi Kunci JSON & Multi-Kualitas).
+     * Extractor Hydrax - Dengan Logging Dumper JSON Hasil Dekripsi & Single Mirror Output.
      */
     private suspend fun extractHydrax(
         embedUrl: String,
@@ -564,7 +576,7 @@ class OppaDramaProvider : MainAPI() {
 
         LocalProxy.obs("HX-4-DECRYPT-OK", "decrypted_len=${decryptedJson.length}")
 
-        // ---------------- HX-5 (Ekstraksi Direct CDN URL) ----------------
+        // ---------------- DUMP MURNI HASIL DEKRIPSI KE LOGCAT ----------------
         val decryptedObj = try {
             JSONObject(decryptedJson)
         } catch (e: Exception) {
@@ -576,60 +588,66 @@ class OppaDramaProvider : MainAPI() {
         val sourcesArr = mp4Obj?.optJSONArray("sources")
             ?: decryptedObj.optJSONArray("sources")
 
+        // Cetak struktur setiap objek di mp4.sources ke logcat secara utuh
+        if (sourcesArr != null) {
+            for (i in 0 until sourcesArr.length()) {
+                val srcObj = sourcesArr.optJSONObject(i)
+                LocalProxy.obs("HX-5-SOURCE[$i]", srcObj?.toString() ?: "null")
+            }
+        } else {
+            decryptedJson.chunked(400).forEachIndexed { idx, chunk ->
+                LocalProxy.obs("HX-5-DUMP-RAW-$idx", chunk)
+            }
+        }
+
+        // ---------------- HX-5 (Ekstraksi Direct CDN URL) ----------------
         var linksEmitted = 0
 
         if (sourcesArr != null && sourcesArr.length() > 0) {
             for (i in 0 until sourcesArr.length()) {
                 val srcObj = sourcesArr.optJSONObject(i) ?: continue
 
-                // Resolusi Kunci Domain / URL Base
                 val bUrl = srcObj.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
                     ?: srcObj.optString("domain", null)?.takeIf { it.isNotBlank() && it != "null" }
                     ?: mp4Obj?.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
                     ?: decryptedObj.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
 
-                // Resolusi Kunci Path / File
                 val pPath = srcObj.optString("path", null)?.takeIf { it.isNotBlank() && it != "null" }
                     ?: srcObj.optString("file", null)?.takeIf { it.isNotBlank() && it != "null" }
                     ?: srcObj.optString("src", null)?.takeIf { it.isNotBlank() && it != "null" }
 
                 val label = srcObj.optString("label", null)?.takeIf { it.isNotBlank() } ?: "HD"
 
-                // Penanganan Jika Stream Menyediakan URL Absolut Langsung (http:// atau https://)
-                if (pPath != null && (pPath.startsWith("http://") || pPath.startsWith("https://"))) {
-                    val fullUrl = unescapeJs(pPath)
-                    LocalProxy.obs("HX-5-URL-ABSOLUT", "fullUrl=$fullUrl label=$label")
-                    callback(
-                        newExtractorLink(
-                            source = serverName,
-                            name = "$serverName [$label]",
-                            url = fullUrl,
-                            type = ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = "https://abyssplayer.com/"
-                        }
-                    )
-                    linksEmitted++
-                    continue
-                }
+                var fullUrl: String? = null
 
-                // Penanganan Penggabungan Domain + Path
-                if (!bUrl.isNullOrBlank() && !pPath.isNullOrBlank()) {
+                if (pPath != null && (pPath.startsWith("http://") || pPath.startsWith("https://"))) {
+                    fullUrl = unescapeJs(pPath)
+                } else if (!bUrl.isNullOrBlank() && !pPath.isNullOrBlank()) {
                     val cleanBase = unescapeJs(bUrl).trimEnd('/')
                     val cleanP = unescapeJs(pPath).trimStart('/')
-                    val fullUrl = "$cleanBase/$cleanP"
+                    fullUrl = "$cleanBase/$cleanP"
+                }
 
-                    LocalProxy.obs("HX-5-URL-OK", "srcUrl=$fullUrl label=$label")
+                if (!fullUrl.isNullOrBlank()) {
+                    val qualityVal = getQualityFromString(label)
 
-                    // ---------------- HX-6 (Direct Emit ke ExoPlayer TANPA LocalProxy) ----------------
+                    // Detail logging untuk investigasi Error 3003
+                    LocalProxy.obs(
+                        "HX-6-EMIT-DETAILS",
+                        "source=$serverName | name=$serverName | quality=$label ($qualityVal) | type=VIDEO | referer=https://abyssplayer.com/ | UA=$USER_AGENT | url=$fullUrl"
+                    )
+
+                    // Emit ExtractorLink dengan name = serverName agar menyatu dalam SATU server "HydraX" di UI list
                     callback(
                         newExtractorLink(
                             source = serverName,
-                            name = "$serverName [$label]",
+                            name = serverName,
                             url = fullUrl,
                             type = ExtractorLinkType.VIDEO
                         ) {
+                            this.quality = qualityVal
                             this.referer = "https://abyssplayer.com/"
+                            this.headers = mapOf("User-Agent" to USER_AGENT)
                         }
                     )
                     linksEmitted++
@@ -642,7 +660,7 @@ class OppaDramaProvider : MainAPI() {
             return false
         }
 
-        LocalProxy.obs("HX-6-EMIT-DIRECT", "Sukses emit $linksEmitted URL CDN langsung ke ExoPlayer")
+        LocalProxy.obs("HX-6-EMIT-DIRECT", "Sukses emit $linksEmitted quality track under single server $serverName")
         return true
     }
 
