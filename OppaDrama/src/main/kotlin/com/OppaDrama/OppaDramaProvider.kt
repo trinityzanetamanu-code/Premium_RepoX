@@ -44,6 +44,12 @@ class OppaDramaProvider : MainAPI() {
     // build ulang -- berguna untuk A/B: langsung vs lewat proxy.
     private val USE_PROXY = true
 
+    // DIAGNOSTIK SEMENTARA untuk mencari sebab duplikasi Video Trek.
+    // Saat true, extractor FileLions ikut mengambil master playlist lalu
+    // melaporkan strukturnya ke logcat. Menambah satu request per loadLinks.
+    // Set false setelah penyebabnya ketemu.
+    private val FL_DIAG = true
+
     // Pembatas Concurrency: Maksimal 3 request paralel bersamaan
     private val concurrencySemaphore = Semaphore(3)
 
@@ -843,7 +849,9 @@ class OppaDramaProvider : MainAPI() {
         terpilih.forEach { (label, url) ->
             val host = runCatching { java.net.URL(url).host }.getOrNull() ?: "?"
             val isHls = url.contains(".m3u8")
-            LocalProxy.obs("FL-4-EMIT", "label=$label host=$host hls=$isHls")
+            // URL LENGKAP dicatat, bukan hanya host. Tanpa ini logcat tidak
+            // bisa memberi tahu master playlist mana yang harus diperiksa.
+            LocalProxy.obs("FL-4-EMIT", "label=$label host=$host hls=$isHls url=$url")
             callback(
                 newExtractorLink(
                     source = serverName,
@@ -859,6 +867,48 @@ class OppaDramaProvider : MainAPI() {
             n++
         }
         LocalProxy.obs("FL-4-OK", "emit=$n dari ${links.size} link")
+
+        // ---------------- FL-5 (diagnostik sementara) ----------------
+        // Mengambil master playlist lalu melaporkan strukturnya. Tujuannya
+        // menjawab satu pertanyaan: apakah duplikasi Video Trek berasal dari
+        // isi master, atau dari cara ExoPlayer menafsirkannya.
+        //
+        // Yang dilaporkan per master:
+        //   normal  = resolusi dari #EXT-X-STREAM-INF        (varian playback)
+        //   iframe  = resolusi dari #EXT-X-I-FRAME-STREAM-INF (trick-play)
+        //
+        // Kalau normal dan iframe berisi resolusi yang SAMA dan jumlah
+        // gabungannya cocok dengan jumlah baris di Video Trek, sebabnya
+        // master playlist. Kalau tidak cocok, sebabnya di lapisan lain.
+        if (FL_DIAG) {
+            terpilih.forEach { (label, url) ->
+                if (!url.contains(".m3u8")) return@forEach
+                try {
+                    val pl = app.get(
+                        url,
+                        headers = mapOf("User-Agent" to USER_AGENT)
+                    ).text
+                    val resDari = { tag: String ->
+                        Regex("""$tag:[^\n]*""").findAll(pl).map { mr ->
+                            Regex("""RESOLUTION=(\d+x\d+)""")
+                                .find(mr.value)?.groupValues?.get(1) ?: "?"
+                        }.toList()
+                    }
+                    val normal = resDari("#EXT-X-STREAM-INF")
+                    val iframe = resDari("#EXT-X-I-FRAME-STREAM-INF")
+                    LocalProxy.obs(
+                        "FL-5-MASTER",
+                        "label=$label bytes=${pl.length} " +
+                            "normal=${normal.size}$normal " +
+                            "iframe=${iframe.size}$iframe " +
+                            "key=${pl.contains("#EXT-X-KEY")} " +
+                            "total_entri=${normal.size + iframe.size}"
+                    )
+                } catch (e: Exception) {
+                    LocalProxy.obs("FL-5-GAGAL", "label=$label ${e.javaClass.simpleName}: ${e.message}")
+                }
+            }
+        }
         return n > 0
     }
 
