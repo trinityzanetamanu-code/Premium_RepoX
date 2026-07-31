@@ -760,34 +760,67 @@ class OppaDramaProvider : MainAPI() {
         if (html.isBlank()) return false
 
         // ---------------- FL-2 ----------------
-        val packed = Regex("""eval\(function\(p,a,c,k,e,d\).*?\)\)""", RegexOption.DOT_MATCHES_ALL)
-            .find(html)?.value
-        if (packed.isNullOrBlank()) {
+        // BUG YANG DIPERBAIKI: regex lama memakai `.*?\)\)` - lazy, tanpa
+        // jangkar. Ia berhenti di "))" PERTAMA yang muncul DI DALAM payload,
+        // sehingga blok terpotong jadi ~1000 char padahal aslinya ~11000
+        // (terukur: Kotlin lapor 1070, fl1.py lapor 11460 untuk halaman
+        // setara). Versi Python memakai jangkar `\s*(?:</script>|$)` dan
+        // jangkar itu tidak ikut terbawa saat porting.
+        //
+        // Sekarang dijangkarkan ke `.split('|')` yang hanya muncul SEKALI,
+        // yaitu di argumen keempat packer. Deterministik, tidak bergantung
+        // pada tebakan posisi tutup kurung.
+        val kandidat = Regex(
+            """eval\(function\(p,a,c,k,e,d\).*?\.split\('\|'\)\s*\)?\s*\)""",
+            RegexOption.DOT_MATCHES_ALL
+        ).findAll(html).map { it.value }.toList()
+
+        if (kandidat.isEmpty()) {
             LocalProxy.obs("FL-2-GAGAL", "blok packed tidak ditemukan")
             return false
         }
-        LocalProxy.obs("FL-2-OK", "packed=${packed.length} char")
+        LocalProxy.obs(
+            "FL-2-OK",
+            "blok=${kandidat.size} ukuran=${kandidat.map { it.length }} " +
+                "(bandingkan dengan fl1.py di Termux)"
+        )
 
         // ---------------- FL-3 ----------------
-        val code = unpackDeanEdwards(packed)
-        if (code.isNullOrBlank()) {
-            LocalProxy.obs("FL-3-GAGAL", "unpack gagal, varian sintaks packer?")
-            return false
-        }
-        LocalProxy.obs("FL-3-OK", "unpacked=${code.length} char")
-
-        // ---------------- FL-4 ----------------
-        // Objek links di kode hasil unpack: {"hls2":"https://...","hls3":"..."}
-        val links = LinkedHashMap<String, String>()
-        Regex(""""(\w+)"\s*:\s*"(https?://[^"]+)"""").findAll(code).forEach {
-            links[it.groupValues[1]] = it.groupValues[2]
-        }
-        if (links.isEmpty()) {
-            Regex("""(\w+)\s*:\s*"(https?://[^"]+)"""").findAll(code).forEach {
-                links[it.groupValues[1]] = it.groupValues[2]
+        // Halaman bisa memuat lebih dari satu blok packed (iklan, player, dll).
+        // Coba semuanya, pakai yang pertama menghasilkan URL media.
+        var code: String? = null
+        var links = LinkedHashMap<String, String>()
+        for ((idx, blok) in kandidat.withIndex()) {
+            val hasil = unpackDeanEdwards(blok)
+            if (hasil.isNullOrBlank()) {
+                LocalProxy.obs("FL-3-SKIP", "blok[$idx] unpack gagal")
+                continue
+            }
+            val l = LinkedHashMap<String, String>()
+            Regex(""""(\w+)"\s*:\s*"(https?://[^"]+)"""").findAll(hasil).forEach {
+                l[it.groupValues[1]] = it.groupValues[2]
+            }
+            if (l.isEmpty()) {
+                Regex("""(\w+)\s*:\s*"(https?://[^"]+)"""").findAll(hasil).forEach {
+                    l[it.groupValues[1]] = it.groupValues[2]
+                }
+            }
+            LocalProxy.obs(
+                "FL-3-OK",
+                "blok[$idx] unpacked=${hasil.length} char links=${l.keys}"
+            )
+            if (l.values.any { it.contains(".m3u8") || it.contains(".mp4") }) {
+                code = hasil
+                links = l
+                break
             }
         }
+        if (code == null) {
+            LocalProxy.obs("FL-3-GAGAL", "tidak ada blok yang menghasilkan URL media")
+            return false
+        }
 
+        // ---------------- FL-4 ----------------
         // Urutan preferensi mengikuti kode player itu sendiri:
         //   sources:[{file: links.hls4 || links.hls3 || links.hls2}]
         val urutan = listOf("hls4", "hls3", "hls2")
