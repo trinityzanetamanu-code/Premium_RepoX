@@ -478,7 +478,7 @@ class OppaDramaProvider : MainAPI() {
     }
 
     /**
-     * Extractor Hydrax - Tahap 1 & 2 Eksperimen Empiris.
+     * Extractor Hydrax - Tahap 1 & 2 Eksperimen Empiris (Dengan Fix Regex md5_id & user_id).
      * 
      * HX-1 : Fetch HTML Embed
      * HX-2 : Extract Base64 Blob Config
@@ -526,8 +526,10 @@ class OppaDramaProvider : MainAPI() {
         val json = String(rawBytes, Charsets.ISO_8859_1)
         val slug = Regex(""""slug"\s*:\s*"([^"]*)"""").find(json)?.groupValues?.get(1)
             ?: extractMediaId(embedUrl) ?: ""
-        val md5id = Regex(""""md5_id"\s*:\s*"?(\d+|[a-zA-Z0-9_-]+)"?""""").find(json)?.groupValues?.get(1)
-        val userId = Regex(""""user_id"\s*:\s*"?(\d+|[a-zA-Z0-9_-]+)"?""""").find(json)?.groupValues?.get(1)
+        
+        // FIX REGEX: Toleran terhadap angka polos tanpa tanda petik di JSON
+        val md5id = Regex("""["']?md5_id["']?\s*:\s*["']?([a-zA-Z0-9_-]+)["']?""").find(json)?.groupValues?.get(1)
+        val userId = Regex("""["']?user_id["']?\s*:\s*["']?([a-zA-Z0-9_-]+)["']?""").find(json)?.groupValues?.get(1)
         val mediaStr = Regex(""""media"\s*:\s*"((?:\\.|[^"\\])*)"""").find(json)?.groupValues?.get(1)
 
         LocalProxy.obs(
