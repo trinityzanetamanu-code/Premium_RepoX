@@ -382,18 +382,39 @@ class OppaDramaProvider : MainAPI() {
                                                     LocalProxy.obs("HYDRAX-GAGAL", "semua ${candidates.size} kandidat kosong")
                                                 }
                                             } 
-                                            // 3. Penanganan VidHidePro / Minochinos (Dengan Validasi Media ID)
+                                            // 3. Penanganan FileLions / Minochinos (keluarga XFileSharing)
                                             else if (fixedUrl.contains("minochinos.com") || fixedUrl.contains("vidhide") || fixedUrl.contains("filelions")) {
-                                                val mediaId = Regex("""(?:v\/|\/d\/|\/v=|\/)([a-zA-Z0-9_-]+)""").find(fixedUrl)?.groupValues?.get(1)
-                                                if (!mediaId.isNullOrBlank()) {
-                                                    logDebug("[VidHide] Media ID extracted: $mediaId -> Trying normalized vidhidepro.com")
-                                                    loadExtractor("https://vidhidepro.com/v/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
-                                                    if (visitedStreamUrls.size == countBefore) {
-                                                        loadExtractor("https://vidhidepro.com/d/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                // Extractor sendiri didahulukan. Mekanismenya sudah
+                                                // terpetakan penuh lewat fl1/fl2/fl3: unpack packer
+                                                // p,a,c,k,e,d lalu ambil URL dari objek links.
+                                                val flOk = try {
+                                                    extractFileLions(fixedUrl, pageUrl, serverName, safeLinkCallback)
+                                                } catch (e: Exception) {
+                                                    LocalProxy.obs("FL-ERROR", "${e.javaClass.simpleName}: ${e.message}")
+                                                    false
+                                                }
+
+                                                if (!flOk && visitedStreamUrls.size == countBefore) {
+                                                    // H-2: regex lama (?:v\/|\/d\/|\/v=|\/) menangkap nama
+                                                    // HOST, bukan ID - alternatif \/ menang di // pada
+                                                    // https://, sehingga hasilnya 'minochinos' bukan
+                                                    // 'mnqiexinkl9c'. Cacat yang sama persis dengan H-1.
+                                                    // Diganti extractMediaId() yang sudah tervalidasi.
+                                                    val mediaId = extractMediaId(fixedUrl)
+                                                    LocalProxy.obs("FL-FALLBACK", "in=$fixedUrl id=$mediaId")
+                                                    if (!mediaId.isNullOrBlank()) {
+                                                        loadExtractor("https://vidhidepro.com/v/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                        if (visitedStreamUrls.size == countBefore) {
+                                                            loadExtractor("https://vidhidepro.com/d/$mediaId", referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                        }
                                                     }
-                                                } else {
-                                                    logDebug("[VidHide] Media ID extraction failed. Fallback to raw URL: $fixedUrl")
-                                                    loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                    if (visitedStreamUrls.size == countBefore) {
+                                                        loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
+                                                    }
+                                                    LocalProxy.obs(
+                                                        "FL-FALLBACK-HASIL",
+                                                        if (visitedStreamUrls.size > countBefore) "BERHASIL" else "kosong"
+                                                    )
                                                 }
                                             } else {
                                                 // General Fallback
@@ -625,6 +646,187 @@ class OppaDramaProvider : MainAPI() {
                 "Inilah titik berhenti extractor."
         )
         return false
+    }
+
+    /**
+     * Membalik packer Dean Edwards p,a,c,k,e,d.
+     *
+     * Ini SUBSTITUSI TEKS MURNI, bukan eksekusi. Packer ini dibuat tahun 2004
+     * untuk memperkecil ukuran berkas JavaScript: kata-kata panjang diganti
+     * token pendek basis-N, kamusnya disimpan di akhir. Membalikkannya sama
+     * dengan mendekompresi teks.
+     *
+     * Format argumen:
+     *   }('PAYLOAD', RADIX, COUNT, 'kata0|kata1|...'.split('|'), 0, {})
+     *
+     * Alfabet basis-N mengikuti perilaku JS: c.toString(36) untuk c <= 35
+     * (0-9a-z), lalu String.fromCharCode(c+29) untuk c > 35 (A-Z). Gabungannya
+     * persis "0..9a..zA..Z", sehingga satu tabel melayani radix 36 maupun 62.
+     *
+     * Tervalidasi pada data nyata minochinos: 13158 char, radix 36, count 612.
+     */
+    private fun unpackDeanEdwards(packed: String): String? {
+        val m = Regex(
+            """\}\s*\(\s*'((?:[^'\\]|\\.)*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:[^'\\]|\\.)*)'\s*\.split\('\|'\)""",
+            RegexOption.DOT_MATCHES_ALL
+        ).find(packed) ?: return null
+
+        val payload = unescapeJs(m.groupValues[1])
+        val radix = m.groupValues[2].toIntOrNull() ?: return null
+        val count = m.groupValues[3].toIntOrNull() ?: return null
+        val words = m.groupValues[4].split("|")
+        if (radix < 2 || radix > 62 || count <= 0) return null
+
+        val map = HashMap<String, String>(count * 2)
+        for (i in 0 until count) {
+            val tok = baseN(i, radix)
+            val w = words.getOrNull(i)
+            map[tok] = if (w.isNullOrEmpty()) tok else w
+        }
+        // satu kali jalan, bukan `count` kali replace berturut-turut
+        return Regex("""\b[0-9A-Za-z]+\b""").replace(payload) { mr ->
+            map[mr.value] ?: mr.value
+        }
+    }
+
+    private fun baseN(num: Int, radix: Int): String {
+        if (num == 0) return "0"
+        val digits = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        var n = num
+        val sb = StringBuilder()
+        while (n > 0) {
+            sb.insert(0, digits[n % radix])
+            n /= radix
+        }
+        return sb.toString()
+    }
+
+    /** Payload adalah literal string JS berkutip tunggal; buka escape-nya. */
+    private fun unescapeJs(s: String): String {
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '\\' && i + 1 < s.length) {
+                when (val n = s[i + 1]) {
+                    '\\' -> { sb.append('\\'); i += 2 }
+                    '\'' -> { sb.append('\''); i += 2 }
+                    '"' -> { sb.append('"'); i += 2 }
+                    'n' -> { sb.append('\n'); i += 2 }
+                    'r' -> { sb.append('\r'); i += 2 }
+                    't' -> { sb.append('\t'); i += 2 }
+                    '/' -> { sb.append('/'); i += 2 }
+                    else -> { sb.append(n); i += 2 }
+                }
+            } else {
+                sb.append(c); i++
+            }
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Extractor FileLions (host minochinos.com dan keluarga XFileSharing).
+     *
+     * Seluruh keputusan di bawah berbasis pengukuran fl1/fl2/fl3:
+     *   FL-11  Referer TIDAK wajib (200 pada dengan/tanpa/salah referer)
+     *   FL-12  master HLS valid, EXT-X-KEY=0, BYTERANGE=0, 2 varian
+     *   FL-13  segmen TS polos, 0x47 di offset 0, tanpa wrapper
+     *   FL-14  token s=waktu-request, e=36 jam -> ambil ulang tiap loadLinks
+     *   FL-15  hls2 dan hls3 berada di DUA host berbeda
+     *
+     * Karena FL-13, LocalProxy tidak dipakai sama sekali di jalur ini.
+     *
+     * Tahapan melapor sendiri lewat obs supaya titik berhenti selalu terlihat.
+     */
+    private suspend fun extractFileLions(
+        embedUrl: String,
+        pageUrl: String,
+        serverName: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        // ---------------- FL-1 ----------------
+        val html = try {
+            app.get(
+                embedUrl,
+                referer = pageUrl,
+                headers = mapOf("User-Agent" to USER_AGENT)
+            ).text
+        } catch (e: Exception) {
+            LocalProxy.obs("FL-1-GAGAL", "${e.javaClass.simpleName}: ${e.message}")
+            return false
+        }
+        LocalProxy.obs("FL-1-OK", "html=${html.length} char")
+        if (html.isBlank()) return false
+
+        // ---------------- FL-2 ----------------
+        val packed = Regex("""eval\(function\(p,a,c,k,e,d\).*?\)\)""", RegexOption.DOT_MATCHES_ALL)
+            .find(html)?.value
+        if (packed.isNullOrBlank()) {
+            LocalProxy.obs("FL-2-GAGAL", "blok packed tidak ditemukan")
+            return false
+        }
+        LocalProxy.obs("FL-2-OK", "packed=${packed.length} char")
+
+        // ---------------- FL-3 ----------------
+        val code = unpackDeanEdwards(packed)
+        if (code.isNullOrBlank()) {
+            LocalProxy.obs("FL-3-GAGAL", "unpack gagal, varian sintaks packer?")
+            return false
+        }
+        LocalProxy.obs("FL-3-OK", "unpacked=${code.length} char")
+
+        // ---------------- FL-4 ----------------
+        // Objek links di kode hasil unpack: {"hls2":"https://...","hls3":"..."}
+        val links = LinkedHashMap<String, String>()
+        Regex(""""(\w+)"\s*:\s*"(https?://[^"]+)"""").findAll(code).forEach {
+            links[it.groupValues[1]] = it.groupValues[2]
+        }
+        if (links.isEmpty()) {
+            Regex("""(\w+)\s*:\s*"(https?://[^"]+)"""").findAll(code).forEach {
+                links[it.groupValues[1]] = it.groupValues[2]
+            }
+        }
+
+        // Urutan preferensi mengikuti kode player itu sendiri:
+        //   sources:[{file: links.hls4 || links.hls3 || links.hls2}]
+        val urutan = listOf("hls4", "hls3", "hls2")
+        val terpilih = LinkedHashMap<String, String>()
+        for (k in urutan) links[k]?.let { terpilih[k] = it }
+        // sisanya yang berupa media tapi bukan hls2/3/4
+        links.forEach { (k, v) ->
+            if (k !in terpilih && (v.contains(".m3u8") || v.contains(".mp4"))) {
+                terpilih[k] = v
+            }
+        }
+
+        if (terpilih.isEmpty()) {
+            LocalProxy.obs("FL-4-BERHENTI", "tidak ada URL media di hasil unpack " +
+                "(links ditemukan: ${links.keys})")
+            return false
+        }
+
+        var n = 0
+        terpilih.forEach { (label, url) ->
+            val host = runCatching { java.net.URL(url).host }.getOrNull() ?: "?"
+            val isHls = url.contains(".m3u8")
+            LocalProxy.obs("FL-4-EMIT", "label=$label host=$host hls=$isHls")
+            callback(
+                newExtractorLink(
+                    source = serverName,
+                    name = "$serverName [$label]",
+                    url = url,
+                    type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    // FL-11: Referer tidak wajib. Dikosongkan agar tidak ada
+                    // variabel yang tidak perlu di jalur ini.
+                    this.referer = ""
+                }
+            )
+            n++
+        }
+        LocalProxy.obs("FL-4-OK", "emit=$n dari ${links.size} link")
+        return n > 0
     }
 
     private fun extractMediaId(url: String): String? {
