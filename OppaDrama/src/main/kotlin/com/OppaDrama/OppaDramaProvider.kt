@@ -803,11 +803,19 @@ class OppaDramaProvider : MainAPI() {
                 continue
             }
             val l = LinkedHashMap<String, String>()
-            Regex(""""(\w+)"\s*:\s*"(https?://[^"]+)"""").findAll(hasil).forEach {
+            // FL-20: nilai link bisa ABSOLUT (https://cdn.../master.m3u8) atau
+            // RELATIF (/stream/<token>/<srv>/<ts>/<fileid>/master.m3u8).
+            // Regex lama hanya menerima https?:// sehingga entri "hls4" -
+            // yang justru didahulukan kode player sendiri lewat
+            //   sources:[{file: links.hls4 || links.hls3 || links.hls2}]
+            // - selalu tersaring keluar. Akibatnya kita memakai hls2 (CDN
+            // mentah) yang terukur hanya 0.17x dari kebutuhan bitrate,
+            // sementara jalur /stream/ mencapai 6.31x pada jaringan yang sama.
+            Regex(""""(\w+)"\s*:\s*"((?:https?://|/)[^"]+)"""").findAll(hasil).forEach {
                 l[it.groupValues[1]] = it.groupValues[2]
             }
             if (l.isEmpty()) {
-                Regex("""(\w+)\s*:\s*"(https?://[^"]+)"""").findAll(hasil).forEach {
+                Regex("""(\w+)\s*:\s*"((?:https?://|/)[^"]+)"""").findAll(hasil).forEach {
                     l[it.groupValues[1]] = it.groupValues[2]
                 }
             }
@@ -827,27 +835,32 @@ class OppaDramaProvider : MainAPI() {
         }
 
         // ---------------- FL-4 ----------------
-        // HANYA hls2 yang diemit.
+        // Urutan preferensi mengikuti kode player itu sendiri:
+        //   sources:[{file: links.hls4 || links.hls3 || links.hls2, type:"hls"}]
         //
-        // Dasar bukti (logcat FL-4-EMIT + DENY):
-        //   - hls2 konsisten di host CDN yang stabil (acek-cdn.com,
-        //     dramiyos-cdn.com) dan memutar normal.
-        //   - hls3 memakai host SEKALI-PAKAI yang berganti tiap judul
-        //     (highqualityprints.shop, financialmodeling.cfd,
-        //     northwindstudiosupply.cfd, ...). Semuanya di luar allowlist
-        //     sehingga proxy menolak dengan DENY dan playlist tak pernah
-        //     sampai. Mengejar host yang berganti terus adalah pemeliharaan
-        //     tanpa akhir untuk jalur yang tidak dibutuhkan.
-        //   - hls4 tidak pernah muncul pada sampel mana pun.
+        // hls4 didahulukan berdasarkan pengukuran fl5.py pada The Conjuring,
+        // jaringan yang sama, film yang sama:
+        //   hls2 (acek-cdn.com)  480p rasio 0.44x   720p rasio 0.17x  cache MISS
+        //   hls4 (/stream/)      480p rasio 2.50x   720p rasio 6.31x
+        // Rasio di bawah 1.0 berarti unduhan lebih lambat dari pemutaran, dan
+        // itulah pola 2 detik jalan / 2 detik buffering.
         //
-        // Jadi hls2 dijadikan satu-satunya sumber: bersih, stabil, dan trek
-        // kualitas tetap penuh (480p/720p/1080p) karena berasal dari master
-        // hls2 yang sudah disaring dari varian I-frame.
-        val hls2 = links["hls2"]?.takeIf { it.contains(".m3u8") || it.contains(".txt") }
-        if (hls2 == null) {
-            LocalProxy.obs("FL-4-BERHENTI", "hls2 tidak ada (links: ${links.keys})")
+        // hls3 dilewati: hostnya sekali-pakai dan berganti tiap judul
+        // (highqualityprints.shop, financialmodeling.cfd, ...), selalu ditolak
+        // allowlist proxy dengan DENY.
+        val kandidatUrl = listOf("hls4", "hls2").firstNotNullOfOrNull { k ->
+            links[k]?.takeIf { it.contains(".m3u8") || it.contains(".txt") }
+                ?.let { k to it }
+        }
+        if (kandidatUrl == null) {
+            LocalProxy.obs("FL-4-BERHENTI", "hls4/hls2 tidak ada (links: ${links.keys})")
             return false
         }
+        val (labelDipakai, urlMentah) = kandidatUrl
+        // hls4 bernilai path relatif, jadi diselesaikan terhadap URL embed.
+        val hls2 = runCatching {
+            java.net.URL(java.net.URL(embedUrl), urlMentah).toString()
+        }.getOrElse { urlMentah }
 
         val host = runCatching { java.net.URL(hls2).host }.getOrNull() ?: "?"
         // Master disaring lewat proxy mode clean untuk membuang varian I-frame
@@ -856,7 +869,10 @@ class OppaDramaProvider : MainAPI() {
         // CDN tanpa tambahan latensi.
         val servedUrl = LocalProxy.proxyUrl(hls2, clean = true) ?: hls2
         val viaProxy = servedUrl != hls2
-        LocalProxy.obs("FL-4-EMIT", "label=hls2 host=$host clean=$viaProxy url=$hls2")
+        LocalProxy.obs(
+            "FL-4-EMIT",
+            "label=$labelDipakai host=$host clean=$viaProxy tersedia=${links.keys} url=$hls2"
+        )
         callback(
             newExtractorLink(
                 source = serverName,
@@ -868,7 +884,7 @@ class OppaDramaProvider : MainAPI() {
                 this.referer = ""
             }
         )
-        LocalProxy.obs("FL-4-OK", "emit=1 (hls2 saja)")
+        LocalProxy.obs("FL-4-OK", "emit=1 ($labelDipakai)")
 
         // ---------------- FL-5 (diagnostik sementara) ----------------
         // Set FL_DIAG=false setelah Video Trek terkonfirmasi bersih.
