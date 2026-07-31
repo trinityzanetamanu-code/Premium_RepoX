@@ -13,6 +13,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
+import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.security.MessageDigest
@@ -44,8 +45,7 @@ class OppaDramaProvider : MainAPI() {
     // Set 'true' saat proses troubleshooting, 'false' untuk rilis produksi
     private val DEBUG = false
 
-    // Routing TurboVIP lewat proxy lokal (LocalProxy) yang memotong prefix
-    // PNG 806+135 byte.
+    // Routing TurboVIP lewat proxy lokal (LocalProxy)
     private val USE_PROXY = true
 
     // DIAGNOSTIK SEMENTARA untuk mencari sebab duplikasi Video Trek.
@@ -478,11 +478,11 @@ class OppaDramaProvider : MainAPI() {
     }
 
     /**
-     * Extractor Hydrax - Tahap 1 & 2 Eksperimen Empiris (Dengan Fix Regex md5_id & user_id).
+     * Extractor Hydrax - Tahap 1 & 2 Eksperimen Empiris (Menggunakan Native org.json.JSONObject).
      * 
      * HX-1 : Fetch HTML Embed
      * HX-2 : Extract Base64 Blob Config
-     * HX-3 : Decode Base64 (ISO_8859_1) -> Read metadata (slug, md5_id, user_id, media)
+     * HX-3 : Decode Base64 (ISO_8859_1) -> Read metadata via JSONObject (slug, md5_id, user_id, media)
      * HX-4 : Dekripsi AES/CTR pada field 'media' menggunakan Key MD5(user_id:slug:md5_id)
      * HX-5 : Parse decrypted JSON untuk mendapatkan baseUrl dan path
      * HX-6 : EMIT LANGSUNG URL CDN ke ExoPlayer (TANPA LocalProxy)
@@ -524,13 +524,19 @@ class OppaDramaProvider : MainAPI() {
             return false
         }
         val json = String(rawBytes, Charsets.ISO_8859_1)
-        val slug = Regex(""""slug"\s*:\s*"([^"]*)"""").find(json)?.groupValues?.get(1)
+
+        val jsonObj = try {
+            JSONObject(json)
+        } catch (e: Exception) {
+            LocalProxy.obs("HX-3-JSON-ERROR", "Parsing JSONObject gagal: ${e.message}")
+            return false
+        }
+
+        val slug = jsonObj.optString("slug").takeIf { it.isNotBlank() }
             ?: extractMediaId(embedUrl) ?: ""
-        
-        // FIX REGEX: Toleran terhadap angka polos tanpa tanda petik di JSON
-        val md5id = Regex("""["']?md5_id["']?\s*:\s*["']?([a-zA-Z0-9_-]+)["']?""").find(json)?.groupValues?.get(1)
-        val userId = Regex("""["']?user_id["']?\s*:\s*["']?([a-zA-Z0-9_-]+)["']?""").find(json)?.groupValues?.get(1)
-        val mediaStr = Regex(""""media"\s*:\s*"((?:\\.|[^"\\])*)"""").find(json)?.groupValues?.get(1)
+        val md5id = jsonObj.optString("md5_id").takeIf { it.isNotBlank() }
+        val userId = jsonObj.optString("user_id").takeIf { it.isNotBlank() }
+        val mediaStr = jsonObj.optString("media").takeIf { it.isNotBlank() }
 
         LocalProxy.obs(
             "HX-3-OK",
@@ -556,8 +562,7 @@ class OppaDramaProvider : MainAPI() {
             val ivSpec = IvParameterSpec(ivBytes)
             cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
 
-            val cleanMediaStr = unescapeJs(mediaStr)
-            val decryptedBytes = cipher.doFinal(cleanMediaStr.toByteArray(Charsets.ISO_8859_1))
+            val decryptedBytes = cipher.doFinal(mediaStr.toByteArray(Charsets.ISO_8859_1))
             String(decryptedBytes, Charsets.UTF_8)
         } catch (e: Exception) {
             LocalProxy.obs("HX-4-DECRYPT-ERROR", "${e.javaClass.simpleName}: ${e.message}")
@@ -567,17 +572,28 @@ class OppaDramaProvider : MainAPI() {
         LocalProxy.obs("HX-4-DECRYPT-OK", "decrypted_len=${decryptedJson.length}")
 
         // ---------------- HX-5 (Ekstraksi Direct CDN URL) ----------------
-        val baseUrl = Regex(""""url"\s*:\s*"([^"]*)"""").find(decryptedJson)?.groupValues?.get(1)
-        val path = Regex(""""path"\s*:\s*"([^"]*)"""").find(decryptedJson)?.groupValues?.get(1)
-        val qualityLabel = Regex(""""label"\s*:\s*"([^"]*)"""").find(decryptedJson)?.groupValues?.get(1) ?: "HD"
+        val decryptedObj = try {
+            JSONObject(decryptedJson)
+        } catch (e: Exception) {
+            LocalProxy.obs("HX-5-JSON-ERROR", "Parsing decrypted JSON gagal: ${e.message}")
+            return false
+        }
+
+        val mp4Obj = decryptedObj.optJSONObject("mp4")
+        val sourcesArr = mp4Obj?.optJSONArray("sources")
+        val firstSource = sourcesArr?.optJSONObject(0)
+
+        val baseUrl = firstSource?.optString("url")
+        val path = firstSource?.optString("path")
+        val qualityLabel = firstSource?.optString("label") ?: "HD"
 
         if (baseUrl.isNullOrBlank() || path.isNullOrBlank()) {
             LocalProxy.obs("HX-5-GAGAL", "baseUrl / path tidak ditemukan di decrypted JSON: ${decryptedJson.take(100)}")
             return false
         }
 
-        val cleanBaseUrl = unescapeJs(baseUrl).trimEnd('/')
-        val cleanPath = unescapeJs(path).trimStart('/')
+        val cleanBaseUrl = baseUrl.trimEnd('/')
+        val cleanPath = path.trimStart('/')
         val srcUrl = "$cleanBaseUrl/$cleanPath"
 
         LocalProxy.obs("HX-5-URL-OK", "srcUrl=$srcUrl label=$qualityLabel")
