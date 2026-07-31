@@ -827,111 +827,73 @@ class OppaDramaProvider : MainAPI() {
         }
 
         // ---------------- FL-4 ----------------
-        // Urutan preferensi mengikuti kode player itu sendiri:
-        //   sources:[{file: links.hls4 || links.hls3 || links.hls2}]
-        val urutan = listOf("hls4", "hls3", "hls2")
-        val terpilih = LinkedHashMap<String, String>()
-        for (k in urutan) links[k]?.let { terpilih[k] = it }
-        // sisanya yang berupa media tapi bukan hls2/3/4
-        links.forEach { (k, v) ->
-            if (k !in terpilih && (v.contains(".m3u8") || v.contains(".mp4"))) {
-                terpilih[k] = v
-            }
-        }
-
-        if (terpilih.isEmpty()) {
-            LocalProxy.obs("FL-4-BERHENTI", "tidak ada URL media di hasil unpack " +
-                "(links ditemukan: ${links.keys})")
+        // HANYA hls2 yang diemit.
+        //
+        // Dasar bukti (logcat FL-4-EMIT + DENY):
+        //   - hls2 konsisten di host CDN yang stabil (acek-cdn.com,
+        //     dramiyos-cdn.com) dan memutar normal.
+        //   - hls3 memakai host SEKALI-PAKAI yang berganti tiap judul
+        //     (highqualityprints.shop, financialmodeling.cfd,
+        //     northwindstudiosupply.cfd, ...). Semuanya di luar allowlist
+        //     sehingga proxy menolak dengan DENY dan playlist tak pernah
+        //     sampai. Mengejar host yang berganti terus adalah pemeliharaan
+        //     tanpa akhir untuk jalur yang tidak dibutuhkan.
+        //   - hls4 tidak pernah muncul pada sampel mana pun.
+        //
+        // Jadi hls2 dijadikan satu-satunya sumber: bersih, stabil, dan trek
+        // kualitas tetap penuh (480p/720p/1080p) karena berasal dari master
+        // hls2 yang sudah disaring dari varian I-frame.
+        val hls2 = links["hls2"]?.takeIf { it.contains(".m3u8") || it.contains(".txt") }
+        if (hls2 == null) {
+            LocalProxy.obs("FL-4-BERHENTI", "hls2 tidak ada (links: ${links.keys})")
             return false
         }
 
-        var n = 0
-        terpilih.forEach { (label, url) ->
-            val host = runCatching { java.net.URL(url).host }.getOrNull() ?: "?"
-
-            // FL-16: deteksi lama `url.contains(".m3u8")` GAGAL untuk master
-            // yang disajikan sebagai .txt. Terukur di logcat:
-            //   label=hls3 hls=false url=.../hls3/01/08485/..._,l,n,h,.urlset/master.txt
-            // Akibatnya link diemit sebagai VIDEO progresif padahal isinya
-            // playlist HLS, dan sumber hls3 rusak total. Situs memberi nama
-            // kuncinya sendiri (hls2/hls3/hls4), jadi label itu dipakai sebagai
-            // penentu yang lebih andal daripada ekstensi berkas.
-            val isHls = label.startsWith("hls") ||
-                url.contains(".m3u8") || url.contains(".txt")
-
-            // Master disaring lewat proxy mode clean untuk membuang varian
-            // I-frame. Terukur di FL-5-MASTER: normal=3 dan iframe=3 dengan
-            // himpunan resolusi identik, total 6 entri - persis jumlah baris
-            // ganda di Video Trek. Hanya master yang lewat proxy; URI varian
-            // ditulis absolut sehingga segmen tetap langsung ke CDN.
-            val servedUrl = if (isHls) {
-                LocalProxy.proxyUrl(url, clean = true) ?: url
-            } else {
-                url
+        val host = runCatching { java.net.URL(hls2).host }.getOrNull() ?: "?"
+        // Master disaring lewat proxy mode clean untuk membuang varian I-frame
+        // (terukur: iframe_dibuang=3, varian_disisakan=3). Hanya master yang
+        // lewat proxy; URI varian ditulis absolut sehingga segmen langsung ke
+        // CDN tanpa tambahan latensi.
+        val servedUrl = LocalProxy.proxyUrl(hls2, clean = true) ?: hls2
+        val viaProxy = servedUrl != hls2
+        LocalProxy.obs("FL-4-EMIT", "label=hls2 host=$host clean=$viaProxy url=$hls2")
+        callback(
+            newExtractorLink(
+                source = serverName,
+                name = serverName,
+                url = servedUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                // FL-11: Referer tidak wajib pada CDN FileLions.
+                this.referer = ""
             }
-            val viaProxy = servedUrl != url
-
-            LocalProxy.obs(
-                "FL-4-EMIT",
-                "label=$label host=$host hls=$isHls clean=$viaProxy url=$url"
-            )
-            callback(
-                newExtractorLink(
-                    source = serverName,
-                    name = "$serverName [$label]",
-                    url = servedUrl,
-                    type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                ) {
-                    // FL-11: Referer tidak wajib pada CDN FileLions.
-                    this.referer = ""
-                }
-            )
-            n++
-        }
-        LocalProxy.obs("FL-4-OK", "emit=$n dari ${links.size} link")
+        )
+        LocalProxy.obs("FL-4-OK", "emit=1 (hls2 saja)")
 
         // ---------------- FL-5 (diagnostik sementara) ----------------
-        // Mengambil master playlist lalu melaporkan strukturnya. Tujuannya
-        // menjawab satu pertanyaan: apakah duplikasi Video Trek berasal dari
-        // isi master, atau dari cara ExoPlayer menafsirkannya.
-        //
-        // Yang dilaporkan per master:
-        //   normal  = resolusi dari #EXT-X-STREAM-INF        (varian playback)
-        //   iframe  = resolusi dari #EXT-X-I-FRAME-STREAM-INF (trick-play)
-        //
-        // Kalau normal dan iframe berisi resolusi yang SAMA dan jumlah
-        // gabungannya cocok dengan jumlah baris di Video Trek, sebabnya
-        // master playlist. Kalau tidak cocok, sebabnya di lapisan lain.
+        // Set FL_DIAG=false setelah Video Trek terkonfirmasi bersih.
+        // Menambah satu request per loadLinks.
         if (FL_DIAG) {
-            terpilih.forEach { (label, url) ->
-                if (!url.contains(".m3u8")) return@forEach
-                try {
-                    val pl = app.get(
-                        url,
-                        headers = mapOf("User-Agent" to USER_AGENT)
-                    ).text
-                    val resDari = { tag: String ->
-                        Regex("""$tag:[^\n]*""").findAll(pl).map { mr ->
-                            Regex("""RESOLUTION=(\d+x\d+)""")
-                                .find(mr.value)?.groupValues?.get(1) ?: "?"
-                        }.toList()
-                    }
-                    val normal = resDari("#EXT-X-STREAM-INF")
-                    val iframe = resDari("#EXT-X-I-FRAME-STREAM-INF")
-                    LocalProxy.obs(
-                        "FL-5-MASTER",
-                        "label=$label bytes=${pl.length} " +
-                            "normal=${normal.size}$normal " +
-                            "iframe=${iframe.size}$iframe " +
-                            "key=${pl.contains("#EXT-X-KEY")} " +
-                            "total_entri=${normal.size + iframe.size}"
-                    )
-                } catch (e: Exception) {
-                    LocalProxy.obs("FL-5-GAGAL", "label=$label ${e.javaClass.simpleName}: ${e.message}")
+            try {
+                val pl = app.get(hls2, headers = mapOf("User-Agent" to USER_AGENT)).text
+                val resDari = { tag: String ->
+                    Regex("""$tag:[^\n]*""").findAll(pl).map { mr ->
+                        Regex("""RESOLUTION=(\d+x\d+)""")
+                            .find(mr.value)?.groupValues?.get(1) ?: "?"
+                    }.toList()
                 }
+                val normal = resDari("#EXT-X-STREAM-INF")
+                val iframe = resDari("#EXT-X-I-FRAME-STREAM-INF")
+                LocalProxy.obs(
+                    "FL-5-MASTER",
+                    "bytes=${pl.length} normal=${normal.size}$normal " +
+                        "iframe=${iframe.size}$iframe total_entri=${normal.size + iframe.size}"
+                )
+            } catch (e: Exception) {
+                LocalProxy.obs("FL-5-GAGAL", "${e.javaClass.simpleName}: ${e.message}")
             }
         }
-        return n > 0
+        return true
     }
 
     private fun extractMediaId(url: String): String? {
