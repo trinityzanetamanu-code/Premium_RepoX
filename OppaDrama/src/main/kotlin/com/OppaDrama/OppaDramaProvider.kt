@@ -478,14 +478,7 @@ class OppaDramaProvider : MainAPI() {
     }
 
     /**
-     * Extractor Hydrax - Tahap 1 & 2 Eksperimen Empiris (Menggunakan Native org.json.JSONObject).
-     * 
-     * HX-1 : Fetch HTML Embed
-     * HX-2 : Extract Base64 Blob Config
-     * HX-3 : Decode Base64 (ISO_8859_1) -> Read metadata via JSONObject (slug, md5_id, user_id, media)
-     * HX-4 : Dekripsi AES/CTR pada field 'media' menggunakan Key MD5(user_id:slug:md5_id)
-     * HX-5 : Parse decrypted JSON untuk mendapatkan baseUrl dan path
-     * HX-6 : EMIT LANGSUNG URL CDN ke ExoPlayer (TANPA LocalProxy)
+     * Extractor Hydrax - Tahap 1 & 2 Eksperimen Empiris (Mendukung Variasi Kunci JSON & Multi-Kualitas).
      */
     private suspend fun extractHydrax(
         embedUrl: String,
@@ -581,36 +574,75 @@ class OppaDramaProvider : MainAPI() {
 
         val mp4Obj = decryptedObj.optJSONObject("mp4")
         val sourcesArr = mp4Obj?.optJSONArray("sources")
-        val firstSource = sourcesArr?.optJSONObject(0)
+            ?: decryptedObj.optJSONArray("sources")
 
-        val baseUrl = firstSource?.optString("url")
-        val path = firstSource?.optString("path")
-        val qualityLabel = firstSource?.optString("label") ?: "HD"
+        var linksEmitted = 0
 
-        if (baseUrl.isNullOrBlank() || path.isNullOrBlank()) {
-            LocalProxy.obs("HX-5-GAGAL", "baseUrl / path tidak ditemukan di decrypted JSON: ${decryptedJson.take(100)}")
+        if (sourcesArr != null && sourcesArr.length() > 0) {
+            for (i in 0 until sourcesArr.length()) {
+                val srcObj = sourcesArr.optJSONObject(i) ?: continue
+
+                // Resolusi Kunci Domain / URL Base
+                val bUrl = srcObj.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
+                    ?: srcObj.optString("domain", null)?.takeIf { it.isNotBlank() && it != "null" }
+                    ?: mp4Obj?.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
+                    ?: decryptedObj.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
+
+                // Resolusi Kunci Path / File
+                val pPath = srcObj.optString("path", null)?.takeIf { it.isNotBlank() && it != "null" }
+                    ?: srcObj.optString("file", null)?.takeIf { it.isNotBlank() && it != "null" }
+                    ?: srcObj.optString("src", null)?.takeIf { it.isNotBlank() && it != "null" }
+
+                val label = srcObj.optString("label", null)?.takeIf { it.isNotBlank() } ?: "HD"
+
+                // Penanganan Jika Stream Menyediakan URL Absolut Langsung (http:// atau https://)
+                if (pPath != null && (pPath.startsWith("http://") || pPath.startsWith("https://"))) {
+                    val fullUrl = unescapeJs(pPath)
+                    LocalProxy.obs("HX-5-URL-ABSOLUT", "fullUrl=$fullUrl label=$label")
+                    callback(
+                        newExtractorLink(
+                            source = serverName,
+                            name = "$serverName [$label]",
+                            url = fullUrl,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = "https://abyssplayer.com/"
+                        }
+                    )
+                    linksEmitted++
+                    continue
+                }
+
+                // Penanganan Penggabungan Domain + Path
+                if (!bUrl.isNullOrBlank() && !pPath.isNullOrBlank()) {
+                    val cleanBase = unescapeJs(bUrl).trimEnd('/')
+                    val cleanP = unescapeJs(pPath).trimStart('/')
+                    val fullUrl = "$cleanBase/$cleanP"
+
+                    LocalProxy.obs("HX-5-URL-OK", "srcUrl=$fullUrl label=$label")
+
+                    // ---------------- HX-6 (Direct Emit ke ExoPlayer TANPA LocalProxy) ----------------
+                    callback(
+                        newExtractorLink(
+                            source = serverName,
+                            name = "$serverName [$label]",
+                            url = fullUrl,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = "https://abyssplayer.com/"
+                        }
+                    )
+                    linksEmitted++
+                }
+            }
+        }
+
+        if (linksEmitted == 0) {
+            LocalProxy.obs("HX-5-GAGAL", "URL CDN tidak ditemukan di decrypted JSON (len=${decryptedJson.length}): ${decryptedJson.take(300)}")
             return false
         }
 
-        val cleanBaseUrl = baseUrl.trimEnd('/')
-        val cleanPath = path.trimStart('/')
-        val srcUrl = "$cleanBaseUrl/$cleanPath"
-
-        LocalProxy.obs("HX-5-URL-OK", "srcUrl=$srcUrl label=$qualityLabel")
-
-        // ---------------- HX-6 (Direct Emit ke ExoPlayer TANPA LocalProxy) ----------------
-        callback(
-            newExtractorLink(
-                source = serverName,
-                name = "$serverName [$qualityLabel]",
-                url = srcUrl,
-                type = ExtractorLinkType.VIDEO
-            ) {
-                this.referer = "https://abyssplayer.com/"
-            }
-        )
-
-        LocalProxy.obs("HX-6-EMIT-DIRECT", "Sukses emit URL CDN langsung ke ExoPlayer: $srcUrl")
+        LocalProxy.obs("HX-6-EMIT-DIRECT", "Sukses emit $linksEmitted URL CDN langsung ke ExoPlayer")
         return true
     }
 
