@@ -1,5 +1,6 @@
 package com.OppaDrama
 
+import android.content.Context
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
@@ -14,7 +15,11 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 @Serializable
 data class MovieVersionData(
@@ -40,14 +45,10 @@ class OppaDramaProvider : MainAPI() {
     private val DEBUG = false
 
     // Routing TurboVIP lewat proxy lokal (LocalProxy) yang memotong prefix
-    // PNG 806+135 byte. Set 'false' untuk kembali ke perilaku lama TANPA
-    // build ulang -- berguna untuk A/B: langsung vs lewat proxy.
+    // PNG 806+135 byte.
     private val USE_PROXY = true
 
     // DIAGNOSTIK SEMENTARA untuk mencari sebab duplikasi Video Trek.
-    // Saat true, extractor FileLions ikut mengambil master playlist lalu
-    // melaporkan strukturnya ke logcat. Menambah satu request per loadLinks.
-    // Set false setelah penyebabnya ketemu.
     private val FL_DIAG = true
 
     // Pembatas Concurrency: Maksimal 3 request paralel bersamaan
@@ -127,7 +128,7 @@ class OppaDramaProvider : MainAPI() {
         logDebug("load -> Opening URL: $url")
         val doc = app.get(url, headers = headersMap).document
 
-        // 1. Ekstraksi Parent URL dari Breadcrumb (Bebas posisional nth-child)
+        // 1. Ekstraksi Parent URL dari Breadcrumb
         val breadcrumbLinks = doc.select(".ts-breadcrumb ol li a, .ts-breadcrumb a, .breadcrumb a")
         val parentUrl = breadcrumbLinks.map { it.attr("href") }.firstOrNull { link ->
             val fixed = fixUrl(link)
@@ -280,7 +281,7 @@ class OppaDramaProvider : MainAPI() {
             }
         }
 
-        // Post-Extractor Deduplication: Deduplikasi strictly pada URL stream akhir
+        // Post-Extractor Deduplication
         val safeLinkCallback: (ExtractorLink) -> Unit = { link ->
             if (visitedStreamUrls.add(link.url)) {
                 logDebug("Source emitted: [${link.source}] ${link.name} -> ${link.url}")
@@ -293,7 +294,6 @@ class OppaDramaProvider : MainAPI() {
         coroutineScope {
             versionList.map { version ->
                 async {
-                    // Terapkan batas concurrency request
                     concurrencySemaphore.withPermit {
                         val pageUrl = version.url
                         val labelSuffix = if (version.versionName.isNotBlank()) " (${version.versionName})" else ""
@@ -328,7 +328,6 @@ class OppaDramaProvider : MainAPI() {
                                         if (rawSrc.isNotBlank()) {
                                             val fixedUrl = fixUrl(rawSrc)
 
-                                            // Pre-Extractor Deduplication
                                             if (!visitedEmbedUrls.add(fixedUrl)) {
                                                 logDebug("Embed URL skipped (Pre-Extractor Duplicate): $fixedUrl")
                                                 continue
@@ -336,36 +335,16 @@ class OppaDramaProvider : MainAPI() {
 
                                             val countBefore = visitedStreamUrls.size
 
-                                            // 1. Penanganan TurboVIP (Hierarki Strict Fallback)
+                                            // 1. Penanganan TurboVIP
                                             if (fixedUrl.contains("emturbovid.com") || fixedUrl.contains("turboviplay.com")) {
                                                 logDebug("Processing TurboVIP: $fixedUrl")
                                                 extractTurboVipWithFallback(fixedUrl, pageUrl, serverName, safeSubtitleCallback, safeLinkCallback)
                                             } 
-                                            // 2. Penanganan Hydrax (Dengan Validasi Media ID)
+                                            // 2. Penanganan Hydrax
                                             else if (fixedUrl.contains("abyss") || fixedUrl.contains("hydrax")) {
-                                                // H-1 TERBUKTI: regex lama
-                                                //   (?:v=|\/v\/|\/)([a-zA-Z0-9_-]+)
-                                                // menangkap nama HOST, bukan ID. Alternatif \/ selalu
-                                                // menang di posisi paling kiri pada // di https://,
-                                                // sehingga hasilnya 'abyssplayer' bukan '_pGSwC03aH'.
-                                                // Diganti dengan parsing URL, bukan regex rakus.
                                                 val mediaId = extractMediaId(fixedUrl)
                                                 LocalProxy.obs("HYDRAX", "in=$fixedUrl id=$mediaId")
 
-                                                // Kandidat diurut berdasarkan BUKTI, bukan asumsi.
-                                                // URL asli didahulukan karena HAR browser membuktikan
-                                                // abyssplayer.com benar-benar menyajikan video; host
-                                                // abyss.to tidak punya bukti pendukung apa pun.
-                                                val candidates = if (!mediaId.isNullOrBlank()) listOf(
-                                                    fixedUrl,
-                                                    "https://abyssplayer.com/?v=$mediaId",
-                                                    "https://abyss.to/v/$mediaId",
-                                                    "https://abyss.to/?v=$mediaId"
-                                                ).distinct() else listOf(fixedUrl)
-
-                                                // Extractor sendiri didahulukan. H-3 membuktikan
-                                                // loadExtractor tidak punya penangan untuk host ini,
-                                                // jadi kandidat di bawah hanya jaring pengaman.
                                                 val hxOk = try {
                                                     extractHydrax(fixedUrl, pageUrl, serverName, safeLinkCallback)
                                                 } catch (e: Exception) {
@@ -373,26 +352,12 @@ class OppaDramaProvider : MainAPI() {
                                                     false
                                                 }
 
-                                                for (cand in candidates) {
-                                                    if (hxOk || visitedStreamUrls.size > countBefore) break
-                                                    loadExtractor(cand, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
-                                                    // Log per kandidat: inilah yang menjaga atribusi
-                                                    // sebab-akibat tetap tunggal meski ada 4 kandidat.
-                                                    LocalProxy.obs(
-                                                        "HYDRAX-TRY",
-                                                        "url=$cand hasil=" +
-                                                            if (visitedStreamUrls.size > countBefore) "BERHASIL" else "kosong"
-                                                    )
-                                                }
-                                                if (visitedStreamUrls.size == countBefore) {
-                                                    LocalProxy.obs("HYDRAX-GAGAL", "semua ${candidates.size} kandidat kosong")
+                                                if (!hxOk && visitedStreamUrls.size == countBefore) {
+                                                    LocalProxy.obs("HYDRAX-GAGAL", "Ekstraksi HydraX tidak menghasilkan stream")
                                                 }
                                             } 
-                                            // 3. Penanganan FileLions / Minochinos (keluarga XFileSharing)
+                                            // 3. Penanganan FileLions / Minochinos
                                             else if (fixedUrl.contains("minochinos.com") || fixedUrl.contains("vidhide") || fixedUrl.contains("filelions")) {
-                                                // Extractor sendiri didahulukan. Mekanismenya sudah
-                                                // terpetakan penuh lewat fl1/fl2/fl3: unpack packer
-                                                // p,a,c,k,e,d lalu ambil URL dari objek links.
                                                 val flOk = try {
                                                     extractFileLions(fixedUrl, pageUrl, serverName, safeLinkCallback)
                                                 } catch (e: Exception) {
@@ -401,11 +366,6 @@ class OppaDramaProvider : MainAPI() {
                                                 }
 
                                                 if (!flOk && visitedStreamUrls.size == countBefore) {
-                                                    // H-2: regex lama (?:v\/|\/d\/|\/v=|\/) menangkap nama
-                                                    // HOST, bukan ID - alternatif \/ menang di // pada
-                                                    // https://, sehingga hasilnya 'minochinos' bukan
-                                                    // 'mnqiexinkl9c'. Cacat yang sama persis dengan H-1.
-                                                    // Diganti extractMediaId() yang sudah tervalidasi.
                                                     val mediaId = extractMediaId(fixedUrl)
                                                     LocalProxy.obs("FL-FALLBACK", "in=$fixedUrl id=$mediaId")
                                                     if (!mediaId.isNullOrBlank()) {
@@ -417,10 +377,6 @@ class OppaDramaProvider : MainAPI() {
                                                     if (visitedStreamUrls.size == countBefore) {
                                                         loadExtractor(fixedUrl, referer = pageUrl, safeSubtitleCallback, safeLinkCallback)
                                                     }
-                                                    LocalProxy.obs(
-                                                        "FL-FALLBACK-HASIL",
-                                                        if (visitedStreamUrls.size > countBefore) "BERHASIL" else "kosong"
-                                                    )
                                                 }
                                             } else {
                                                 // General Fallback
@@ -463,7 +419,7 @@ class OppaDramaProvider : MainAPI() {
         return visitedStreamUrls.isNotEmpty()
     }
 
-    // Ekstraksi TurboVIP Berbasis Hierarki Strict Fallback
+    // Ekstraksi TurboVIP
     private suspend fun extractTurboVipWithFallback(
         url: String,
         referer: String,
@@ -474,13 +430,11 @@ class OppaDramaProvider : MainAPI() {
         return runCatching {
             val doc = app.get(url, referer = referer, headers = headersMap).document
             
-            // Level 1: Baca data-hash langsung dari DOM #video_player
             var m3u8Url = doc.selectFirst("#video_player[data-hash]")?.attr("data-hash")?.trim()
 
             if (!m3u8Url.isNullOrBlank()) {
                 logDebug("[TurboVIP Level 1 Success] Found M3U8 via data-hash: $m3u8Url")
             } else {
-                // Level 2 & 3: JS Unpacker -> Regex M3U8
                 logDebug("[TurboVIP Level 1 Failed] Trying Level 2 JS Unpacker")
                 val html = doc.html()
                 val unpacked = getAndUnpack(html)
@@ -491,11 +445,6 @@ class OppaDramaProvider : MainAPI() {
             if (!m3u8Url.isNullOrBlank()) {
                 val fixedM3u8 = fixUrl(m3u8Url)
 
-                // Segmen TurboVIP dibungkus PNG (806 byte) + padding 0xFF (135 byte).
-                // TsExtractor ExoPlayer gagal dengan "Cannot find sync byte" karena
-                // paket TS pertama baru mulai di offset 941. LocalProxy memotong
-                // prefix itu dan menulis ulang URI segmen di playlist supaya ikut
-                // lewat proxy. Offset dicari dinamis, TIDAK di-hardcode.
                 val servedUrl = if (USE_PROXY) {
                     LocalProxy.proxyUrl(fixedM3u8) ?: fixedM3u8
                 } else {
@@ -512,9 +461,6 @@ class OppaDramaProvider : MainAPI() {
                         type = ExtractorLinkType.M3U8
                     ) {
                         if (viaProxy) {
-                            // Header upstream diurus LocalProxy sendiri. Memaksa
-                            // referer turboviplay.com ke 127.0.0.1 tidak ada gunanya,
-                            // dan H-5/H-6 sudah terbukti: header tidak mengubah byte.
                             this.referer = ""
                         } else {
                             this.referer = "https://turboviplay.com/"
@@ -524,7 +470,6 @@ class OppaDramaProvider : MainAPI() {
                 )
                 true
             } else {
-                // Level 4: loadExtractor bawaan CloudStream sebagai pertahanan terakhir
                 logDebug("[TurboVIP Level 2 Failed] Trying Level 4 loadExtractor built-in")
                 val altUrl = if (url.contains("/t/")) url.replace("/t/", "/v/") else url
                 loadExtractor(altUrl, referer = url, subtitleCallback, callback)
@@ -533,43 +478,14 @@ class OppaDramaProvider : MainAPI() {
     }
 
     /**
-     * Ekstraksi Media ID berbasis PARSING URL, bukan regex rakus.
-     *
-     * Dipakai HANYA oleh cabang Hydrax. Cabang VidHide sengaja TIDAK diubah
-     * (lihat H-2) supaya perubahan pada build ini punya satu sebab tunggal
-     * yang bisa diatribusikan.
-     *
-     * Aturan:
-     *   1. kalau ada parameter query v=  -> pakai nilainya
-     *   2. kalau tidak, pakai segmen path terakhir
-     *   3. kalau segmen itu tidak masuk akal sebagai ID -> null, JANGAN
-     *      mengembalikan nama host seperti regex lama
-     *
-     * Terverifikasi pada 6 bentuk URL, termasuk kasus tanpa ID.
-     */
-    /**
-     * Extractor Hydrax sendiri, dibangun bertahap.
-     *
-     * H-3 membuktikan CloudStream tidak punya extractor yang cocok untuk
-     * abyssplayer.com / abyss.to (nol request jaringan pada 3 bentuk URL).
-     * Fungsi ini menggantikan ketergantungan itu.
-     *
-     * Setiap tahap melapor lewat obs, sehingga run-nya sendiri yang
-     * menunjukkan sampai mana ia berhasil - bukan prediksi.
-     *
-     *   HX-1  ambil halaman embed
-     *   HX-2  temukan blob base64 config
-     *   HX-3  dekode base64 + baca struktur config
-     *   HX-4  hasilkan URL media
-     *
-     * CATATAN ENKODING PENTING:
-     * JSON hasil dekode base64 BUKAN UTF-8 valid - ia mencampur escape
-     * \uXXXX dengan byte mentah tinggi. Memakai .text / UTF-8 akan
-     * merusaknya persis seperti bug hx2 (347 byte hancur jadi U+FFFD).
-     * Karena itu di sini dipakai ISO_8859_1 yang memetakan byte 0..255
-     * ke char 0..255 secara lossless.
-     *
-     * @return true kalau berhasil menghasilkan minimal satu link
+     * Extractor Hydrax - Tahap 1 & 2 Eksperimen Empiris.
+     * 
+     * HX-1 : Fetch HTML Embed
+     * HX-2 : Extract Base64 Blob Config
+     * HX-3 : Decode Base64 (ISO_8859_1) -> Read metadata (slug, md5_id, user_id, media)
+     * HX-4 : Dekripsi AES/CTR pada field 'media' menggunakan Key MD5(user_id:slug:md5_id)
+     * HX-5 : Parse decrypted JSON untuk mendapatkan baseUrl dan path
+     * HX-6 : EMIT LANGSUNG URL CDN ke ExoPlayer (TANPA LocalProxy)
      */
     private suspend fun extractHydrax(
         embedUrl: String,
@@ -607,70 +523,79 @@ class OppaDramaProvider : MainAPI() {
             LocalProxy.obs("HX-3-GAGAL", "base64 decode: ${e.message}")
             return false
         }
-        // ISO_8859_1, BUKAN UTF-8. Lihat catatan enkoding di atas.
         val json = String(rawBytes, Charsets.ISO_8859_1)
         val slug = Regex(""""slug"\s*:\s*"([^"]*)"""").find(json)?.groupValues?.get(1)
-        val md5id = Regex(""""md5_id"\s*:\s*(\d+)""").find(json)?.groupValues?.get(1)
-        val mediaLen = Regex(""""media"\s*:\s*"((?:\\.|[^"\\])*)"""")
-            .find(json)?.groupValues?.get(1)?.length ?: -1
+            ?: extractMediaId(embedUrl) ?: ""
+        val md5id = Regex(""""md5_id"\s*:\s*"?(\d+|[a-zA-Z0-9_-]+)"?""""").find(json)?.groupValues?.get(1)
+        val userId = Regex(""""user_id"\s*:\s*"?(\d+|[a-zA-Z0-9_-]+)"?""""").find(json)?.groupValues?.get(1)
+        val mediaStr = Regex(""""media"\s*:\s*"((?:\\.|[^"\\])*)"""").find(json)?.groupValues?.get(1)
+
         LocalProxy.obs(
             "HX-3-OK",
-            "json=${rawBytes.size}B slug=$slug md5_id=$md5id media_field=$mediaLen"
+            "json=${rawBytes.size}B slug=$slug md5_id=$md5id user_id=$userId media_len=${mediaStr?.length ?: 0}"
         )
 
-        // ---------------- HX-4 ----------------
-        // Cek termurah lebih dulu: apakah ada URL http yang tersimpan polos
-        // di mana pun dalam config. Kalau ada, tidak perlu dekode apa pun.
-        val plain = Regex("""https?://[^\s"'\\<>]{12,}""").findAll(json)
-            .map { it.value }
-            .filter { u ->
-                !u.contains("blogger.googleusercontent") &&
-                    !u.contains("oppa.biz") &&
-                    !u.contains("iamcdn.net")
-            }
-            .distinct().toList()
-
-        if (plain.isNotEmpty()) {
-            LocalProxy.obs("HX-4-URL-POLOS", "ditemukan ${plain.size}: ${plain.take(3)}")
-            plain.forEach { u ->
-                callback(
-                    newExtractorLink(
-                        source = serverName,
-                        name = "$serverName [direct]",
-                        url = u,
-                        type = ExtractorLinkType.VIDEO
-                    ) { this.referer = embedUrl }
-                )
-            }
-            return true
+        // ---------------- HX-4 (Proses Dekripsi Field 'media') ----------------
+        if (userId.isNullOrBlank() || md5id.isNullOrBlank() || mediaStr.isNullOrBlank()) {
+            LocalProxy.obs("HX-4-GAGAL", "Parameter terenkripsi tidak lengkap (userId=$userId, md5id=$md5id, media=${mediaStr != null})")
+            return false
         }
 
-        LocalProxy.obs(
-            "HX-4-BERHENTI",
-            "tidak ada URL polos di config. URL media ada di field 'media' " +
-                "($mediaLen char terenkode) dan perlu didekode. " +
-                "Inilah titik berhenti extractor."
+        val decryptedJson = try {
+            val hashInput = "$userId:$slug:$md5id".toByteArray(Charsets.UTF_8)
+            val md5Hash = MessageDigest.getInstance("MD5").digest(hashInput)
+            val keyHex = md5Hash.joinToString("") { "%02x".format(it) }
+
+            val keyBytes = keyHex.toByteArray(Charsets.UTF_8)
+            val ivBytes = keyBytes.copyOfRange(0, 16)
+
+            val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+            val secretKey = SecretKeySpec(keyBytes, "AES")
+            val ivSpec = IvParameterSpec(ivBytes)
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+
+            val cleanMediaStr = unescapeJs(mediaStr)
+            val decryptedBytes = cipher.doFinal(cleanMediaStr.toByteArray(Charsets.ISO_8859_1))
+            String(decryptedBytes, Charsets.UTF_8)
+        } catch (e: Exception) {
+            LocalProxy.obs("HX-4-DECRYPT-ERROR", "${e.javaClass.simpleName}: ${e.message}")
+            return false
+        }
+
+        LocalProxy.obs("HX-4-DECRYPT-OK", "decrypted_len=${decryptedJson.length}")
+
+        // ---------------- HX-5 (Ekstraksi Direct CDN URL) ----------------
+        val baseUrl = Regex(""""url"\s*:\s*"([^"]*)"""").find(decryptedJson)?.groupValues?.get(1)
+        val path = Regex(""""path"\s*:\s*"([^"]*)"""").find(decryptedJson)?.groupValues?.get(1)
+        val qualityLabel = Regex(""""label"\s*:\s*"([^"]*)"""").find(decryptedJson)?.groupValues?.get(1) ?: "HD"
+
+        if (baseUrl.isNullOrBlank() || path.isNullOrBlank()) {
+            LocalProxy.obs("HX-5-GAGAL", "baseUrl / path tidak ditemukan di decrypted JSON: ${decryptedJson.take(100)}")
+            return false
+        }
+
+        val cleanBaseUrl = unescapeJs(baseUrl).trimEnd('/')
+        val cleanPath = unescapeJs(path).trimStart('/')
+        val srcUrl = "$cleanBaseUrl/$cleanPath"
+
+        LocalProxy.obs("HX-5-URL-OK", "srcUrl=$srcUrl label=$qualityLabel")
+
+        // ---------------- HX-6 (Direct Emit ke ExoPlayer TANPA LocalProxy) ----------------
+        callback(
+            newExtractorLink(
+                source = serverName,
+                name = "$serverName [$qualityLabel]",
+                url = srcUrl,
+                type = ExtractorLinkType.VIDEO
+            ) {
+                this.referer = "https://abyssplayer.com/"
+            }
         )
-        return false
+
+        LocalProxy.obs("HX-6-EMIT-DIRECT", "Sukses emit URL CDN langsung ke ExoPlayer: $srcUrl")
+        return true
     }
 
-    /**
-     * Membalik packer Dean Edwards p,a,c,k,e,d.
-     *
-     * Ini SUBSTITUSI TEKS MURNI, bukan eksekusi. Packer ini dibuat tahun 2004
-     * untuk memperkecil ukuran berkas JavaScript: kata-kata panjang diganti
-     * token pendek basis-N, kamusnya disimpan di akhir. Membalikkannya sama
-     * dengan mendekompresi teks.
-     *
-     * Format argumen:
-     *   }('PAYLOAD', RADIX, COUNT, 'kata0|kata1|...'.split('|'), 0, {})
-     *
-     * Alfabet basis-N mengikuti perilaku JS: c.toString(36) untuk c <= 35
-     * (0-9a-z), lalu String.fromCharCode(c+29) untuk c > 35 (A-Z). Gabungannya
-     * persis "0..9a..zA..Z", sehingga satu tabel melayani radix 36 maupun 62.
-     *
-     * Tervalidasi pada data nyata minochinos: 13158 char, radix 36, count 612.
-     */
     private fun unpackDeanEdwards(packed: String): String? {
         val m = Regex(
             """\}\s*\(\s*'((?:[^'\\]|\\.)*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:[^'\\]|\\.)*)'\s*\.split\('\|'\)""",
@@ -689,7 +614,6 @@ class OppaDramaProvider : MainAPI() {
             val w = words.getOrNull(i)
             map[tok] = if (w.isNullOrEmpty()) tok else w
         }
-        // satu kali jalan, bukan `count` kali replace berturut-turut
         return Regex("""\b[0-9A-Za-z]+\b""").replace(payload) { mr ->
             map[mr.value] ?: mr.value
         }
@@ -707,7 +631,6 @@ class OppaDramaProvider : MainAPI() {
         return sb.toString()
     }
 
-    /** Payload adalah literal string JS berkutip tunggal; buka escape-nya. */
     private fun unescapeJs(s: String): String {
         val sb = StringBuilder(s.length)
         var i = 0
@@ -731,27 +654,13 @@ class OppaDramaProvider : MainAPI() {
         return sb.toString()
     }
 
-    /**
-     * Extractor FileLions (host minochinos.com dan keluarga XFileSharing).
-     *
-     * Seluruh keputusan di bawah berbasis pengukuran fl1/fl2/fl3:
-     *   FL-11  Referer TIDAK wajib (200 pada dengan/tanpa/salah referer)
-     *   FL-12  master HLS valid, EXT-X-KEY=0, BYTERANGE=0, 2 varian
-     *   FL-13  segmen TS polos, 0x47 di offset 0, tanpa wrapper
-     *   FL-14  token s=waktu-request, e=36 jam -> ambil ulang tiap loadLinks
-     *   FL-15  hls2 dan hls3 berada di DUA host berbeda
-     *
-     * Karena FL-13, LocalProxy tidak dipakai sama sekali di jalur ini.
-     *
-     * Tahapan melapor sendiri lewat obs supaya titik berhenti selalu terlihat.
-     */
+    // Extractor FileLions
     private suspend fun extractFileLions(
         embedUrl: String,
         pageUrl: String,
         serverName: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // ---------------- FL-1 ----------------
         val html = try {
             app.get(
                 embedUrl,
@@ -765,17 +674,6 @@ class OppaDramaProvider : MainAPI() {
         LocalProxy.obs("FL-1-OK", "html=${html.length} char")
         if (html.isBlank()) return false
 
-        // ---------------- FL-2 ----------------
-        // BUG YANG DIPERBAIKI: regex lama memakai `.*?\)\)` - lazy, tanpa
-        // jangkar. Ia berhenti di "))" PERTAMA yang muncul DI DALAM payload,
-        // sehingga blok terpotong jadi ~1000 char padahal aslinya ~11000
-        // (terukur: Kotlin lapor 1070, fl1.py lapor 11460 untuk halaman
-        // setara). Versi Python memakai jangkar `\s*(?:</script>|$)` dan
-        // jangkar itu tidak ikut terbawa saat porting.
-        //
-        // Sekarang dijangkarkan ke `.split('|')` yang hanya muncul SEKALI,
-        // yaitu di argumen keempat packer. Deterministik, tidak bergantung
-        // pada tebakan posisi tutup kurung.
         val kandidat = Regex(
             """eval\(function\(p,a,c,k,e,d\).*?\.split\('\|'\)\s*\)?\s*\)""",
             RegexOption.DOT_MATCHES_ALL
@@ -787,13 +685,9 @@ class OppaDramaProvider : MainAPI() {
         }
         LocalProxy.obs(
             "FL-2-OK",
-            "blok=${kandidat.size} ukuran=${kandidat.map { it.length }} " +
-                "(bandingkan dengan fl1.py di Termux)"
+            "blok=${kandidat.size} ukuran=${kandidat.map { it.length }}"
         )
 
-        // ---------------- FL-3 ----------------
-        // Halaman bisa memuat lebih dari satu blok packed (iklan, player, dll).
-        // Coba semuanya, pakai yang pertama menghasilkan URL media.
         var code: String? = null
         var links = LinkedHashMap<String, String>()
         for ((idx, blok) in kandidat.withIndex()) {
@@ -803,14 +697,6 @@ class OppaDramaProvider : MainAPI() {
                 continue
             }
             val l = LinkedHashMap<String, String>()
-            // FL-20: nilai link bisa ABSOLUT (https://cdn.../master.m3u8) atau
-            // RELATIF (/stream/<token>/<srv>/<ts>/<fileid>/master.m3u8).
-            // Regex lama hanya menerima https?:// sehingga entri "hls4" -
-            // yang justru didahulukan kode player sendiri lewat
-            //   sources:[{file: links.hls4 || links.hls3 || links.hls2}]
-            // - selalu tersaring keluar. Akibatnya kita memakai hls2 (CDN
-            // mentah) yang terukur hanya 0.17x dari kebutuhan bitrate,
-            // sementara jalur /stream/ mencapai 6.31x pada jaringan yang sama.
             Regex(""""(\w+)"\s*:\s*"((?:https?://|/)[^"]+)"""").findAll(hasil).forEach {
                 l[it.groupValues[1]] = it.groupValues[2]
             }
@@ -834,20 +720,6 @@ class OppaDramaProvider : MainAPI() {
             return false
         }
 
-        // ---------------- FL-4 ----------------
-        // Urutan preferensi mengikuti kode player itu sendiri:
-        //   sources:[{file: links.hls4 || links.hls3 || links.hls2, type:"hls"}]
-        //
-        // hls4 didahulukan berdasarkan pengukuran fl5.py pada The Conjuring,
-        // jaringan yang sama, film yang sama:
-        //   hls2 (acek-cdn.com)  480p rasio 0.44x   720p rasio 0.17x  cache MISS
-        //   hls4 (/stream/)      480p rasio 2.50x   720p rasio 6.31x
-        // Rasio di bawah 1.0 berarti unduhan lebih lambat dari pemutaran, dan
-        // itulah pola 2 detik jalan / 2 detik buffering.
-        //
-        // hls3 dilewati: hostnya sekali-pakai dan berganti tiap judul
-        // (highqualityprints.shop, financialmodeling.cfd, ...), selalu ditolak
-        // allowlist proxy dengan DENY.
         val kandidatUrl = listOf("hls4", "hls2").firstNotNullOfOrNull { k ->
             links[k]?.takeIf { it.contains(".m3u8") || it.contains(".txt") }
                 ?.let { k to it }
@@ -857,16 +729,11 @@ class OppaDramaProvider : MainAPI() {
             return false
         }
         val (labelDipakai, urlMentah) = kandidatUrl
-        // hls4 bernilai path relatif, jadi diselesaikan terhadap URL embed.
         val hls2 = runCatching {
             java.net.URL(java.net.URL(embedUrl), urlMentah).toString()
         }.getOrElse { urlMentah }
 
         val host = runCatching { java.net.URL(hls2).host }.getOrNull() ?: "?"
-        // Master disaring lewat proxy mode clean untuk membuang varian I-frame
-        // (terukur: iframe_dibuang=3, varian_disisakan=3). Hanya master yang
-        // lewat proxy; URI varian ditulis absolut sehingga segmen langsung ke
-        // CDN tanpa tambahan latensi.
         val servedUrl = LocalProxy.proxyUrl(hls2, clean = true) ?: hls2
         val viaProxy = servedUrl != hls2
         LocalProxy.obs(
@@ -880,15 +747,11 @@ class OppaDramaProvider : MainAPI() {
                 url = servedUrl,
                 type = ExtractorLinkType.M3U8
             ) {
-                // FL-11: Referer tidak wajib pada CDN FileLions.
                 this.referer = ""
             }
         )
         LocalProxy.obs("FL-4-OK", "emit=1 ($labelDipakai)")
 
-        // ---------------- FL-5 (diagnostik sementara) ----------------
-        // Set FL_DIAG=false setelah Video Trek terkonfirmasi bersih.
-        // Menambah satu request per loadLinks.
         if (FL_DIAG) {
             try {
                 val pl = app.get(hls2, headers = mapOf("User-Agent" to USER_AGENT)).text
