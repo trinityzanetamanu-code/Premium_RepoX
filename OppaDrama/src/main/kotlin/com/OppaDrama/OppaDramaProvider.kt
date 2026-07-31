@@ -848,19 +848,41 @@ class OppaDramaProvider : MainAPI() {
         var n = 0
         terpilih.forEach { (label, url) ->
             val host = runCatching { java.net.URL(url).host }.getOrNull() ?: "?"
-            val isHls = url.contains(".m3u8")
-            // URL LENGKAP dicatat, bukan hanya host. Tanpa ini logcat tidak
-            // bisa memberi tahu master playlist mana yang harus diperiksa.
-            LocalProxy.obs("FL-4-EMIT", "label=$label host=$host hls=$isHls url=$url")
+
+            // FL-16: deteksi lama `url.contains(".m3u8")` GAGAL untuk master
+            // yang disajikan sebagai .txt. Terukur di logcat:
+            //   label=hls3 hls=false url=.../hls3/01/08485/..._,l,n,h,.urlset/master.txt
+            // Akibatnya link diemit sebagai VIDEO progresif padahal isinya
+            // playlist HLS, dan sumber hls3 rusak total. Situs memberi nama
+            // kuncinya sendiri (hls2/hls3/hls4), jadi label itu dipakai sebagai
+            // penentu yang lebih andal daripada ekstensi berkas.
+            val isHls = label.startsWith("hls") ||
+                url.contains(".m3u8") || url.contains(".txt")
+
+            // Master disaring lewat proxy mode clean untuk membuang varian
+            // I-frame. Terukur di FL-5-MASTER: normal=3 dan iframe=3 dengan
+            // himpunan resolusi identik, total 6 entri - persis jumlah baris
+            // ganda di Video Trek. Hanya master yang lewat proxy; URI varian
+            // ditulis absolut sehingga segmen tetap langsung ke CDN.
+            val servedUrl = if (isHls) {
+                LocalProxy.proxyUrl(url, clean = true) ?: url
+            } else {
+                url
+            }
+            val viaProxy = servedUrl != url
+
+            LocalProxy.obs(
+                "FL-4-EMIT",
+                "label=$label host=$host hls=$isHls clean=$viaProxy url=$url"
+            )
             callback(
                 newExtractorLink(
                     source = serverName,
                     name = "$serverName [$label]",
-                    url = url,
+                    url = servedUrl,
                     type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    // FL-11: Referer tidak wajib. Dikosongkan agar tidak ada
-                    // variabel yang tidak perlu di jalur ini.
+                    // FL-11: Referer tidak wajib pada CDN FileLions.
                     this.referer = ""
                 }
             )
