@@ -54,11 +54,21 @@ object LocalProxy {
     private const val NEED_PACKETS = 8
 
     private val ALLOWED = listOf(
+        // TurboVIP
         ".turbosplayer.com",
         ".googleusercontent.com",
         ".turboviplay.com",
         "cdn.turboviplay.com",
-        "turbovidhls.com"
+        "turbovidhls.com",
+        // FileLions. Host CDN-nya BERGANTI-GANTI antar judul - sudah terlihat
+        // acek-cdn.com, personalcoachexpert.cyou, dan marsexplorationteam.space
+        // pada tiga film berbeda. Kalau muncul host baru, proxy akan menolak
+        // dengan 403 dan mencatat "DENY host=..." di logcat. Nama host di baris
+        // itu tinggal ditambahkan ke daftar ini.
+        "minochinos.com",
+        ".acek-cdn.com",
+        ".personalcoachexpert.cyou",
+        ".marsexplorationteam.space"
     )
 
     private const val UA =
@@ -155,10 +165,19 @@ object LocalProxy {
 
     // ------------------------------------------------------------------- URL
 
-    /** Bangun URL proxy. WAJIB dipanggil saat emit, jangan pernah di-cache. */
-    fun proxyUrl(upstream: String): String? {
+    /**
+     * Bangun URL proxy. WAJIB dipanggil saat emit, jangan pernah di-cache.
+     *
+     * @param clean kalau true, master playlist disaring: baris
+     *   #EXT-X-I-FRAME-STREAM-INF dibuang dan URI varian ditulis absolut
+     *   menunjuk langsung ke CDN (TIDAK di-proxy). Dipakai FileLions.
+     *   Default false, sehingga pemanggil lama - termasuk TurboVIP -
+     *   berperilaku persis seperti sebelumnya.
+     */
+    fun proxyUrl(upstream: String, clean: Boolean = false): String? {
         if (!isRunning || port <= 0) return null
-        return "http://127.0.0.1:$port/p?u=" + URLEncoder.encode(upstream, "UTF-8")
+        val suffix = if (clean) "&clean=1" else ""
+        return "http://127.0.0.1:$port/p?u=" + URLEncoder.encode(upstream, "UTF-8") + suffix
     }
 
     fun isAllowed(raw: String): Boolean {
@@ -375,6 +394,7 @@ object LocalProxy {
             }
 
             val clientRange = req.headers["range"]
+            val cleanMode = param(query, "clean") == "1"
 
             // ---------- cabang 1: Range diminta klien ----------
             if (clientRange != null) {
@@ -428,14 +448,18 @@ object LocalProxy {
 
             // ---------- cabang 2: playlist -> tulis ulang ----------
             if (looksLikePlaylist(ctype, up.finalUrl, win, wn)) {
-                kind = "playlist"
+                kind = if (cleanMode) "playlist-clean" else "playlist"
                 // playlist kecil: aman dibaca penuh
                 val rest = ins.readBytes()
                 val whole = ByteArray(wn + rest.size)
                 System.arraycopy(win, 0, whole, 0, wn)
                 System.arraycopy(rest, 0, whole, wn, rest.size)
-                val body = rewritePlaylist(String(whole, Charsets.UTF_8), up.finalUrl)
-                    .toByteArray(Charsets.UTF_8)
+                val teks = String(whole, Charsets.UTF_8)
+                val body = if (cleanMode) {
+                    cleanMasterPlaylist(teks, up.finalUrl).toByteArray(Charsets.UTF_8)
+                } else {
+                    rewritePlaylist(teks, up.finalUrl).toByteArray(Charsets.UTF_8)
+                }
                 // Content-Length WAJIB dihitung ulang: body berubah.
                 writeHead(out, status, "application/vnd.apple.mpegurl", body.size.toLong(), null)
                 out.write(body); out.flush()
@@ -498,6 +522,46 @@ object LocalProxy {
     }
 
     private val uriTagRe = Regex("""URI="([^"]+)"""")
+
+    /**
+     * Saring master playlist untuk mode clean=1.
+     *
+     * SEBAB YANG DIPERBAIKI (terukur di FL-5-MASTER):
+     *   normal=3[852x480, 1280x720, 1920x1080]
+     *   iframe=3[852x480, 1280x720, 1920x1080]
+     *   total_entri=6
+     * Varian #EXT-X-I-FRAME-STREAM-INF membawa atribut RESOLUTION yang sama
+     * dengan varian normal, sehingga ExoPlayer mengeksposnya sebagai track
+     * video terpilih. Padahal isinya hanya keyframe untuk preview scrub -
+     * tidak bisa diputar sebagai video normal. Itulah entri kedua yang gagal.
+     *
+     * Dua hal yang dilakukan:
+     *   1. buang seluruh baris #EXT-X-I-FRAME-STREAM-INF
+     *   2. tulis URI varian menjadi ABSOLUT ke CDN, TIDAK di-proxy
+     *
+     * Poin 2 disengaja: hanya master yang melewati proxy. Playlist varian dan
+     * segmen tetap mengalir langsung ke CDN, jadi tidak ada tambahan latensi
+     * maupun titik gagal baru pada lalu lintas media.
+     */
+    private fun cleanMasterPlaylist(body: String, base: String): String {
+        val sb = StringBuilder(body.length)
+        var dibuang = 0
+        var varian = 0
+        for (raw in body.split("\n")) {
+            val line = raw.trim()
+            when {
+                line.isEmpty() -> {}
+                line.startsWith("#EXT-X-I-FRAME-STREAM-INF") -> dibuang++
+                line.startsWith("#") -> sb.append(line).append("\n")
+                else -> {
+                    varian++
+                    sb.append(resolve(base, line)).append("\n")
+                }
+            }
+        }
+        obs("PROXY-CLEAN", "iframe_dibuang=$dibuang varian_disisakan=$varian")
+        return sb.toString()
+    }
 
     private fun rewritePlaylist(body: String, base: String): String {
         val sb = StringBuilder(body.length + 4096)
