@@ -1,6 +1,6 @@
 package com.OppaDrama
 
-import android.content.Context
+import android.media.MediaCodecList
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
@@ -489,8 +489,84 @@ class OppaDramaProvider : MainAPI() {
         }.getOrElse { false }
     }
 
+    // ======================================================================
+    // Dukungan AV1 perangkat. Dipakai agar track av1 hanya ditawarkan bila
+    // perangkat benar-benar punya decodernya (bundle player juga menyaring
+    // av1 berdasarkan kemampuan browser).
+    // ======================================================================
+    private val deviceSupportsAv1: Boolean by lazy {
+        runCatching {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
+                !info.isEncoder && info.supportedTypes.any { it.equals("video/av01", true) }
+            }
+        }.getOrDefault(false)
+    }
+
     /**
-     * Extractor Hydrax - Dengan Logging Dumper JSON Hasil Dekripsi & Single Mirror Output.
+     * MD5 dengan seed "satu byte per digit".
+     *
+     * Ini meniru perilaku pustaka md5 di bundle player: expandKey(size) dipanggil
+     * dengan Number, dan modul md5 hanya melakukan toString() tanpa stringToBytes,
+     * sehingga bytesToWords membaca tiap karakter lalu meng-koersinya jadi angka
+     * ('7' menjadi 7, bukan 0x37).
+     */
+    private fun md5HexOfDigits(size: Long): String {
+        val digits = size.toString()
+        val seed = ByteArray(digits.length) { i -> (digits[i] - '0').toByte() }
+        return MessageDigest.getInstance("MD5").digest(seed)
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    /** AES/CTR/NoPadding. CTR bersifat simetris; dipakai untuk enkripsi token. */
+    private fun aesCtr(keyHex: String, data: ByteArray): ByteArray {
+        val keyBytes = keyHex.toByteArray(Charsets.UTF_8)      // 32 byte -> AES-256
+        val ivBytes = keyBytes.copyOfRange(0, 16)              // counter = 16 byte pertama
+        val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+        cipher.init(
+            Cipher.ENCRYPT_MODE,
+            SecretKeySpec(keyBytes, "AES"),
+            IvParameterSpec(ivBytes)
+        )
+        return cipher.doFinal(data)
+    }
+
+    /** base64 alfabet standar, tanpa padding dan tanpa newline. */
+    private fun b64NoPad(data: ByteArray): String =
+        android.util.Base64.encodeToString(
+            data,
+            android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING
+        )
+
+    /**
+     * Bangun URL jalur mp4_native Hydrax.
+     *
+     *   plain   = "/mp4/{md5_id}/{res_id}/{size}?v={slug}"
+     *   keyHex  = md5(seed digit dari size) dalam hex, 32 karakter
+     *   ct      = AES/CTR encrypt(plain), kunci = keyHex sebagai ASCII
+     *   token   = base64(base64(ct) tanpa '=') tanpa '='
+     *   URL     = https://{host}/sora/{size}/{token}
+     */
+    private fun buildSoraUrl(
+        md5Id: String,
+        resId: String,
+        size: Long,
+        slug: String,
+        host: String,
+        type: String = "mp4"
+    ): String {
+        val plain = "/$type/$md5Id/$resId/$size?v=$slug"
+        val ct = aesCtr(md5HexOfDigits(size), plain.toByteArray(Charsets.UTF_8))
+        val token = b64NoPad(b64NoPad(ct).toByteArray(Charsets.US_ASCII))
+        return "https://$host/sora/$size/$token"
+    }
+
+    /**
+     * Extractor Hydrax.
+     *
+     * HX-1..HX-4 (ambil HTML, blob base64, dekripsi config AES-CTR) tidak berubah.
+     * HX-5..HX-6 membangun URL dengan dua jalur:
+     *   1. /sora/  bila source punya size + sub + domain yang cocok  -> file utuh
+     *   2. url + path (perilaku lama) sebagai cadangan
      */
     private suspend fun extractHydrax(
         embedUrl: String,
@@ -576,7 +652,7 @@ class OppaDramaProvider : MainAPI() {
 
         LocalProxy.obs("HX-4-DECRYPT-OK", "decrypted_len=${decryptedJson.length}")
 
-        // ---------------- DUMP MURNI HASIL DEKRIPSI KE LOGCAT ----------------
+        // ---------------- HX-5 (Parsing hasil dekripsi) ----------------
         val decryptedObj = try {
             JSONObject(decryptedJson)
         } catch (e: Exception) {
@@ -588,37 +664,87 @@ class OppaDramaProvider : MainAPI() {
         val sourcesArr = mp4Obj?.optJSONArray("sources")
             ?: decryptedObj.optJSONArray("sources")
 
-        // Cetak struktur setiap objek di mp4.sources ke logcat secara utuh
-        if (sourcesArr != null) {
-            for (i in 0 until sourcesArr.length()) {
-                val srcObj = sourcesArr.optJSONObject(i)
-                LocalProxy.obs("HX-5-SOURCE[$i]", srcObj?.toString() ?: "null")
-            }
-        } else {
-            decryptedJson.chunked(400).forEachIndexed { idx, chunk ->
-                LocalProxy.obs("HX-5-DUMP-RAW-$idx", chunk)
-            }
+        if (sourcesArr == null || sourcesArr.length() == 0) {
+            LocalProxy.obs(
+                "HX-5-GAGAL",
+                "sources kosong (len=${decryptedJson.length}): ${decryptedJson.take(300)}"
+            )
+            return false
         }
 
-        // ---------------- HX-5 (Ekstraksi Direct CDN URL) ----------------
+        // Dump tiap source apa adanya, berguna saat verifikasi lewat Logcat
+        for (i in 0 until sourcesArr.length()) {
+            LocalProxy.obs("HX-5-SOURCE[$i]", sourcesArr.optJSONObject(i)?.toString() ?: "null")
+        }
+
+        // Daftar domain CDN, dipakai untuk mencocokkan field `sub` tiap source
+        val domainsArr = mp4Obj?.optJSONArray("domains")
+            ?: decryptedObj.optJSONArray("domains")
+        val domains = ArrayList<String>()
+        for (i in 0 until (domainsArr?.length() ?: 0)) {
+            val d = domainsArr?.optString(i)
+            if (!d.isNullOrBlank()) domains.add(d)
+        }
+
+        LocalProxy.obs(
+            "HX-5-OK",
+            "sources=${sourcesArr.length()} domains=${domains.size} av1_support=$deviceSupportsAv1"
+        )
+
+        // ---------------- HX-6 (Bangun URL & emit) ----------------
         var linksEmitted = 0
+        val emitted = HashSet<String>()
 
-        if (sourcesArr != null && sourcesArr.length() > 0) {
-            for (i in 0 until sourcesArr.length()) {
-                val srcObj = sourcesArr.optJSONObject(i) ?: continue
+        for (i in 0 until sourcesArr.length()) {
+            val srcObj = sourcesArr.optJSONObject(i) ?: continue
 
+            val label = srcObj.optString("label", null)?.takeIf { it.isNotBlank() } ?: "HD"
+            val codec = srcObj.optString("codec", null)?.takeIf { it.isNotBlank() } ?: ""
+            val resId = srcObj.optString("res_id", null)?.takeIf { it.isNotBlank() && it != "null" }
+            val size = srcObj.optString("size", null)?.toLongOrNull()
+            val sub = srcObj.optString("sub", null)?.takeIf { it.isNotBlank() && it != "null" }
+
+            // AV1 hanya ditawarkan bila perangkat punya decodernya
+            if (codec.equals("av1", true) && !deviceSupportsAv1) {
+                LocalProxy.obs(
+                    "HX-6-SKIP-AV1",
+                    "label=$label res_id=$resId (perangkat tidak punya decoder AV1)"
+                )
+                continue
+            }
+
+            var fullUrl: String? = null
+
+            // --- Jalur 1: /sora/ (mp4_native). Mengembalikan file utuh. ---
+            if (resId != null && size != null && sub != null) {
+                val host = domains.firstOrNull { it.contains(sub) }
+                if (host != null) {
+                    fullUrl = try {
+                        buildSoraUrl(md5id, resId, size, slug, host)
+                    } catch (e: Exception) {
+                        LocalProxy.obs("HX-6-SORA-ERROR", "${e.javaClass.simpleName}: ${e.message}")
+                        null
+                    }
+                    if (fullUrl != null) {
+                        LocalProxy.obs(
+                            "HX-6-SORA",
+                            "label=$label codec=$codec res_id=$resId size=$size host=$host"
+                        )
+                    }
+                } else {
+                    LocalProxy.obs("HX-6-SORA-SKIP", "domain untuk sub='$sub' tidak ditemukan")
+                }
+            }
+
+            // --- Jalur 2: url + path (perilaku lama, dipertahankan sebagai cadangan) ---
+            if (fullUrl == null) {
                 val bUrl = srcObj.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
-                    ?: srcObj.optString("domain", null)?.takeIf { it.isNotBlank() && it != "null" }
                     ?: mp4Obj?.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
                     ?: decryptedObj.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
 
                 val pPath = srcObj.optString("path", null)?.takeIf { it.isNotBlank() && it != "null" }
                     ?: srcObj.optString("file", null)?.takeIf { it.isNotBlank() && it != "null" }
                     ?: srcObj.optString("src", null)?.takeIf { it.isNotBlank() && it != "null" }
-
-                val label = srcObj.optString("label", null)?.takeIf { it.isNotBlank() } ?: "HD"
-
-                var fullUrl: String? = null
 
                 if (pPath != null && (pPath.startsWith("http://") || pPath.startsWith("https://"))) {
                     fullUrl = unescapeJs(pPath)
@@ -628,39 +754,49 @@ class OppaDramaProvider : MainAPI() {
                     fullUrl = "$cleanBase/$cleanP"
                 }
 
-                if (!fullUrl.isNullOrBlank()) {
-                    val qualityVal = getQualityFromString(label)
-
-                    // Detail logging untuk investigasi Error 3003
-                    LocalProxy.obs(
-                        "HX-6-EMIT-DETAILS",
-                        "source=$serverName | name=$serverName | quality=$label ($qualityVal) | type=VIDEO | referer=https://abyssplayer.com/ | UA=$USER_AGENT | url=$fullUrl"
-                    )
-
-                    // Emit ExtractorLink dengan name = serverName agar menyatu dalam SATU server "HydraX" di UI list
-                    callback(
-                        newExtractorLink(
-                            source = serverName,
-                            name = serverName,
-                            url = fullUrl,
-                            type = ExtractorLinkType.VIDEO
-                        ) {
-                            this.quality = qualityVal
-                            this.referer = "https://abyssplayer.com/"
-                            this.headers = mapOf("User-Agent" to USER_AGENT)
-                        }
-                    )
-                    linksEmitted++
+                if (fullUrl != null) {
+                    LocalProxy.obs("HX-6-LEGACY", "label=$label (cadangan url+path)")
                 }
             }
+
+            val finalUrl = fullUrl
+            if (finalUrl.isNullOrBlank() || !emitted.add(finalUrl)) continue
+
+            val qualityVal = getQualityFromString(label)
+
+            LocalProxy.obs(
+                "HX-6-EMIT-DETAILS",
+                "source=$serverName | name=$serverName | quality=$label ($qualityVal) | codec=$codec | " +
+                    "type=VIDEO | referer=https://abyssplayer.com/ | UA=$USER_AGENT | url=$finalUrl"
+            )
+
+            callback(
+                newExtractorLink(
+                    source = serverName,
+                    name = serverName,
+                    url = finalUrl,
+                    type = ExtractorLinkType.VIDEO
+                ) {
+                    this.quality = qualityVal
+                    this.referer = "https://abyssplayer.com/"
+                    this.headers = mapOf("User-Agent" to USER_AGENT)
+                }
+            )
+            linksEmitted++
         }
 
         if (linksEmitted == 0) {
-            LocalProxy.obs("HX-5-GAGAL", "URL CDN tidak ditemukan di decrypted JSON (len=${decryptedJson.length}): ${decryptedJson.take(300)}")
+            LocalProxy.obs(
+                "HX-6-GAGAL",
+                "Tidak ada URL yang bisa dibangun (len=${decryptedJson.length}): ${decryptedJson.take(300)}"
+            )
             return false
         }
 
-        LocalProxy.obs("HX-6-EMIT-DIRECT", "Sukses emit $linksEmitted quality track under single server $serverName")
+        LocalProxy.obs(
+            "HX-6-EMIT-DIRECT",
+            "Sukses emit $linksEmitted quality track under single server $serverName"
+        )
         return true
     }
 
