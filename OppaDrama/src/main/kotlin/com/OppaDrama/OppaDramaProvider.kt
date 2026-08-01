@@ -80,10 +80,26 @@ class OppaDramaProvider : MainAPI() {
 
     // Katalog Halaman Utama
     override val mainPage = mainPageOf(
+        "$mainUrl/series/?status=&type=&order=update" to "Latest Update",
         "$mainUrl/series/?status=Ongoing&type=Drama&order=update" to "Drama Ongoing",
-        "$mainUrl/series/?status=Completed&type=Drama&order=update" to "Drama Completed",
-        "$mainUrl/series/?type=Movie&order=update" to "Film Terbaru",
-        "$mainUrl/series/?type=TV+Show&order=update" to "Variety Show"
+        "$mainUrl/series/?status=Completed&type=Drama&order=update" to "Completed Drama",
+        "$mainUrl/series/?type=TV+Show&order=update" to "Variety Show",
+        "$mainUrl/series/?country%5B%5D=south-korea&status=&type=Drama&order=update" to "Drama Korea",
+        "$mainUrl/series/?country%5B%5D=china&type=Drama&order=update" to "Drama China",
+        "$mainUrl/series/?country%5B%5D=japan&type=Drama&order=update" to "Drama Jepang",
+        "$mainUrl/series/?country%5B%5D=thailand&type=Drama&order=update" to "Drama Thailand",
+        "$mainUrl/series/?country%5B%5D=taiwan&type=Drama&order=update" to "Drama Taiwan",
+        "$mainUrl/series/?country%5B%5D=philippines&type=Drama&order=update" to "Drama Philippines",
+        "$mainUrl/series/?country%5B%5D=usa&type=Drama&order=update" to "Drama Western",
+        "$mainUrl/series/?type=Movie&order=update" to "All Movies",
+        "$mainUrl/series/?country%5B%5D=south-korea&status=&type=Movie&order=update" to "Korean Movie",
+        "$mainUrl/series/?country%5B%5D=japan&type=Movie&order=update" to "Japan Movie",
+        "$mainUrl/series/?country%5B%5D=china&type=Movie&order=update" to "Chinese Movie",
+        "$mainUrl/series/?country%5B%5D=thailand&type=Movie&order=update" to "Thailand Movie",
+        "$mainUrl/series/?country%5B%5D=taiwan&type=Movie&order=update" to "Taiwan Movie",
+        "$mainUrl/series/?country%5B%5D=philippines&type=Movie&order=update" to "Philippines Movie",
+        "$mainUrl/series/?country%5B%5D=india&type=Movie&order=update" to "India Movie",
+        "$mainUrl/series/?country%5B%5D=united-states&type=Movie&order=update" to "Western Movie"
     )
 
     override suspend fun getMainPage(
@@ -120,19 +136,94 @@ class OppaDramaProvider : MainAPI() {
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
-    private fun toSearchResponse(element: Element): SearchResponse? {
-        val title = element.selectFirst(".tt, .title, a[title]")?.text()?.trim()
-            ?: element.selectFirst("a")?.attr("title")?.trim() ?: return null
-        val rawHref = element.selectFirst("a")?.attr("href") ?: return null
-        val href = fixUrl(rawHref)
-        
-        val rawPoster = element.selectFirst("img")?.let { img ->
-            img.attr("data-src").ifEmpty { img.attr("src") }
-        }
-        val poster = if (isInvalidImage(rawPoster)) null else rawPoster
+    /**
+     * Rapikan judul: entity HTML sudah didekode Jsoup, sisanya perapian spasi
+     * dan pembuangan imbuhan SEO yang sering menempel di judul WordPress.
+     */
+    private fun cleanTitle(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        return raw
+            .replace('\u00A0', ' ')
+            .replace(Regex("""\s+"""), " ")
+            .replace(Regex("""(?i)^(nonton|streaming|download)\s+"""), "")
+            .replace(Regex("""(?i)\s*(subtitle\s+indonesia|sub\s+indo)\s*${'$'}"""), "")
+            .trim()
+            .trim('-', '|', ':')
+            .trim()
+            .takeIf { it.isNotBlank() }
+    }
 
-        return newMovieSearchResponse(title, href, TvType.AsianDrama) {
-            this.posterUrl = poster
+    /**
+     * Ambil URL poster dari sebuah <img>.
+     *
+     * Tema situs memakai <img src> biasa (tanpa lazy-load), tapi atribut lazy
+     * tetap diperiksa agar tahan kalau tema berubah. Parameter ?resize / ?fit
+     * dibuang supaya Hero memakai gambar resolusi penuh, bukan versi 246x350.
+     */
+    private fun posterFrom(img: Element?): String? {
+        if (img == null) return null
+        val raw = listOf("data-src", "data-lazy-src", "data-original", "src")
+            .firstNotNullOfOrNull { attr -> img.attr(attr).takeIf { it.isNotBlank() } }
+            ?: img.attr("srcset").substringBefore(" ").takeIf { it.isNotBlank() }
+            ?: return null
+        val clean = raw.trim().substringBefore("?resize=").substringBefore("?fit=")
+        return if (isInvalidImage(clean)) null else fixUrl(clean)
+    }
+
+    /**
+     * Satu kartu daftar. Markup situs:
+     *
+     *   <a href title="Judul">
+     *     <div class="limit">
+     *       <div class="typez Drama|Movie|TV Show">..</div>
+     *       <div class="bt"><span class="epx">Ep 13</span><span class="sb Sub">Sub</span></div>
+     *       <img src="...">
+     *     </div>
+     *     <div class="tt tts">Judul<h2>Judul</h2></div>
+     *   </a>
+     *
+     * Judul diambil dari <h2> di dalam .tt, bukan dari .text() milik <a>, karena
+     * teks <a> ikut menelan badge ("Drama Ongoing Sub Judul ...").
+     */
+    private fun toSearchResponse(element: Element): SearchResponse? {
+        val anchor = element.selectFirst("a[href]") ?: return null
+        val href = fixUrl(anchor.attr("href"))
+        if (href.isBlank()) return null
+
+        val title = cleanTitle(element.selectFirst(".tt h2")?.text())
+            ?: cleanTitle(anchor.attr("title"))
+            ?: cleanTitle(element.selectFirst("img")?.attr("alt"))
+            ?: return null
+
+        val poster = posterFrom(element.selectFirst("img"))
+
+        // Badge tipe: <div class="typez ...">
+        val typeText = element.selectFirst(".typez")?.text()?.trim().orEmpty()
+        val tvType = when {
+            typeText.equals("Movie", true) -> TvType.Movie
+            typeText.equals("TV Show", true) -> TvType.TvSeries
+            else -> TvType.AsianDrama
+        }
+
+        // Badge status/episode: "Ep 13", "Ep 6 END", "Ongoing", "Completed", "Movie"
+        val epxText = element.selectFirst(".epx")?.text()?.trim().orEmpty()
+        val epNum = Regex("""(\d+)""").find(epxText)?.groupValues?.get(1)?.toIntOrNull()
+        val isSub = element.selectFirst(".sb")?.text()?.contains("Sub", true) == true
+
+        return if (tvType == TvType.Movie) {
+            newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = poster
+            }
+        } else {
+            // AnimeSearchResponse dipakai karena hanya kelas ini yang punya
+            // dubStatus + jumlah episode, sehingga badge "Sub" dan nomor episode
+            // bisa tampil di kartu seperti di website.
+            newAnimeSearchResponse(title, href, tvType) {
+                this.posterUrl = poster
+                if (isSub || epNum != null) {
+                    addDubStatus(DubStatus.Subbed, epNum)
+                }
+            }
         }
     }
 
@@ -155,14 +246,23 @@ class OppaDramaProvider : MainAPI() {
         logDebug("load -> Resolved Parent URL: $parentUrl (Input URL: $url)")
 
         // 2. Judul Utama
-        val title = doc.selectFirst(".infolimit h2, h1.entry-title, h1[itemprop=name], h1.title")?.text()?.trim() 
+        val title = cleanTitle(
+            doc.selectFirst(".infolimit h2, h1.entry-title, h1[itemprop=name], h1.title")?.text()
+        ) ?: cleanTitle(doc.selectFirst("meta[property=og:title]")?.attr("content"))
             ?: "OPPADRAMA"
 
         // 3. Poster Utama
-        val rawPoster = doc.selectFirst(".single-info .thumb img, .megavid .tb img, .poster img")?.let { img ->
-            img.attr("data-src").ifEmpty { img.attr("src") }
-        }
-        val cleanPoster = if (isInvalidImage(rawPoster)) null else rawPoster
+        // Rantai selector diperlebar: tema memakai .bigcontent/.single-info untuk
+        // thumb, dan WordPress selalu menandai gambar unggulan dengan
+        // class wp-post-image / itemprop=image. og:image jadi jaring terakhir.
+        val cleanPoster = posterFrom(
+            doc.selectFirst(
+                ".bigcontent .thumb img, .single-info .thumb img, .thumb img, " +
+                    ".megavid .tb img, .poster img, img.wp-post-image, img[itemprop=image]"
+            )
+        ) ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
+            ?.takeIf { it.isNotBlank() && !isInvalidImage(it) }
+        logDebug("load -> poster resolved: $cleanPoster")
 
         // 4. Sinopsis / Plot
         val plotElement = doc.selectFirst(".single-info .desc.mindes, .desc.mindes, .entry-content .desc, .desc")
@@ -200,8 +300,10 @@ class OppaDramaProvider : MainAPI() {
                 versionElements.mapNotNull { li ->
                     val aTag = li.selectFirst("a") ?: return@mapNotNull null
                     val verUrl = fixUrl(aTag.attr("href"))
-                    val verName = li.selectFirst(".playinfo h4, .epl-title, a")?.text()?.trim()
-                        ?: aTag.attr("title").ifEmpty { aTag.text() }
+                    val verName = cleanTitle(li.selectFirst(".playinfo h4, .epl-title")?.text())
+                        ?: cleanTitle(aTag.attr("title"))
+                        ?: cleanTitle(aTag.text())
+                        ?: ""
                     MovieVersionData(verUrl, verName)
                 }
             } else {
@@ -231,8 +333,9 @@ class OppaDramaProvider : MainAPI() {
             val episodeList = episodeElements.mapNotNull { li ->
                 val aTag = li.selectFirst("a") ?: return@mapNotNull null
                 val epUrl = fixUrl(aTag.attr("href"))
-                val epTitle = li.selectFirst(".epl-title, .playinfo h4, .lchx, a")?.text()?.trim() 
-                    ?: aTag.attr("title").ifEmpty { aTag.text() }
+                val epTitle = cleanTitle(li.selectFirst(".epl-title, .playinfo h4, .lchx")?.text())
+                    ?: cleanTitle(aTag.attr("title"))
+                    ?: cleanTitle(aTag.text())
                 
                 val epNum = Regex("""(?i)(?:Eps|Episode|Ep)\s*(\d+)""").find(epTitle ?: "")?.groupValues?.get(1)?.toIntOrNull()
 
@@ -1042,10 +1145,13 @@ class OppaDramaProvider : MainAPI() {
     private fun isInvalidImage(url: String?): Boolean {
         if (url.isNullOrBlank()) return true
         val lower = url.lowercase()
-        return lower.contains("logo") || 
-               lower.contains("oppadrama") || 
-               lower.contains("cropped-site-icon") || 
+        return lower.contains("logo") ||
+               lower.contains("oppadrama") ||
+               lower.contains("cropped-site-icon") ||
                lower.contains("loading.gif") ||
-               lower.contains("gravatar.com")
+               lower.contains("gravatar.com") ||
+               lower.contains("placeholder") ||
+               lower.contains("no-image") ||
+               lower.startsWith("data:")
     }
 }
