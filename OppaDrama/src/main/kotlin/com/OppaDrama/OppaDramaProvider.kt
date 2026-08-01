@@ -502,6 +502,17 @@ class OppaDramaProvider : MainAPI() {
         }.getOrDefault(false)
     }
 
+    /** Satu entri `sources` hasil dekripsi config Hydrax. */
+    private data class HydraxSource(
+        val label: String,
+        val codec: String,
+        val resId: String?,
+        val size: Long?,
+        val sub: String?,
+        val url: String?,
+        val path: String?
+    )
+
     /**
      * MD5 dengan seed "satu byte per digit".
      *
@@ -561,10 +572,29 @@ class OppaDramaProvider : MainAPI() {
     }
 
     /**
+     * Urutan preferensi kandidat dalam satu resolusi yang sama.
+     *
+     *  1. Buang av1 bila perangkat tidak punya decodernya.
+     *  2. Dahulukan h264. av1 hanya dipakai bila tidak ada h264 untuk resolusi itu.
+     *  3. Dalam codec yang sama, berkas terbesar dipilih (bitrate lebih tinggi).
+     *
+     * Mengembalikan daftar terurut, bukan satu nilai, supaya pemanggil bisa
+     * mencoba kandidat berikutnya kalau pembangunan URL gagal.
+     */
+    private fun hydraxPreference(group: List<HydraxSource>): List<HydraxSource> {
+        val playable = group.filter { !it.codec.equals("av1", true) || deviceSupportsAv1 }
+        return playable.sortedWith(
+            compareBy<HydraxSource> { if (it.codec.equals("av1", true)) 1 else 0 }
+                .thenByDescending { it.size ?: 0L }
+        )
+    }
+
+    /**
      * Extractor Hydrax.
      *
      * HX-1..HX-4 (ambil HTML, blob base64, dekripsi config AES-CTR) tidak berubah.
-     * HX-5..HX-6 membangun URL dengan dua jalur:
+     * HX-5 mengurai sources, HX-6 memilih satu kandidat per resolusi lalu membangun
+     * URL dengan dua jalur:
      *   1. /sora/  bila source punya size + sub + domain yang cocok  -> file utuh
      *   2. url + path (perilaku lama) sebagai cadangan
      */
@@ -604,10 +634,9 @@ class OppaDramaProvider : MainAPI() {
             LocalProxy.obs("HX-3-GAGAL", "base64 decode: ${e.message}")
             return false
         }
-        val json = String(rawBytes, Charsets.ISO_8859_1)
 
         val jsonObj = try {
-            JSONObject(json)
+            JSONObject(String(rawBytes, Charsets.ISO_8859_1))
         } catch (e: Exception) {
             LocalProxy.obs("HX-3-JSON-ERROR", "Parsing JSONObject gagal: ${e.message}")
             return false
@@ -639,12 +668,13 @@ class OppaDramaProvider : MainAPI() {
             val ivBytes = keyBytes.copyOfRange(0, 16)
 
             val cipher = Cipher.getInstance("AES/CTR/NoPadding")
-            val secretKey = SecretKeySpec(keyBytes, "AES")
-            val ivSpec = IvParameterSpec(ivBytes)
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(keyBytes, "AES"),
+                IvParameterSpec(ivBytes)
+            )
 
-            val decryptedBytes = cipher.doFinal(mediaStr.toByteArray(Charsets.ISO_8859_1))
-            String(decryptedBytes, Charsets.UTF_8)
+            String(cipher.doFinal(mediaStr.toByteArray(Charsets.ISO_8859_1)), Charsets.UTF_8)
         } catch (e: Exception) {
             LocalProxy.obs("HX-4-DECRYPT-ERROR", "${e.javaClass.simpleName}: ${e.message}")
             return false
@@ -672,9 +702,23 @@ class OppaDramaProvider : MainAPI() {
             return false
         }
 
-        // Dump tiap source apa adanya, berguna saat verifikasi lewat Logcat
+        val parsed = ArrayList<HydraxSource>()
         for (i in 0 until sourcesArr.length()) {
-            LocalProxy.obs("HX-5-SOURCE[$i]", sourcesArr.optJSONObject(i)?.toString() ?: "null")
+            val o = sourcesArr.optJSONObject(i) ?: continue
+            LocalProxy.obs("HX-5-SOURCE[$i]", o.toString())
+            parsed.add(
+                HydraxSource(
+                    label = o.optString("label", null)?.takeIf { it.isNotBlank() } ?: "HD",
+                    codec = o.optString("codec", null)?.takeIf { it.isNotBlank() } ?: "",
+                    resId = o.optString("res_id", null)?.takeIf { it.isNotBlank() && it != "null" },
+                    size = o.optString("size", null)?.toLongOrNull(),
+                    sub = o.optString("sub", null)?.takeIf { it.isNotBlank() && it != "null" },
+                    url = o.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" },
+                    path = o.optString("path", null)?.takeIf { it.isNotBlank() && it != "null" }
+                        ?: o.optString("file", null)?.takeIf { it.isNotBlank() && it != "null" }
+                        ?: o.optString("src", null)?.takeIf { it.isNotBlank() && it != "null" }
+                )
+            )
         }
 
         // Daftar domain CDN, dipakai untuk mencocokkan field `sub` tiap source
@@ -688,86 +732,95 @@ class OppaDramaProvider : MainAPI() {
 
         LocalProxy.obs(
             "HX-5-OK",
-            "sources=${sourcesArr.length()} domains=${domains.size} av1_support=$deviceSupportsAv1"
+            "sources=${parsed.size} domains=${domains.size} av1_support=$deviceSupportsAv1"
         )
 
-        // ---------------- HX-6 (Bangun URL & emit) ----------------
+        // ---------------- HX-6 (Pilih satu per resolusi, lalu emit) ----------------
+        // Satu resolusi = satu baris di daftar Sumber CloudStream, karena satu
+        // ExtractorLink selalu dirender sebagai satu entri.
         var linksEmitted = 0
         val emitted = HashSet<String>()
 
-        for (i in 0 until sourcesArr.length()) {
-            val srcObj = sourcesArr.optJSONObject(i) ?: continue
+        val byLabel = parsed.groupBy { it.label }
+            .toList()
+            .sortedByDescending { (label, _) -> getQualityFromString(label) }
 
-            val label = srcObj.optString("label", null)?.takeIf { it.isNotBlank() } ?: "HD"
-            val codec = srcObj.optString("codec", null)?.takeIf { it.isNotBlank() } ?: ""
-            val resId = srcObj.optString("res_id", null)?.takeIf { it.isNotBlank() && it != "null" }
-            val size = srcObj.optString("size", null)?.toLongOrNull()
-            val sub = srcObj.optString("sub", null)?.takeIf { it.isNotBlank() && it != "null" }
+        for ((label, group) in byLabel) {
+            val order = hydraxPreference(group)
 
-            // AV1 hanya ditawarkan bila perangkat punya decodernya
-            if (codec.equals("av1", true) && !deviceSupportsAv1) {
+            if (order.isEmpty()) {
                 LocalProxy.obs(
                     "HX-6-SKIP-AV1",
-                    "label=$label res_id=$resId (perangkat tidak punya decoder AV1)"
+                    "label=$label semua kandidat av1, perangkat tidak punya decodernya"
                 )
                 continue
             }
-
-            var fullUrl: String? = null
-
-            // --- Jalur 1: /sora/ (mp4_native). Mengembalikan file utuh. ---
-            if (resId != null && size != null && sub != null) {
-                val host = domains.firstOrNull { it.contains(sub) }
-                if (host != null) {
-                    fullUrl = try {
-                        buildSoraUrl(md5id, resId, size, slug, host)
-                    } catch (e: Exception) {
-                        LocalProxy.obs("HX-6-SORA-ERROR", "${e.javaClass.simpleName}: ${e.message}")
-                        null
-                    }
-                    if (fullUrl != null) {
-                        LocalProxy.obs(
-                            "HX-6-SORA",
-                            "label=$label codec=$codec res_id=$resId size=$size host=$host"
-                        )
-                    }
-                } else {
-                    LocalProxy.obs("HX-6-SORA-SKIP", "domain untuk sub='$sub' tidak ditemukan")
-                }
+            if (group.size > 1) {
+                LocalProxy.obs(
+                    "HX-6-DEDUPE",
+                    "label=$label kandidat=${group.size} codec=${group.map { it.codec }} " +
+                        "-> dipilih codec=${order.first().codec} size=${order.first().size}"
+                )
             }
 
-            // --- Jalur 2: url + path (perilaku lama, dipertahankan sebagai cadangan) ---
-            if (fullUrl == null) {
-                val bUrl = srcObj.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
-                    ?: mp4Obj?.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
-                    ?: decryptedObj.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
+            var chosen: HydraxSource? = null
+            var fullUrl: String? = null
 
-                val pPath = srcObj.optString("path", null)?.takeIf { it.isNotBlank() && it != "null" }
-                    ?: srcObj.optString("file", null)?.takeIf { it.isNotBlank() && it != "null" }
-                    ?: srcObj.optString("src", null)?.takeIf { it.isNotBlank() && it != "null" }
+            for (src in order) {
+                // --- Jalur 1: /sora/ (mp4_native). Mengembalikan file utuh. ---
+                if (src.resId != null && src.size != null && src.sub != null) {
+                    val host = domains.firstOrNull { it.contains(src.sub) }
+                    if (host != null) {
+                        fullUrl = try {
+                            buildSoraUrl(md5id, src.resId, src.size, slug, host)
+                        } catch (e: Exception) {
+                            LocalProxy.obs("HX-6-SORA-ERROR", "${e.javaClass.simpleName}: ${e.message}")
+                            null
+                        }
+                        if (fullUrl != null) {
+                            LocalProxy.obs(
+                                "HX-6-SORA",
+                                "label=$label codec=${src.codec} res_id=${src.resId} size=${src.size} host=$host"
+                            )
+                        }
+                    } else {
+                        LocalProxy.obs("HX-6-SORA-SKIP", "domain untuk sub='${src.sub}' tidak ditemukan")
+                    }
+                }
 
-                if (pPath != null && (pPath.startsWith("http://") || pPath.startsWith("https://"))) {
-                    fullUrl = unescapeJs(pPath)
-                } else if (!bUrl.isNullOrBlank() && !pPath.isNullOrBlank()) {
-                    val cleanBase = unescapeJs(bUrl).trimEnd('/')
-                    val cleanP = unescapeJs(pPath).trimStart('/')
-                    fullUrl = "$cleanBase/$cleanP"
+                // --- Jalur 2: url + path (perilaku lama, dipertahankan sebagai cadangan) ---
+                if (fullUrl == null) {
+                    val bUrl = src.url
+                        ?: mp4Obj?.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
+                        ?: decryptedObj.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
+                    val pPath = src.path
+
+                    if (pPath != null && (pPath.startsWith("http://") || pPath.startsWith("https://"))) {
+                        fullUrl = unescapeJs(pPath)
+                    } else if (!bUrl.isNullOrBlank() && !pPath.isNullOrBlank()) {
+                        fullUrl = "${unescapeJs(bUrl).trimEnd('/')}/${unescapeJs(pPath).trimStart('/')}"
+                    }
+                    if (fullUrl != null) {
+                        LocalProxy.obs("HX-6-LEGACY", "label=$label (cadangan url+path)")
+                    }
                 }
 
                 if (fullUrl != null) {
-                    LocalProxy.obs("HX-6-LEGACY", "label=$label (cadangan url+path)")
+                    chosen = src
+                    break
                 }
             }
 
             val finalUrl = fullUrl
-            if (finalUrl.isNullOrBlank() || !emitted.add(finalUrl)) continue
+            if (chosen == null || finalUrl.isNullOrBlank() || !emitted.add(finalUrl)) continue
 
             val qualityVal = getQualityFromString(label)
 
             LocalProxy.obs(
                 "HX-6-EMIT-DETAILS",
-                "source=$serverName | name=$serverName | quality=$label ($qualityVal) | codec=$codec | " +
-                    "type=VIDEO | referer=https://abyssplayer.com/ | UA=$USER_AGENT | url=$finalUrl"
+                "source=$serverName | name=$serverName | quality=$label ($qualityVal) | " +
+                    "codec=${chosen.codec} | type=VIDEO | referer=https://abyssplayer.com/ | " +
+                    "UA=$USER_AGENT | url=$finalUrl"
             )
 
             callback(
