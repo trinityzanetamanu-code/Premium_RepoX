@@ -184,6 +184,8 @@ class OppaDramaProvider : MainAPI() {
      *
      * Judul diambil dari <h2> di dalam .tt, bukan dari .text() milik <a>, karena
      * teks <a> ikut menelan badge ("Drama Ongoing Sub Judul ...").
+     *
+     * Badge .epx / .sb sengaja diabaikan agar poster tampil bersih.
      */
     private fun toSearchResponse(element: Element): SearchResponse? {
         val anchor = element.selectFirst("a[href]") ?: return null
@@ -205,25 +207,11 @@ class OppaDramaProvider : MainAPI() {
             else -> TvType.AsianDrama
         }
 
-        // Badge status/episode: "Ep 13", "Ep 6 END", "Ongoing", "Completed", "Movie"
-        val epxText = element.selectFirst(".epx")?.text()?.trim().orEmpty()
-        val epNum = Regex("""(\d+)""").find(epxText)?.groupValues?.get(1)?.toIntOrNull()
-        val isSub = element.selectFirst(".sb")?.text()?.contains("Sub", true) == true
-
-        return if (tvType == TvType.Movie) {
-            newMovieSearchResponse(title, href, TvType.Movie) {
-                this.posterUrl = poster
-            }
-        } else {
-            // AnimeSearchResponse dipakai karena hanya kelas ini yang punya
-            // dubStatus + jumlah episode, sehingga badge "Sub" dan nomor episode
-            // bisa tampil di kartu seperti di website.
-            newAnimeSearchResponse(title, href, tvType) {
-                this.posterUrl = poster
-                if (isSub || epNum != null) {
-                    addDubStatus(DubStatus.Subbed, epNum)
-                }
-            }
+        // Badge "Sub" sengaja tidak dipasang: hampir seluruh konten situs ini
+        // bersubtitle, jadi badge tersebut tidak menambah informasi dan hanya
+        // meramaikan poster. Tipe tetap dipakai agar kategori CloudStream benar.
+        return newMovieSearchResponse(title, href, tvType) {
+            this.posterUrl = poster
         }
     }
 
