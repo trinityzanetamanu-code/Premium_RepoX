@@ -25,6 +25,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.TimeoutCancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -91,6 +92,51 @@ import org.json.JSONObject
  *  - URL subtitle CloudFront (cacdn.hakunaymatata.com) dikirim TANPA header.
  *    Belum diuji apakah butuh Referer. Kalau subtitle gagal tampil, itu titik
  *    pertama yang harus diperiksa.
+ *
+ *  ------------------------------------------------------------------------
+ *  PATCH STABILITAS PLAYBACK (berdasarkan logcat_2026_08_03_02_53.txt)
+ *  ------------------------------------------------------------------------
+ *
+ *  Akar masalah [TERBUKTI] dari jejak ExoPlayer sungguhan, BUKAN dugaan:
+ *
+ *  18. HindiCast: 403 di position=0, dengan header Referer/User-Agent yang
+ *      SUDAH benar terkirim (terlihat di baris `playerError:` logcat).
+ *      Layanan hulu di balik proxy valhallastream.dpdns.org untuk HindiCast
+ *      memang sedang mati sisi server RiveStream, bukan kesalahan header.
+ *
+ *  19. FlowCast: campuran 403/404 langsung di awal, plus SocketTimeout
+ *      berulang. Proxy valhallastream.dpdns.org sendiri yang tidak stabil.
+ *
+ *  20. PrimeVids (HLS): master playlist BERHASIL diambil (kalau tidak,
+ *      ExoPlayer tidak akan mencoba membuka turunannya), tapi salah satu
+ *      SEGMEN turunan sudah 404. Jejak exception-nya melalui
+ *      DataSourceInputStream membuka child manifest, bukan gagal di URL
+ *      master. CDN cdn.1shows.app mengganti/menghapus segmen sebelum
+ *      ExoPlayer sempat mengambilnya.
+ *
+ *  21. Ophim ("Vietsub"): gagal di position=266400 (~4 menit berjalan),
+ *      persis pola "gagal saat maju-mundur". Ini juga kedaluwarsa token
+ *      segmen HLS di CDN phim1280.tv, bukan header yang salah.
+ *
+ *  KESIMPULAN: tidak satu pun kegagalan ini disebabkan Referer, Origin,
+ *  atau User-Agent yang salah dari loadLinks(). Logcat membuktikan header
+ *  yang dikirim sudah sama persis dengan yang dirancang di Tahap 5. Ini
+ *  ketidakstabilan CDN/proxy pihak ketiga, di luar kendali provider —
+ *  sifatnya sama dengan tunnel Cloudflare pada Hydrax yang berumur pendek.
+ *
+ *  YANG BISA diperbaiki dari sisi kita: mempercepat CloudStream berpindah
+ *  dari sumber yang SUDAH TERBUKTI mati sebelum pengguna menekan putar,
+ *  bukan menunggu ExoPlayer menemukannya sendiri. Karena itu setiap sumber
+ *  diverifikasi dengan satu permintaan Range kecil sebelum dikirim ke
+ *  callback — pola ini sudah ada di CloudStream sendiri
+ *  (ExtractorLink.getVideoSize() memakai app.head dengan timeout).
+ *
+ *  BATASAN JUJUR: verifikasi ini menangkap kegagalan yang SUDAH terjadi
+ *  saat loadLinks() dipanggil (kasus HindiCast dan sebagian FlowCast).
+ *  Verifikasi TIDAK bisa mencegah token segmen HLS kedaluwarsa DI TENGAH
+ *  pemutaran (kasus PrimeVids dan Ophim) — itu bawaan CDN mereka yang
+ *  memakai URL bertanda tangan berumur pendek, dan tidak ada perubahan
+ *  header di sisi kita yang bisa memperbaikinya.
  *
  *  ------------------------------------------------------------------------
  *  Dasar [TERBUKTI] tambahan untuk load()
@@ -420,6 +466,14 @@ class RiveStreamProvider : MainAPI() {
             val url = item.optStringOrNull("url") ?: continue
             if (!seen.add(url)) continue
 
+            // Buang sumber yang SUDAH TERBUKTI mati sebelum pengguna menekan
+            // putar. Ini menangkap kasus HindiCast/FlowCast yang gagal 403
+            // langsung di awal (lihat catatan investigasi di atas berkas ini).
+            // TIDAK bisa mencegah token HLS kedaluwarsa di tengah pemutaran —
+            // itu bawaan CDN pihak ketiga, bukan sesuatu yang bisa diperbaiki
+            // lewat header.
+            if (!isReachable(url)) continue
+
             // Nama layanan versi server lebih informatif, mis. "Vietsub (Tap 1)"
             // milik ophim. Kalau tidak ada, pakai nama service apa adanya.
             val label = item.optStringOrNull("source") ?: service
@@ -452,6 +506,39 @@ class RiveStreamProvider : MainAPI() {
             count++
         }
         return count
+    }
+
+    /**
+     * Uji cepat apakah sebuah URL sumber benar-benar bisa dibuka, sebelum
+     * dikirim ke pemutar.
+     *
+     * Memakai satu permintaan Range kecil dengan timeout pendek — pola yang
+     * sama seperti [ExtractorLink.getVideoSize] bawaan CloudStream (app.head
+     * dengan parameter timeout). Range dipakai alih-alih HEAD murni karena
+     * sebagian CDN pada RiveStream (mis. proxy FlowCast/HindiCast) hanya
+     * menjawab benar untuk permintaan GET.
+     *
+     * 403/404/5xx/timeout dianggap tidak bisa dipakai. Kegagalan jaringan
+     * lain (nama domain berubah, dsb.) diperlakukan sama: sumber dilewati,
+     * bukan menggagalkan seluruh loadLinks().
+     */
+    private suspend fun isReachable(url: String): Boolean {
+        return try {
+            val res = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to RiveApi.USER_AGENT,
+                    "Range" to "bytes=0-1"
+                ),
+                referer = RiveApi.REFERER,
+                timeout = 6L
+            )
+            res.code in 200..299 || res.code == 206
+        } catch (e: TimeoutCancellationException) {
+            false
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /**
