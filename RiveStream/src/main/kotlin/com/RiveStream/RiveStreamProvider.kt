@@ -2,6 +2,7 @@ package com.RiveStream
 
 import com.RiveStream.api.RiveApi
 import com.lagradost.cloudstream3.Episode
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
@@ -25,7 +26,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -524,18 +525,25 @@ class RiveStreamProvider : MainAPI() {
      */
     private suspend fun isReachable(url: String): Boolean {
         return try {
-            val res = app.get(
-                url,
-                headers = mapOf(
-                    "User-Agent" to RiveApi.USER_AGENT,
-                    "Range" to "bytes=0-1"
-                ),
-                referer = RiveApi.REFERER,
-                timeout = 6L
-            )
-            res.code in 200..299 || res.code == 206
-        } catch (e: TimeoutCancellationException) {
-            false
+            // Bentuk pemanggilan ini SENGAJA disamakan persis dengan RiveApi.raw()
+            // (Tahap 2, sudah terbukti compile & jalan): hanya parameter `url` dan
+            // `headers`, dengan Referer dimasukkan sebagai entri header biasa.
+            // Overload app.get dengan parameter bernama `referer=`/`timeout=`
+            // terpisah baru terlihat lewat wildcard import com.lagradost.cloudstream3.*,
+            // yang tidak dipakai di berkas ini (gaya impor di sini eksplisit sejak
+            // Tahap 1). Batas waktu karena itu dikendalikan lewat
+            // kotlinx.coroutines.withTimeoutOrNull, bukan parameter app.get.
+            withTimeoutOrNull(6000L) {
+                val res = app.get(
+                    url,
+                    headers = mapOf(
+                        "User-Agent" to RiveApi.USER_AGENT,
+                        "Referer" to RiveApi.REFERER,
+                        "Range" to "bytes=0-1"
+                    )
+                )
+                res.code in 200..299 || res.code == 206
+            } ?: false
         } catch (e: Exception) {
             false
         }
