@@ -132,12 +132,50 @@ import org.json.JSONObject
  *  callback — pola ini sudah ada di CloudStream sendiri
  *  (ExtractorLink.getVideoSize() memakai app.head dengan timeout).
  *
- *  BATASAN JUJUR: verifikasi ini menangkap kegagalan yang SUDAH terjadi
- *  saat loadLinks() dipanggil (kasus HindiCast dan sebagian FlowCast).
- *  Verifikasi TIDAK bisa mencegah token segmen HLS kedaluwarsa DI TENGAH
- *  pemutaran (kasus PrimeVids dan Ophim) — itu bawaan CDN mereka yang
- *  memakai URL bertanda tangan berumur pendek, dan tidak ada perubahan
- *  header di sisi kita yang bisa memperbaikinya.
+ *  ------------------------------------------------------------------------
+ *  HASIL INVESTIGASI TERMUX (menggantikan dugaan di atas)
+ *  ------------------------------------------------------------------------
+ *
+ *  Investigasi lanjutan di luar aplikasi membantah sebagian dugaan awal.
+ *  Yang berikut ini [TERBUKTI] lewat pengujian langsung, bukan dari logcat:
+ *
+ *  22. PrimeVids TIDAK PERNAH mengembalikan video. Seluruh 349 segmen pada
+ *      satu playlist teridentifikasi PNG lewat magic byte, dan pola yang sama
+ *      berulang pada judul lain (1396, 969681, 1399) dengan host iklan
+ *      p1.ipstatp.com / p16-oec-sg.ibyteimg.com. Playlist juga tidak memuat
+ *      EXT-X-DISCONTINUITY, EXT-X-KEY, maupun EXT-X-MAP — jadi bukan video
+ *      dengan sisipan iklan, melainkan seluruhnya bukan video.
+ *      Karena itu layanan `primevids` DIBUANG seluruhnya. Tidak perlu
+ *      pemeriksaan isi segmen saat runtime.
+ *
+ *  23. Proxy Valhalla adalah sumber ketidakstabilan FlowCast, BUKAN CDN
+ *      hakunaymatata. Simulasi sesi ExoPlayer (8 siklus buka-baca-tutup-seek):
+ *          kualitas 720: proxy 8/8 @ 64 KB/s   | hulu 8/8 @ 722 KB/s
+ *          kualitas 480: proxy 3/8 @ 169 KB/s  | hulu 8/8 @ 769 KB/s
+ *          kualitas 360: proxy 5/8 @ 556 KB/s  | hulu 8/8 @ 824 KB/s
+ *      Hipotesis lama bahwa path `/bt/` tidak mendukung akses acak GUGUR:
+ *      lewat hulu, seek 50% dan 90% berhasil di semua kualitas.
+ *
+ *  24. URL hulu beserta header yang dibutuhkannya SUDAH tersedia di dalam URL
+ *      proxy itu sendiri, pada parameter `url` dan `headers`. Melewati proxy
+ *      karena itu tidak memerlukan informasi tambahan apa pun.
+ *
+ *  25. Hulu MENOLAK Referer rivestream.app dan MENERIMA Referer
+ *      123movienow.cc — kebalikan dari aturan proxy. Penolakannya berbentuk
+ *      429, bukan 403, sehingga sempat disalahartikan sebagai pembatasan laju.
+ *      Dari tujuh kombinasi header, hanya dua yang memuat Referer
+ *      123movienow.cc yang lolos.
+ *      KONSEKUENSI: header untuk pemeriksaan maupun untuk ExtractorLink harus
+ *      mengikuti hasil ekstraksi, bukan memakai Referer situs secara seragam.
+ *
+ *  26. [ASUMSI] Parameter `t` pada URL hulu tampak seperti batas waktu, tetapi
+ *      URL dengan `t` yang sudah lewat ~8 jam tetap membalas 206. Jadi nilai
+ *      itu tampaknya tidak ditegakkan. Belum terjelaskan, risiko rendah karena
+ *      tautan tetap dibangun ulang tiap kali loadLinks() dipanggil.
+ *
+ *  BATASAN JUJUR: pemeriksaan hanya menangkap kegagalan yang sudah terjadi
+ *  saat loadLinks() dipanggil. Ia tidak bisa mencegah sumber mati di tengah
+ *  pemutaran, dan itu memang di luar kendali provider.
  *
  *  ------------------------------------------------------------------------
  *  Dasar [TERBUKTI] tambahan untuk load()
@@ -220,6 +258,19 @@ class RiveStreamProvider : MainAPI() {
         TvType.Movie,
         TvType.TvSeries
     )
+
+    /**
+     * Layanan yang selalu dilewati.
+     *
+     * `primevids` terbukti tidak pernah mengembalikan video: seluruh segmen
+     * playlist-nya berupa gambar PNG dari domain iklan, pada semua judul yang
+     * diuji. Memanggilnya hanya membuang waktu dan memunculkan sumber palsu
+     * di daftar pengguna. Lihat catatan nomor 22 di bagian atas berkas.
+     */
+    private val skippedServices = setOf("primevids")
+
+    /** Host proxy yang perlu dilewati dengan mengurai URL hulunya. */
+    private val proxyMarkers = listOf("valhallastream", "/proxy?")
 
     /**
      * Kunci tiap bagian berformat `requestID:tipe`.
@@ -430,6 +481,10 @@ class RiveStreamProvider : MainAPI() {
         var emitted = 0
 
         for (service in services) {
+            // primevids terbukti selalu mengembalikan playlist iklan, bukan
+            // video. Dilewati tanpa permintaan jaringan sama sekali.
+            if (service.lowercase() in skippedServices) continue
+
             // Kegagalan satu layanan tidak boleh menghentikan yang lain.
             val result = try {
                 if (isTv) {
@@ -467,13 +522,15 @@ class RiveStreamProvider : MainAPI() {
             val url = item.optStringOrNull("url") ?: continue
             if (!seen.add(url)) continue
 
-            // Buang sumber yang SUDAH TERBUKTI mati sebelum pengguna menekan
-            // putar. Ini menangkap kasus HindiCast/FlowCast yang gagal 403
-            // langsung di awal (lihat catatan investigasi di atas berkas ini).
-            // TIDAK bisa mencegah token HLS kedaluwarsa di tengah pemutaran —
-            // itu bawaan CDN pihak ketiga, bukan sesuatu yang bisa diperbaiki
-            // lewat header.
-            if (!isReachable(url)) continue
+            // Lewati proxy Valhalla bila memungkinkan: URL hulu terbukti jauh
+            // lebih andal (8/8 berbanding 3/8 pada seek) dan berkali lipat
+            // lebih cepat. Lihat catatan nomor 23 dan 24.
+            val (finalUrl, finalHeaders) = resolveLink(url)
+
+            // Periksa memakai header HASIL EKSTRAKSI, bukan Referer situs.
+            // Hulu menolak Referer rivestream.app dengan 429 (catatan 25),
+            // jadi memakai header seragam justru akan membuang sumber sehat.
+            if (!isReachable(finalUrl, finalHeaders)) continue
 
             // Nama layanan versi server lebih informatif, mis. "Vietsub (Tap 1)"
             // milik ophim. Kalau tidak ada, pakai nama service apa adanya.
@@ -494,14 +551,15 @@ class RiveStreamProvider : MainAPI() {
                 newExtractorLink(
                     source = this.name,
                     name = label,
-                    url = url,
+                    url = finalUrl,
                     type = linkType
                 ) {
                     this.quality = quality
-                    // Referer wajib untuk proxy FlowCast, tidak merugikan
-                    // untuk layanan lain, jadi diterapkan seragam.
-                    this.referer = RiveApi.REFERER
-                    this.headers = mapOf("User-Agent" to RiveApi.USER_AGENT)
+                    // Referer dan header lain mengikuti hasil ekstraksi:
+                    //   URL hulu   -> Referer 123movienow.cc (+ Origin)
+                    //   URL biasa  -> Referer rivestream.app
+                    this.referer = finalHeaders["Referer"] ?: RiveApi.REFERER
+                    this.headers = finalHeaders.filterKeys { it != "Referer" }
                 }
             )
             count++
@@ -523,7 +581,7 @@ class RiveStreamProvider : MainAPI() {
      * lain (nama domain berubah, dsb.) diperlakukan sama: sumber dilewati,
      * bukan menggagalkan seluruh loadLinks().
      */
-    private suspend fun isReachable(url: String): Boolean {
+    private suspend fun isReachable(url: String, headers: Map<String, String>): Boolean {
         return try {
             // Bentuk pemanggilan ini SENGAJA disamakan persis dengan RiveApi.raw()
             // (Tahap 2, sudah terbukti compile & jalan): hanya parameter `url` dan
@@ -533,20 +591,59 @@ class RiveStreamProvider : MainAPI() {
             // yang tidak dipakai di berkas ini (gaya impor di sini eksplisit sejak
             // Tahap 1). Batas waktu karena itu dikendalikan lewat
             // kotlinx.coroutines.withTimeoutOrNull, bukan parameter app.get.
-            withTimeoutOrNull(6000L) {
-                val res = app.get(
-                    url,
-                    headers = mapOf(
-                        "User-Agent" to RiveApi.USER_AGENT,
-                        "Referer" to RiveApi.REFERER,
-                        "Range" to "bytes=0-1"
-                    )
-                )
-                res.code in 200..299 || res.code == 206
+            withTimeoutOrNull(8000L) {
+                val res = app.get(url, headers = headers + ("Range" to "bytes=0-1"))
+                res.code in 200..299
             } ?: false
         } catch (e: Exception) {
             false
         }
+    }
+
+    /**
+     * Ubah URL sumber menjadi pasangan (URL final, header final).
+     *
+     * Bila URL adalah proxy Valhalla, URL hulu dan headernya diambil dari
+     * parameter `url` dan `headers` milik URL proxy itu sendiri. Terbukti
+     * jauh lebih andal dan cepat daripada melewati proxy (catatan 23-24).
+     *
+     * Bila bukan URL proxy, atau parameter `url` tidak ada, URL dikembalikan
+     * apa adanya dengan Referer situs — supaya tidak ada sumber yang hilang
+     * hanya karena bentuk URL-nya tidak dikenali.
+     *
+     * Spesifikasi ini kembaran dari extract_final_link() di rive_final_check.py
+     * yang dipakai untuk verifikasi di luar aplikasi. Perubahan di satu sisi
+     * harus diikuti di sisi lain.
+     */
+    private fun resolveLink(url: String): Pair<String, Map<String, String>> {
+        val siteHeaders = mapOf(
+            "User-Agent" to RiveApi.USER_AGENT,
+            "Referer" to RiveApi.REFERER
+        )
+        if (proxyMarkers.none { url.contains(it) }) return url to siteHeaders
+
+        val inner = url.queryParam("url")?.takeIf { it.startsWith("http") }
+            ?: return url to siteHeaders
+
+        val headers = LinkedHashMap<String, String>()
+        headers["User-Agent"] = RiveApi.USER_AGENT
+
+        // Parameter `headers` berisi JSON, mis.
+        //   {"Referer":"https://123movienow.cc/","Origin":"https://123movienow.cc"}
+        url.queryParam("headers")?.let { raw ->
+            runCatching {
+                val obj = JSONObject(raw)
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = obj.optString(k, "")
+                    if (v.isNotBlank()) headers[k] = v
+                }
+            }
+        }
+        if (!headers.containsKey("Referer")) headers["Referer"] = RiveApi.REFERER
+
+        return inner to headers
     }
 
     /**
