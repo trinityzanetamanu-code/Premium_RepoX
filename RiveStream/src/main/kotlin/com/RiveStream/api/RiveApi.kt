@@ -79,6 +79,12 @@ object RiveApi {
         "primevids", "flowcast", "asiacloud", "hindicast", "guru", "ophim"
     )
 
+    /**
+     * Layanan embed cadangan. Terpantau dari server pada 2026-08-03.
+     * `prime` disertakan demi kesetiaan, meski tidak pernah berisi.
+     */
+    val FALLBACK_EMBED_SERVICES = listOf("self", "prime")
+
     // --------------------------------------------------------------- limiter
 
     private val rateMutex = Mutex()
@@ -293,6 +299,62 @@ object RiveApi {
         episode: Int
     ): JSONObject? = obj(
         "tvVideoProvider",
+        mapOf(
+            "id" to id,
+            "service" to service,
+            "season" to season.toString(),
+            "episode" to episode.toString()
+        ),
+        keySource = id
+    )?.optJSONObject("data")
+
+    // ---------------------------------------------------------- embed
+
+    /**
+     * Daftar layanan embed.
+     *
+     * Terbukti mengembalikan ["self", "prime"]. Hanya `self` yang pernah
+     * berisi; `prime` menghasilkan data null pada seluruh 48 panggilan uji.
+     */
+    suspend fun embedProviderServices(): List<String> {
+        val arr = obj("EmbedProviderServices")?.optJSONArray("data")
+            ?: return FALLBACK_EMBED_SERVICES
+        val out = ArrayList<String>(arr.length())
+        for (i in 0 until arr.length()) {
+            arr.optString(i).takeIf { it.isNotBlank() }?.let { out.add(it) }
+        }
+        return out.ifEmpty { FALLBACK_EMBED_SERVICES }
+    }
+
+    /**
+     * Sumber embed sebuah film.
+     *
+     * Bentuk respons:
+     *     {"data":{"sources":[{"host":"byse-flowcast-1080",
+     *                          "link":"https://bysekoze.com/e/xxxx"}]}}
+     *
+     * Field `host` berformat `hoster-jaringan-kualitas`. Penamaan hoster
+     * tidak konsisten (`byse` maupun `byse.sx` pernah muncul), sehingga
+     * domain dari `link` yang dipakai untuk mengenali hoster, bukan `host`.
+     *
+     * Cakupan terpantau sekitar 71% pada judul lama, dan kosong untuk judul
+     * baru.
+     */
+    suspend fun movieEmbedProvider(id: String, service: String): JSONObject? =
+        obj(
+            "movieEmbedProvider",
+            mapOf("id" to id, "service" to service),
+            keySource = id
+        )?.optJSONObject("data")
+
+    /** Sumber embed satu episode serial. */
+    suspend fun tvEmbedProvider(
+        id: String,
+        service: String,
+        season: Int,
+        episode: Int
+    ): JSONObject? = obj(
+        "tvEmbedProvider",
         mapOf(
             "id" to id,
             "service" to service,
