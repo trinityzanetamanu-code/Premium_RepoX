@@ -87,10 +87,35 @@ import java.net.URL
  *  menandainya sebagai varian biasa, ExoPlayer menampilkannya sebagai trek
  *  video kedua yang tidak dapat diputar.
  *
- *  [selectVarian] mengambil master, membuang varian I-frame, lalu memakai
- *  varian sehat dengan bandwidth tertinggi. Bila penyaringan gagal atau tidak
- *  menyisakan apa pun, URL master dipakai apa adanya — lebih baik satu trek
- *  duplikat daripada kehilangan sumbernya.
+ *  Atribut di master TIDAK dapat dipakai untuk membedakan keduanya. Keduanya
+ *  memuat PROGRAM-ID, RESOLUTION, FRAME-RATE, dan CODECS yang sama persis —
+ *  bahkan CODECS varian I-frame menyebut audio mp4a.40.2, yang mustahil untuk
+ *  playlist keyframe. Satu-satunya beda hanyalah BANDWIDTH, dan itu tidak
+ *  cukup: varian dengan bandwidth lebih rendah bisa saja video sungguhan.
+ *
+ *  [pilihVarian] karena itu memakai deteksi BERLAPIS, dari yang paling kuat:
+ *
+ *    Lapis 1  Entri #EXT-X-I-FRAME-STREAM-INF dibuang. Ini bentuk yang benar
+ *             menurut RFC 8216 §4.3.3.5, dan tidak memerlukan permintaan
+ *             tambahan.
+ *
+ *    Lapis 2  Untuk varian #EXT-X-STREAM-INF yang tersisa, isi playlist
+ *             tujuannya diperiksa. RFC 8216 §4.3.3.6 MEWAJIBKAN media playlist
+ *             I-frame memuat tag #EXT-X-I-FRAMES-ONLY. Pemeriksaan ini
+ *             definitif dan tidak bergantung pada nama berkas, sehingga tetap
+ *             benar bila Byse mengganti namanya menjadi preview.m3u8,
+ *             thumbs.m3u8, atau apa pun.
+ *
+ *    Lapis 3  Bila playlist anak gagal diambil karena jaringan, barulah nama
+ *             URI dipakai sebagai petunjuk cadangan. Ini semata-mata agar
+ *             kegagalan jaringan tidak menghilangkan sumber.
+ *
+ *  Kandidat diurutkan menurut bandwidth menurun, dan pemeriksaan berhenti pada
+ *  yang pertama lolos — sehingga umumnya hanya satu permintaan tambahan.
+ *
+ *  Bila seluruh varian ternyata I-frame, atau master tidak dapat diurai, URL
+ *  master dipakai apa adanya. Satu trek duplikat lebih baik daripada
+ *  kehilangan sumbernya.
  *
  *  TODO: belum disimpan permanen antar peluncuran aplikasi. Dampaknya hanya
  *  viewer_id baru dibuat sekali tiap aplikasi dijalankan, dan pengujian
@@ -431,39 +456,100 @@ object ByseClient {
      *         maupun tidak menyisakan varian sehat. Pemanggil harus memakai
      *         URL master apa adanya bila hasilnya null.
      */
+    /** Satu entri varian dari master playlist. */
+    private data class Varian(val uri: String, val bandwidth: Int)
+
+    /**
+     * Ganti URL master HLS dengan varian video sungguhan.
+     *
+     * Lihat catatan "Penyaringan varian I-frame" di atas berkas untuk alasan
+     * pemeriksaan berlapis ini.
+     *
+     * @return URL varian terpilih, atau null bila master tidak dapat diurai
+     *         maupun tidak menyisakan varian sehat. Pemanggil harus memakai
+     *         URL master apa adanya bila hasilnya null.
+     */
     private fun pilihVarian(masterUrl: String, referer: String, parent: String?): String? {
         val res = minta(masterUrl, referer = referer, parent = parent) ?: return null
         if (res.status != 200) return null
         val teks = res.teks
         if (!teks.contains("#EXT-X-STREAM-INF")) return null   // media playlist, bukan master
 
-        data class Varian(val uri: String, val bandwidth: Int, val iframe: Boolean)
+        val varian = uraiVarian(teks)
+        if (varian.isEmpty()) return null
 
+        // Satu varian saja: tidak ada yang perlu dibedakan, hemat satu permintaan.
+        if (varian.size == 1) {
+            return gabungUrl(masterUrl, varian[0].uri)
+        }
+
+        // Bandwidth menurun, berhenti pada yang pertama terbukti bukan I-frame.
+        for (v in varian.sortedByDescending { it.bandwidth }) {
+            val penuh = gabungUrl(masterUrl, v.uri) ?: continue
+            val anak = minta(penuh, referer = referer, parent = parent)
+
+            if (anak == null || anak.status != 200) {
+                // Lapis 3: jaringan gagal, pakai petunjuk nama sebagai cadangan.
+                if (!v.uri.contains("iframe", ignoreCase = true)) {
+                    catat("varian dipilih lewat cadangan nama URI: ${v.uri.take(40)}")
+                    return penuh
+                }
+                continue
+            }
+
+            if (!iFramesOnly(anak.teks)) {
+                catat("varian terverifikasi isi, bandwidth=${v.bandwidth}")
+                return penuh
+            }
+            catat("varian I-frame dibuang: ${v.uri.take(40)}")
+        }
+        return null
+    }
+
+    /**
+     * Urai entri varian dari master playlist.
+     *
+     * Lapis 1: entri #EXT-X-I-FRAME-STREAM-INF dilewati. Tag itu membawa URI
+     * di dalam atributnya, bukan pada baris berikutnya, sehingga cukup
+     * diabaikan seluruhnya.
+     */
+    private fun uraiVarian(teks: String): List<Varian> {
         val baris = teks.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        val varian = ArrayList<Varian>()
+        val out = ArrayList<Varian>()
         var i = 0
         while (i < baris.size) {
-            if (baris[i].startsWith("#EXT-X-STREAM-INF")) {
+            val b = baris[i]
+            if (b.startsWith("#EXT-X-I-FRAME-STREAM-INF")) {
+                i++
+                continue
+            }
+            if (b.startsWith("#EXT-X-STREAM-INF")) {
                 val uri = baris.getOrNull(i + 1)?.takeIf { !it.startsWith("#") }
                 if (uri != null) {
-                    val bw = Regex("BANDWIDTH=(\\d+)").find(baris[i])
+                    val bw = Regex("BANDWIDTH=(\\d+)").find(b)
                         ?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                    varian.add(Varian(uri, bw, uri.contains("iframe", ignoreCase = true)))
+                    out.add(Varian(uri, bw))
                     i += 2
                     continue
                 }
             }
             i++
         }
-
-        val sehat = varian.filter { !it.iframe }
-        if (sehat.isEmpty()) return null
-        val terbaik = sehat.maxByOrNull { it.bandwidth } ?: return null
-        catat("varian: ${varian.size} total, ${varian.size - sehat.size} I-frame dibuang")
-
-        // URI relatif diselesaikan terhadap URL master, termasuk query string.
-        return runCatching { URL(URL(masterUrl), terbaik.uri).toString() }.getOrNull()
+        return out
     }
+
+    /**
+     * Lapis 2: apakah media playlist ini hanya berisi I-frame.
+     *
+     * RFC 8216 §4.3.3.6 mewajibkan tag ini pada playlist I-frame, sehingga
+     * pemeriksaannya definitif dan tidak bergantung pada nama berkas.
+     */
+    private fun iFramesOnly(teks: String): Boolean =
+        teks.lineSequence().any { it.trim().startsWith("#EXT-X-I-FRAMES-ONLY") }
+
+    /** Selesaikan URI relatif terhadap URL master, termasuk query string. */
+    private fun gabungUrl(dasar: String, uri: String): String? =
+        runCatching { URL(URL(dasar), uri).toString() }.getOrNull()
 
     /**
      * Ambil kode Byse dari tautan yang diberikan RiveStream.
