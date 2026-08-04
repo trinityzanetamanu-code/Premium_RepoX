@@ -70,6 +70,28 @@ import java.net.URL
  *  Di sini identitas disimpan di memori selama proses hidup, sehingga tetap
  *  sama antar pemutaran dalam satu sesi aplikasi.
  *
+ *  ------------------------------------------------------------------------
+ *  Penyaringan varian I-frame
+ *  ------------------------------------------------------------------------
+ *
+ *  Master playlist Byse memuat DUA entri EXT-X-STREAM-INF dengan RESOLUTION
+ *  yang sama, misalnya:
+ *
+ *      #EXT-X-STREAM-INF:BANDWIDTH=1119000,RESOLUTION=1920x1080,...
+ *      index-v1-a1.m3u8?t=...            <- video sungguhan
+ *      #EXT-X-STREAM-INF:BANDWIDTH=559500,RESOLUTION=1920x1080,...
+ *      iframes-v1-a1.m3u8?t=...          <- HANYA I-frame
+ *
+ *  Yang kedua adalah playlist I-frame untuk pratinjau seek, dan seharusnya
+ *  dideklarasikan dengan tag EXT-X-I-FRAME-STREAM-INF. Karena Byse salah
+ *  menandainya sebagai varian biasa, ExoPlayer menampilkannya sebagai trek
+ *  video kedua yang tidak dapat diputar.
+ *
+ *  [selectVarian] mengambil master, membuang varian I-frame, lalu memakai
+ *  varian sehat dengan bandwidth tertinggi. Bila penyaringan gagal atau tidak
+ *  menyisakan apa pun, URL master dipakai apa adanya — lebih baik satu trek
+ *  duplikat daripada kehilangan sumbernya.
+ *
  *  TODO: belum disimpan permanen antar peluncuran aplikasi. Dampaknya hanya
  *  viewer_id baru dibuat sekali tiap aplikasi dijalankan, dan pengujian
  *  menunjukkan server menerima identitas baru tanpa keluhan. Menyimpannya
@@ -389,8 +411,58 @@ object ByseClient {
         }
         catat("9. ${hasil.sources.size} sumber, ${hasil.tracks.size} trek")
 
-        return if (hasil.sources.isEmpty()) null
-        else Hasil(hasil.sources, hasil.tracks, hasil.posterUrl, frameUrl)
+        if (hasil.sources.isEmpty()) return null
+
+        // Saring varian I-frame pada sumber HLS. Lihat catatan di atas berkas.
+        val sumberBersih = hasil.sources.map { s ->
+            val hls = s.mimeType?.contains("mpegurl", true) == true ||
+                s.url.substringBefore('?').endsWith(".m3u8", true)
+            if (!hls) s
+            else pilihVarian(s.url, frameUrl, parent)?.let { s.copy(url = it) } ?: s
+        }
+
+        return Hasil(sumberBersih, hasil.tracks, hasil.posterUrl, frameUrl)
+    }
+
+    /**
+     * Ganti URL master HLS dengan varian sungguhan, membuang varian I-frame.
+     *
+     * @return URL varian terpilih, atau null bila master tidak dapat diurai
+     *         maupun tidak menyisakan varian sehat. Pemanggil harus memakai
+     *         URL master apa adanya bila hasilnya null.
+     */
+    private fun pilihVarian(masterUrl: String, referer: String, parent: String?): String? {
+        val res = minta(masterUrl, referer = referer, parent = parent) ?: return null
+        if (res.status != 200) return null
+        val teks = res.teks
+        if (!teks.contains("#EXT-X-STREAM-INF")) return null   // media playlist, bukan master
+
+        data class Varian(val uri: String, val bandwidth: Int, val iframe: Boolean)
+
+        val baris = teks.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val varian = ArrayList<Varian>()
+        var i = 0
+        while (i < baris.size) {
+            if (baris[i].startsWith("#EXT-X-STREAM-INF")) {
+                val uri = baris.getOrNull(i + 1)?.takeIf { !it.startsWith("#") }
+                if (uri != null) {
+                    val bw = Regex("BANDWIDTH=(\\d+)").find(baris[i])
+                        ?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    varian.add(Varian(uri, bw, uri.contains("iframe", ignoreCase = true)))
+                    i += 2
+                    continue
+                }
+            }
+            i++
+        }
+
+        val sehat = varian.filter { !it.iframe }
+        if (sehat.isEmpty()) return null
+        val terbaik = sehat.maxByOrNull { it.bandwidth } ?: return null
+        catat("varian: ${varian.size} total, ${varian.size - sehat.size} I-frame dibuang")
+
+        // URI relatif diselesaikan terhadap URL master, termasuk query string.
+        return runCatching { URL(URL(masterUrl), terbaik.uri).toString() }.getOrNull()
     }
 
     /**
