@@ -1,7 +1,6 @@
 package com.RiveStream.byse
 
 import android.util.Base64
-import org.json.JSONArray
 import org.json.JSONObject
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
