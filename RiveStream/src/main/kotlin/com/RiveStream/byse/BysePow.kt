@@ -68,7 +68,7 @@ object BysePow {
     private const val BE = 512          // be
     private const val LT = BE - 1       // lt
     private const val DR = 2            // dr
-    private const val LR = -1640531527  // lr = 2654435761 sebagai Int bertanda
+    private const val LR = -1640531535  // lr = 2654435761 sebagai Int bertanda
     private const val HR = -2048144777  // hr = 2246822519 sebagai Int bertanda
 
     /** Jumlah percobaan antar pemeriksaan batas waktu. Sama dengan bundle (a=1024). */
