@@ -1,6 +1,7 @@
 package com.RiveStream
 
 import com.RiveStream.api.RiveApi
+import com.RiveStream.byse.ByseClient
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.HomePageResponse
@@ -500,7 +501,100 @@ class RiveStreamProvider : MainAPI() {
             emitCaptions(result, seenSubs, subtitleCallback)
         }
 
+        // Sumber embed. Terpisah dari VideoProvider dan memakai rantai
+        // sendiri; kegagalannya tidak boleh menjatuhkan sumber non-embed.
+        emitted += try {
+            emitEmbed(id, isTv, season, episode, seenLinks, callback)
+        } catch (e: Exception) {
+            0
+        }
+
         return emitted > 0
+    }
+
+    /**
+     * Kumpulkan sumber dari jalur embed.
+     *
+     * `movieEmbedProvider` mengembalikan tautan ke hoster Byse berbentuk
+     * `https://bysekoze.com/e/{code}`. Tautan itu BUKAN media langsung: ia
+     * halaman player yang memerlukan rantai attestation, Proof of Work, dan
+     * dekripsi AES-GCM sebelum menghasilkan URL HLS. Seluruh rantai itu
+     * ditangani ByseClient.
+     *
+     * Rantai memakan waktu beberapa detik karena mencakup PoW dan enam
+     * permintaan jaringan, sehingga sengaja dijalankan SETELAH sumber
+     * non-embed dikirim. Pengguna sudah melihat daftar lebih dulu, dan
+     * sumber embed menyusul.
+     */
+    private suspend fun emitEmbed(
+        id: String,
+        isTv: Boolean,
+        season: Int?,
+        episode: Int?,
+        seen: HashSet<String>,
+        callback: (ExtractorLink) -> Unit
+    ): Int {
+        var count = 0
+        for (service in RiveApi.embedProviderServices()) {
+            val data = try {
+                if (isTv) {
+                    RiveApi.tvEmbedProvider(id, service, season ?: 1, episode ?: 1)
+                } else {
+                    RiveApi.movieEmbedProvider(id, service)
+                }
+            } catch (e: Exception) {
+                null
+            } ?: continue
+
+            val sources = data.optJSONArray("sources") ?: continue
+            for (i in 0 until sources.length()) {
+                val item = sources.optJSONObject(i) ?: continue
+                val link = item.optStringOrNull("link") ?: continue
+
+                // `host` berformat hoster-jaringan-kualitas, mis.
+                // "byse-flowcast-1080". Bagian ketiga dipakai sebagai kualitas.
+                val hostTag = item.optStringOrNull("host").orEmpty()
+                val labelKualitas = hostTag.split("-").getOrNull(2)
+
+                val target = ByseClient.uraiTautan(link) ?: continue
+                val hasil = ByseClient.resolve(target.second, target.first) ?: continue
+
+                for (sumber in hasil.sources) {
+                    if (!seen.add(sumber.url)) continue
+
+                    val tipe = when {
+                        sumber.mimeType?.contains("mpegurl", true) == true ->
+                            ExtractorLinkType.M3U8
+                        sumber.url.substringBefore('?').endsWith(".m3u8", true) ->
+                            ExtractorLinkType.M3U8
+                        sumber.mimeType?.contains("mp4", true) == true ->
+                            ExtractorLinkType.VIDEO
+                        else -> null
+                    }
+
+                    // Kualitas diambil dari height bila ada, karena field
+                    // `quality` pada respons Byse bisa berupa huruf seperti "h".
+                    val kualitas = sumber.height
+                        ?: getQualityFromName(sumber.label ?: labelKualitas)
+
+                    callback(
+                        newExtractorLink(
+                            source = this.name,
+                            name = "Byse",
+                            url = sumber.url,
+                            type = tipe
+                        ) {
+                            this.quality = kualitas
+                            // Referer WAJIB halaman player, bukan situs Rive.
+                            this.referer = hasil.referer
+                            this.headers = mapOf("User-Agent" to ByseClient.USER_AGENT)
+                        }
+                    )
+                    count++
+                }
+            }
+        }
+        return count
     }
 
     /**
