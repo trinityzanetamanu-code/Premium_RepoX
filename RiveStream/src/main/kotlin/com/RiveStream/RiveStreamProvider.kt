@@ -30,12 +30,8 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URL
 
-/**
- * ============================================================================
- *  RiveStream — provider CloudStream
- * ============================================================================
- */
 class RiveStreamProvider : MainAPI() {
 
     override var mainUrl = RiveApi.MAIN_URL
@@ -65,8 +61,6 @@ class RiveStreamProvider : MainAPI() {
         "onTheAirTv:tv" to "On The Air"
     )
 
-    // ------------------------------------------------------------ main page
-
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -81,13 +75,9 @@ class RiveStreamProvider : MainAPI() {
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
-    // -------------------------------------------------------------- search
-
     override suspend fun search(query: String): List<SearchResponse> {
         return RiveApi.searchMulti(query).toSearchResponses("multi")
     }
-
-    // ---------------------------------------------------------------- load
 
     override suspend fun load(url: String): LoadResponse? {
         val type = url.queryParam("type") ?: return null
@@ -95,8 +85,6 @@ class RiveStreamProvider : MainAPI() {
 
         return if (type.equals("tv", true)) loadTv(id, url) else loadMovie(id, url)
     }
-
-    // ----------------------------------------------------------- load film
 
     private suspend fun loadMovie(id: String, url: String): LoadResponse? {
         val data = RiveApi.movieData(id) ?: return null
@@ -107,8 +95,7 @@ class RiveStreamProvider : MainAPI() {
 
         return newMovieLoadResponse(title, url, TvType.Movie, dataUrl = url) {
             this.posterUrl = RiveApi.posterUrl(data.optStringOrNull("poster_path"))
-            this.backgroundPosterUrl =
-                RiveApi.backdropUrl(data.optStringOrNull("backdrop_path"))
+            this.backgroundPosterUrl = RiveApi.backdropUrl(data.optStringOrNull("backdrop_path"))
             this.plot = data.optStringOrNull("overview")
             this.year = data.optStringOrNull("release_date")?.take(4)?.toIntOrNull()
             this.tags = data.genreNames()
@@ -118,8 +105,6 @@ class RiveStreamProvider : MainAPI() {
             addImdbId(data.optStringOrNull("imdb_id"))
         }
     }
-
-    // --------------------------------------------------------- load serial
 
     private suspend fun loadTv(id: String, url: String): LoadResponse? {
         val data = RiveApi.tvData(id) ?: return null
@@ -132,8 +117,7 @@ class RiveStreamProvider : MainAPI() {
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = RiveApi.posterUrl(data.optStringOrNull("poster_path"))
-            this.backgroundPosterUrl =
-                RiveApi.backdropUrl(data.optStringOrNull("backdrop_path"))
+            this.backgroundPosterUrl = RiveApi.backdropUrl(data.optStringOrNull("backdrop_path"))
             this.plot = data.optStringOrNull("overview")
             this.year = data.optStringOrNull("first_air_date")?.take(4)?.toIntOrNull()
             this.tags = data.genreNames()
@@ -145,10 +129,8 @@ class RiveStreamProvider : MainAPI() {
 
             this.showStatus = when {
                 data.optBoolean("in_production", false) -> ShowStatus.Ongoing
-                data.optStringOrNull("status")?.equals("Ended", true) == true ->
-                    ShowStatus.Completed
-                data.optStringOrNull("status")?.equals("Canceled", true) == true ->
-                    ShowStatus.Completed
+                data.optStringOrNull("status")?.equals("Ended", true) == true -> ShowStatus.Completed
+                data.optStringOrNull("status")?.equals("Canceled", true) == true -> ShowStatus.Completed
                 else -> ShowStatus.Ongoing
             }
 
@@ -183,9 +165,7 @@ class RiveStreamProvider : MainAPI() {
                         this.episode = episodeNumber
                         this.description = ep.optStringOrNull("overview")
                         this.posterUrl = RiveApi.posterUrl(ep.optStringOrNull("still_path"))
-                        this.runTime = ep.optInt("runtime", 0)
-                            .takeIf { it > 0 }
-                            ?.let { it * 60 }
+                        this.runTime = ep.optInt("runtime", 0).takeIf { it > 0 }?.let { it * 60 }
                         addDate(ep.optStringOrNull("air_date"))
                     }
                 )
@@ -195,8 +175,6 @@ class RiveStreamProvider : MainAPI() {
         out.sortWith(compareBy({ it.season ?: 0 }, { it.episode ?: 0 }))
         return out
     }
-
-    // ----------------------------------------------------------- loadLinks
 
     override suspend fun loadLinks(
         data: String,
@@ -266,9 +244,7 @@ class RiveStreamProvider : MainAPI() {
             val sources = data.optJSONArray("sources") ?: continue
             for (i in 0 until sources.length()) {
                 val item = sources.optJSONObject(i) ?: continue
-                val link = item.optStringOrNull("link")
-                    ?: item.optStringOrNull("url")
-                    ?: continue
+                val link = item.optStringOrNull("link") ?: continue
 
                 val hostTag = item.optStringOrNull("host").orEmpty()
                 val labelKualitas = hostTag.split("-").getOrNull(2)
@@ -280,17 +256,14 @@ class RiveStreamProvider : MainAPI() {
                     if (!seen.add(sumber.url)) continue
 
                     val tipe = when {
-                        sumber.mimeType?.contains("mpegurl", true) == true ->
-                            ExtractorLinkType.M3U8
-                        sumber.url.substringBefore('?').endsWith(".m3u8", true) ->
-                            ExtractorLinkType.M3U8
-                        sumber.mimeType?.contains("mp4", true) == true ->
-                            ExtractorLinkType.VIDEO
+                        sumber.mimeType?.contains("mpegurl", true) == true -> ExtractorLinkType.M3U8
+                        sumber.url.substringBefore('?').endsWith(".m3u8", true) -> ExtractorLinkType.M3U8
+                        sumber.mimeType?.contains("mp4", true) == true -> ExtractorLinkType.VIDEO
                         else -> null
                     }
 
-                    val kualitas = sumber.height
-                        ?: getQualityFromName(sumber.label ?: labelKualitas)
+                    val kualitas = sumber.height ?: getQualityFromName(sumber.label ?: labelKualitas)
+                    val playerHost = runCatching { URL(hasil.referer).host }.getOrNull() ?: "q8y5z.com"
 
                     callback(
                         newExtractorLink(
@@ -301,7 +274,10 @@ class RiveStreamProvider : MainAPI() {
                         ) {
                             this.quality = kualitas
                             this.referer = hasil.referer
-                            this.headers = mapOf("User-Agent" to ByseClient.USER_AGENT)
+                            this.headers = mapOf(
+                                "User-Agent" to ByseClient.USER_AGENT,
+                                "Origin" to "https://$playerHost"
+                            )
                         }
                     )
                     count++
@@ -325,8 +301,39 @@ class RiveStreamProvider : MainAPI() {
             val url = item.optStringOrNull("url") ?: continue
             if (!seen.add(url)) continue
 
-            val (finalUrl, finalHeaders) = resolveLink(url)
+            // AUTO-RESOLVE BYSE PADA MOVIE/TV PROVIDER
+            val byseTarget = ByseClient.uraiTautan(url)
+            if (byseTarget != null) {
+                val hasil = ByseClient.resolve(byseTarget.second, byseTarget.first)
+                if (hasil != null) {
+                    for (sumber in hasil.sources) {
+                        if (!seen.add(sumber.url)) continue
+                        val tipe = if (sumber.mimeType?.contains("mpegurl", true) == true ||
+                            sumber.url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
+                        val playerHost = runCatching { URL(hasil.referer).host }.getOrNull() ?: "q8y5z.com"
+                        callback(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "Byse ($service)",
+                                url = sumber.url,
+                                type = tipe
+                            ) {
+                                this.quality = sumber.height ?: getQualityFromName(sumber.label)
+                                this.referer = hasil.referer
+                                this.headers = mapOf(
+                                    "User-Agent" to ByseClient.USER_AGENT,
+                                    "Origin" to "https://$playerHost"
+                                )
+                            }
+                        )
+                        count++
+                    }
+                    continue
+                }
+            }
+
+            val (finalUrl, finalHeaders) = resolveLink(url)
             if (!isReachable(finalUrl, finalHeaders)) continue
 
             val label = item.optStringOrNull("source") ?: service
@@ -413,8 +420,6 @@ class RiveStreamProvider : MainAPI() {
             subtitleCallback(newSubtitleFile(lang, file))
         }
     }
-
-    // ------------------------------------------------------------ pemetaan
 
     private fun JSONArray?.toSearchResponses(typeHint: String): List<SearchResponse> {
         if (this == null) return emptyList()
