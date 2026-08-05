@@ -8,23 +8,16 @@ import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 
-/**
- * ============================================================================
- *  Byse — lapisan transport dan orkestrasi
- * ============================================================================
- */
 object ByseClient {
 
     const val USER_AGENT =
         "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
 
-    private const val TIMEOUT_MS = 30_000
+    private const val TIMEOUT_MS = 35_000
     private const val TAG = "BYSE"
 
     var rinci: Boolean = false
-
-    // ------------------------------------------------------------ identitas
 
     private var identitas: ByseAttest.Identitas? = null
     private var viewerId: String = ""
@@ -38,8 +31,6 @@ object ByseClient {
         viewerId = ""
         deviceId = ""
     }
-
-    // --------------------------------------------------------------- model
 
     data class Hasil(
         val sources: List<BysePlayback.Sumber>,
@@ -78,8 +69,6 @@ object ByseClient {
         override fun toString(): String = isi.keys.toString()
     }
 
-    // ------------------------------------------------------------ transport
-
     private fun catat(pesan: String) {
         if (rinci) android.util.Log.d(TAG, pesan)
     }
@@ -107,9 +96,19 @@ object ByseClient {
                 setRequestProperty("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
                 referer?.let { setRequestProperty("Referer", it) }
                 origin?.let { setRequestProperty("Origin", it) }
+                
                 setRequestProperty("Sec-Fetch-Dest", "empty")
                 setRequestProperty("Sec-Fetch-Mode", "cors")
-                setRequestProperty("Sec-Fetch-Site", "same-origin")
+                
+                // Penyesuaian Dinamis Sec-Fetch-Site
+                val targetHost = runCatching { URL(url).host }.getOrNull()
+                val originHost = origin?.let { runCatching { URL(it).host }.getOrNull() }
+                val secSite = if (targetHost != null && originHost != null && targetHost == originHost) {
+                    "same-origin"
+                } else {
+                    "cross-site"
+                }
+                setRequestProperty("Sec-Fetch-Site", secSite)
 
                 parent?.let {
                     setRequestProperty("X-Embed-Parent", it)
@@ -152,8 +151,6 @@ object ByseClient {
         }
     }
 
-    // ------------------------------------------------------------- langkah
-
     private fun ambilFrameUrl(hostSumber: String, code: String): String? {
         val res = minta(
             "https://$hostSumber/api/videos/$code/embed/details",
@@ -174,7 +171,6 @@ object ByseClient {
     }
 
     private fun jalankan(code: String, hostSumber: String): Hasil? {
-        // --- 1. details ---
         val frameUrl = ambilFrameUrl(hostSumber, code) ?: run {
             catat("1. details gagal atau tanpa embed_frame_url")
             return null
@@ -183,7 +179,6 @@ object ByseClient {
         val player = "${frame.protocol}://${frame.host}"
         val parent = "https://$hostSumber/e/$code"
         val toples = Toples()
-        catat("1. player=$player  segmen=${frame.path}")
 
         fun postJson(
             jalur: String,
@@ -194,20 +189,14 @@ object ByseClient {
             referer = frameUrl, origin = player, parent = parent, captchaToken = captcha
         )
 
-        // --- 2. buka halaman player ---
         minta(frameUrl, toples = toples, referer = frameUrl, origin = player, parent = parent)
 
-        // --- 3. challenge ---
         val ch = postJson("/api/videos/access/challenge", JSONObject())
-        if (ch == null || ch.status != 200) {
-            catat("3. challenge gagal: ${ch?.status}")
-            return null
-        }
+        if (ch == null || ch.status != 200) return null
         val chJson = ch.json ?: return null
         val challengeId = chJson.optString("challenge_id").takeIf { it.isNotBlank() } ?: return null
         val nonce = chJson.optString("nonce").takeIf { it.isNotBlank() } ?: return null
 
-        // --- 4. attest ---
         val id = identitasSekarang()
         val client = ByseAttest.sidikJariKlien(
             userAgent = USER_AGENT,
@@ -223,17 +212,10 @@ object ByseClient {
         )
 
         val att = postJson("/api/videos/access/attest", badanAttest)
-        if (att == null || att.status != 200) {
-            catat("4. attest gagal: ${att?.status}")
-            return null
-        }
-        val hasilAttest = ByseAttest.uraiHasil(att.json) ?: run {
-            catat("4. attest 200 tetapi respons tidak lengkap")
-            return null
-        }
+        if (att == null || att.status != 200) return null
+        val hasilAttest = ByseAttest.uraiHasil(att.json) ?: return null
         viewerId = hasilAttest.viewerId
         deviceId = hasilAttest.deviceId
-        catat("4. viewer=$viewerId confidence=${hasilAttest.confidence}")
 
         val fingerprint = JSONObject().apply {
             put("token", hasilAttest.token)
@@ -243,28 +225,16 @@ object ByseClient {
         }
         val badanSidik = JSONObject().put("fingerprint", fingerprint)
 
-        // --- 5. captcha ---
         val cap = postJson("/api/videos/$code/embed/captcha", badanSidik)
-        if (cap == null || cap.status != 200) {
-            catat("5. captcha gagal: ${cap?.status}")
-            return null
-        }
+        if (cap == null || cap.status != 200) return null
         val capJson = cap.json ?: return null
         val powNonce = capJson.optString("pow_nonce").takeIf { it.isNotBlank() } ?: return null
         val difficulty = capJson.optInt("pow_difficulty", 0)
         val powToken = capJson.optString("pow_token").takeIf { it.isNotBlank() } ?: return null
         val expiresIn = capJson.optInt("expires_in", 1800)
 
-        // --- 6. PoW ---
-        val mulai = System.currentTimeMillis()
-        val solusi = BysePow.pecahkan(powNonce, difficulty, BysePow.batasWaktu(expiresIn))
-        if (solusi == null) {
-            catat("6. PoW melewati batas waktu, difficulty=$difficulty")
-            return null
-        }
-        catat("6. PoW solusi=$solusi difficulty=$difficulty ${System.currentTimeMillis() - mulai}ms")
+        val solusi = BysePow.pecahkan(powNonce, difficulty, BysePow.batasWaktu(expiresIn)) ?: return null
 
-        // --- 7. captcha/verify ---
         val ver = postJson(
             "/api/videos/$code/embed/captcha/verify",
             JSONObject().apply {
@@ -273,37 +243,16 @@ object ByseClient {
                 put("fingerprint", fingerprint)
             }
         )
-        if (ver == null || ver.status != 200) {
-            catat("7. verify gagal: ${ver?.status}")
-            return null
-        }
+        if (ver == null || ver.status != 200) return null
         val verJson = ver.json
-        if (verJson?.optString("status") != "ok") {
-            catat("7. verify menolak: ${verJson?.optString("status")}")
-            return null
-        }
+        if (verJson?.optString("status") != "ok") return null
         val captchaToken = verJson.optString("token").takeIf { it.isNotBlank() } ?: return null
 
-        // --- 8. playback ---
         val pb = postJson("/api/videos/$code/embed/playback", badanSidik, captchaToken)
-        if (pb == null || pb.status != 200) {
-            catat("8. playback gagal: ${pb?.status}")
-            return null
-        }
-        val blob = pb.json?.optJSONObject("playback") ?: run {
-            catat("8. playback 200 tetapi tanpa objek playback")
-            return null
-        }
-        catat("8. version=${blob.optString("version")} " +
-            "key_parts=${blob.optJSONArray("key_parts")?.length()}")
+        if (pb == null || pb.status != 200) return null
+        val blob = pb.json?.optJSONObject("playback") ?: return null
 
-        // --- 9. dekripsi ---
-        val hasil = BysePlayback.dekripsi(blob) ?: run {
-            catat("9. dekripsi gagal")
-            return null
-        }
-        catat("9. ${hasil.sources.size} sumber, ${hasil.tracks.size} trek")
-
+        val hasil = BysePlayback.dekripsi(blob) ?: return null
         if (hasil.sources.isEmpty()) return null
 
         val sumberBersih = hasil.sources.map { s ->
@@ -337,17 +286,14 @@ object ByseClient {
 
             if (anak == null || anak.status != 200) {
                 if (!v.uri.contains("iframe", ignoreCase = true)) {
-                    catat("varian dipilih lewat cadangan nama URI: ${v.uri.take(40)}")
                     return penuh
                 }
                 continue
             }
 
             if (!iFramesOnly(anak.teks)) {
-                catat("varian terverifikasi isi, bandwidth=${v.bandwidth}")
                 return penuh
             }
-            catat("varian I-frame dibuang: ${v.uri.take(40)}")
         }
         return null
     }
@@ -384,21 +330,17 @@ object ByseClient {
         runCatching { URL(URL(dasar), uri).toString() }.getOrNull()
 
     /**
-     * Ambil kode Byse dari tautan yang diberikan RiveStream.
-     * Mendukung URL seperti:
-     * - https://bysekoze.com/e/{code}
-     * - https://bysejikuar.com/embed/{code}
-     * - https://bysejikuar.com/{code}
+     * Ditingkatkan untuk mendukung variasi prefix path (/e/, /v/, /watch/, /embed/)
      */
     fun uraiTautan(url: String): Pair<String, String>? {
         val u = runCatching { URL(url) }.getOrNull() ?: return null
-        val host = u.host.takeIf { it.isNotBlank() } ?: return null
-        val bagian = u.path.trim('/').split('/').filter { it.isNotBlank() }
-        if (bagian.isEmpty()) return null
-
-        val code = bagian.last()
-        if (code.isBlank()) return null
-
-        return host to code
+        val bagian = u.path.trim('/').split('/')
+        if (bagian.size < 2) return null
+        
+        val validPrefixes = setOf("e", "v", "watch", "embed")
+        if (bagian[0] !in validPrefixes) return null
+        
+        val code = bagian[1].takeIf { it.isNotBlank() } ?: return null
+        return u.host to code
     }
 }
