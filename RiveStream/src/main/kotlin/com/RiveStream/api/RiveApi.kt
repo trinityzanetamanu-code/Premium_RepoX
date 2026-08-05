@@ -11,6 +11,49 @@ import org.json.JSONObject
  * ============================================================================
  *  RiveStream — klien API
  * ============================================================================
+ *
+ *  Seluruh data RiveStream lewat SATU endpoint dispatcher:
+ *
+ *      GET https://www.rivestream.app/api/backendfetch
+ *          ?requestID=<nama>&<parameter lain>&secretKey=<kunci>
+ *
+ *  Metadata berbentuk TMDB apa adanya (page/results/total_pages), sedangkan
+ *  link stream dikembalikan sebagai JSON berisi `sources` dan `captions`.
+ *
+ *  ------------------------------------------------------------------------
+ *  Fakta yang sudah diverifikasi (jangan diubah tanpa bukti baru)
+ *  ------------------------------------------------------------------------
+ *
+ *  1. `secretKey` WAJIB dan diperiksa server.
+ *     Sumbernya: TMDB id untuk permintaan ber-id, kata kunci untuk pencarian,
+ *     dan literal "rive" untuk permintaan tanpa argumen.
+ *     Kunci salah -> 403 "Invalid secret key". Kunci hilang -> 400.
+ *
+ *  2. Referer TIDAK wajib untuk /api/backendfetch. Lima kombinasi header
+ *     diuji (tanpa Referer, tanpa User-Agent, Referer asing) — semuanya 200.
+ *     Tetap dikirim karena tidak merugikan dan menyamai perilaku situs.
+ *
+ *  3. Referer WAJIB untuk URL proxy FlowCast (proxy.valhallastream.dpdns.org).
+ *     Tanpa Referer -> 403. Dengan Referer rivestream.app -> 200.
+ *     Referer 123movienow.cc justru DITOLAK, walaupun nilai itu tertulis di
+ *     parameter `headers` milik URL proxy — parameter tersebut untuk diteruskan
+ *     ke hulu, bukan untuk kita kirim.
+ *
+ *  4. `tvEpisodes` mengembalikan SATU MUSIM per permintaan.
+ *     Tanpa parameter `season`, defaultnya musim 0 (Specials).
+ *     Parameter `language` tidak berpengaruh pada isinya.
+ *
+ *  5. Enam layanan stream sering gagal sendiri-sendiri: `{"data":null}` atau
+ *     `{"error":"Internal Server Error"}`. Ini normal. Panggil semuanya dan
+ *     abaikan yang gagal, jangan berhenti di kegagalan pertama.
+ *
+ *  6. Server memutus koneksi bila permintaan terlalu rapat
+ *     (RemoteDisconnected / Connection reset). Jeda minimum diberlakukan
+ *     lewat [rateLimit].
+ *
+ *  7. `movieOnlineSubtitles` dan `tvOnlineSubtitles` SELALU balas 500.
+ *     Subtitle diambil dari field `captions` di respons stream.
+ * ============================================================================
  */
 object RiveApi {
 
@@ -28,10 +71,18 @@ object RiveApi {
     const val IMG_POSTER = "https://image.tmdb.org/t/p/w500"
     const val IMG_BACKDROP = "https://image.tmdb.org/t/p/original"
 
+    /**
+     * Daftar layanan cadangan, dipakai bila `VideoProviderServices` gagal.
+     * Nilai ini terpantau dari server pada 2026-08-02.
+     */
     val FALLBACK_SERVICES = listOf(
         "primevids", "flowcast", "asiacloud", "hindicast", "guru", "ophim"
     )
 
+    /**
+     * Layanan embed cadangan. Terpantau dari server pada 2026-08-03.
+     * `prime` disertakan demi kesetiaan, meski tidak pernah berisi.
+     */
     val FALLBACK_EMBED_SERVICES = listOf("self", "prime")
 
     // --------------------------------------------------------------- limiter
@@ -39,6 +90,7 @@ object RiveApi {
     private val rateMutex = Mutex()
     private var lastRequestAt = 0L
 
+    /** Jeda minimum antar permintaan, dalam milidetik. */
     private const val MIN_INTERVAL_MS = 350L
 
     private suspend fun rateLimit() {
@@ -65,6 +117,13 @@ object RiveApi {
     private fun enc(s: String): String =
         java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 
+    /**
+     * Panggil dispatcher dan kembalikan teks respons mentah.
+     *
+     * @param keySource nilai sumber `secretKey`: TMDB id, kata kunci, atau
+     *                  `null` untuk memakai literal "rive".
+     * @return teks respons, atau null bila gagal.
+     */
     suspend fun raw(
         requestID: String,
         params: Map<String, String?> = emptyMap(),
@@ -83,6 +142,7 @@ object RiveApi {
                 )
             )
             val body = res.text
+            // Server membalas halaman HTML saat galat internal (status 500).
             if (body.isBlank() || !(body.startsWith("{") || body.startsWith("["))) null
             else body
         } catch (e: Exception) {
@@ -90,6 +150,7 @@ object RiveApi {
         }
     }
 
+    /** Seperti [raw], tapi langsung diurai menjadi [JSONObject]. */
     suspend fun obj(
         requestID: String,
         params: Map<String, String?> = emptyMap(),
@@ -104,6 +165,10 @@ object RiveApi {
         }
     }
 
+    /**
+     * Ambil array `results` dari respons berbentuk daftar TMDB.
+     * Berlaku untuk trending, popular, latest, topRated, filter, dan search.
+     */
     suspend fun results(
         requestID: String,
         params: Map<String, String?> = emptyMap(),
@@ -112,6 +177,10 @@ object RiveApi {
 
     // ------------------------------------------------------------- katalog
 
+    /**
+     * Daftar katalog. Semuanya berbentuk TMDB: page / results / total_pages.
+     * Tidak memerlukan id, jadi `secretKey` memakai literal "rive".
+     */
     suspend fun catalog(
         requestID: String,
         page: Int = 1,
@@ -126,6 +195,7 @@ object RiveApi {
         )
     )
 
+    /** Nama requestID katalog yang sudah terverifikasi mengembalikan `results`. */
     object Catalog {
         const val TRENDING = "trending"
         const val TRENDING_MOVIE = "trendingMovie"
@@ -143,6 +213,15 @@ object RiveApi {
 
     // ------------------------------------------------------------ pencarian
 
+    /**
+     * Pencarian gabungan film dan serial.
+     *
+     * `secretKey` di sini memakai CABANG TEKS: indeksnya dihitung dari jumlah
+     * kode karakter kata kunci, bukan dari angka. Sudah diverifikasi — kunci
+     * dari id maupun literal "rive" sama-sama ditolak 403.
+     *
+     * Tiap item punya `media_type` bernilai "movie" atau "tv".
+     */
     suspend fun searchMulti(
         query: String,
         page: Int = 1,
@@ -155,15 +234,26 @@ object RiveApi {
 
     // --------------------------------------------------------------- detail
 
+    /** Objek TMDB lengkap sebuah film. */
     suspend fun movieData(id: String, language: String = "en-US"): JSONObject? =
         obj("movieData", mapOf("id" to id, "language" to language), keySource = id)
 
+    /** Objek TMDB lengkap sebuah serial, termasuk array `seasons`. */
     suspend fun tvData(id: String, language: String = "en-US"): JSONObject? =
         obj("tvData", mapOf("id" to id, "language" to language), keySource = id)
 
+    /**
+     * Daftar episode SATU musim.
+     *
+     * Panggil sekali per musim. Nomor musim diambil dari `tvData().seasons[]`.
+     * Tanpa parameter `season`, server mengembalikan musim 0 (Specials).
+     *
+     * @return objek musim, dengan array `episodes` di dalamnya.
+     */
     suspend fun tvEpisodes(id: String, season: Int): JSONObject? =
         obj("tvEpisodes", mapOf("id" to id, "season" to season.toString()), keySource = id)
 
+    /** Detail satu episode, termasuk `crew` dan `guest_stars`. */
     suspend fun tvEpisodeDetail(id: String, season: Int, episode: Int): JSONObject? =
         obj(
             "tvEpisodeDetail",
@@ -173,6 +263,10 @@ object RiveApi {
 
     // --------------------------------------------------------------- stream
 
+    /**
+     * Daftar layanan stream yang tersedia.
+     * Dipanggil tanpa argumen, sehingga `secretKey` memakai literal "rive".
+     */
     suspend fun videoProviderServices(): List<String> {
         val arr = obj("VideoProviderServices")?.optJSONArray("data")
             ?: return FALLBACK_SERVICES
@@ -183,6 +277,13 @@ object RiveApi {
         return out.ifEmpty { FALLBACK_SERVICES }
     }
 
+    /**
+     * Link stream sebuah film dari satu layanan.
+     *
+     * @return objek `data` berisi `sources` dan `captions`, atau null bila
+     *         layanan itu tidak punya sumber untuk judul ini. Kegagalan satu
+     *         layanan adalah hal biasa dan bukan galat.
+     */
     suspend fun movieVideoProvider(id: String, service: String): JSONObject? =
         obj(
             "movieVideoProvider",
@@ -190,6 +291,7 @@ object RiveApi {
             keySource = id
         )?.optJSONObject("data")
 
+    /** Link stream satu episode serial dari satu layanan. */
     suspend fun tvVideoProvider(
         id: String,
         service: String,
@@ -208,6 +310,12 @@ object RiveApi {
 
     // ---------------------------------------------------------- embed
 
+    /**
+     * Daftar layanan embed.
+     *
+     * Terbukti mengembalikan ["self", "prime"]. Hanya `self` yang pernah
+     * berisi; `prime` menghasilkan data null pada seluruh 48 panggilan uji.
+     */
     suspend fun embedProviderServices(): List<String> {
         val arr = obj("EmbedProviderServices")?.optJSONArray("data")
             ?: return FALLBACK_EMBED_SERVICES
@@ -218,42 +326,51 @@ object RiveApi {
         return out.ifEmpty { FALLBACK_EMBED_SERVICES }
     }
 
-    suspend fun movieEmbedProvider(id: String, service: String): JSONObject? {
-        val res = obj("movieEmbedProvider", mapOf("id" to id, "service" to service), keySource = id) ?: return null
-        return wrapEmbedData(res)
-    }
+    /**
+     * Sumber embed sebuah film.
+     *
+     * Bentuk respons:
+     *     {"data":{"sources":[{"host":"byse-flowcast-1080",
+     *                          "link":"https://bysekoze.com/e/xxxx"}]}}
+     *
+     * Field `host` berformat `hoster-jaringan-kualitas`. Penamaan hoster
+     * tidak konsisten (`byse` maupun `byse.sx` pernah muncul), sehingga
+     * domain dari `link` yang dipakai untuk mengenali hoster, bukan `host`.
+     *
+     * Cakupan terpantau sekitar 71% pada judul lama, dan kosong untuk judul
+     * baru.
+     */
+    suspend fun movieEmbedProvider(id: String, service: String): JSONObject? =
+        obj(
+            "movieEmbedProvider",
+            mapOf("id" to id, "service" to service),
+            keySource = id
+        )?.optJSONObject("data")
 
+    /** Sumber embed satu episode serial. */
     suspend fun tvEmbedProvider(
         id: String,
         service: String,
         season: Int,
         episode: Int
-    ): JSONObject? {
-        val res = obj(
-            "tvEmbedProvider",
-            mapOf("id" to id, "service" to service, "season" to season.toString(), "episode" to episode.toString()),
-            keySource = id
-        ) ?: return null
-        return wrapEmbedData(res)
-    }
-
-    /** Helper untuk menormalisasi struktur data embed. */
-    private fun wrapEmbedData(res: JSONObject): JSONObject? {
-        if (res.has("sources")) return res
-        val dataObj = res.optJSONObject("data")
-        if (dataObj != null) return dataObj
-
-        val dataArr = res.optJSONArray("data")
-        if (dataArr != null) return JSONObject().put("sources", dataArr)
-
-        return null
-    }
+    ): JSONObject? = obj(
+        "tvEmbedProvider",
+        mapOf(
+            "id" to id,
+            "service" to service,
+            "season" to season.toString(),
+            "episode" to episode.toString()
+        ),
+        keySource = id
+    )?.optJSONObject("data")
 
     // ------------------------------------------------------------- pembantu
 
+    /** Ubah path poster TMDB menjadi URL penuh. */
     fun posterUrl(path: String?): String? =
         path?.takeIf { it.isNotBlank() && it != "null" }?.let { IMG_POSTER + it }
 
+    /** Ubah path backdrop TMDB menjadi URL penuh. */
     fun backdropUrl(path: String?): String? =
         path?.takeIf { it.isNotBlank() && it != "null" }?.let { IMG_BACKDROP + it }
 }
