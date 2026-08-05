@@ -170,24 +170,46 @@ object ByseClient {
     private fun identitasSekarang(): ByseAttest.Identitas =
         identitas ?: ByseAttest.buatKunci().also { identitas = it }
 
-    /** Sesi attestation yang sudah terbentuk untuk sebuah host player. */
+    /**
+     * Sesi attestation yang sudah terbentuk untuk sebuah host player.
+     *
+     * Menyimpan seluruh yang diperlukan untuk melewati challenge dan attest:
+     * cookie, identitas yang diberikan server, token fingerprint, dan waktu
+     * kedaluwarsa dari `expires_at`.
+     */
     private class Sesi(
+        val host: String,
+        val viewerId: String,
+        val deviceId: String,
+        val token: String,
         val toples: Toples,
         val fingerprint: JSONObject,
-        /** Waktu kedaluwarsa dalam milidetik epoch. */
+        /** Waktu kedaluwarsa dari `expires_at`, dalam milidetik epoch. */
         val kedaluwarsa: Long
     ) {
-        fun masihBerlaku(): Boolean = System.currentTimeMillis() < kedaluwarsa
+        /** Berlaku bila masih ada sisa waktu di atas [AMBANG_MS]. */
+        fun masihBerlaku(): Boolean =
+            System.currentTimeMillis() < kedaluwarsa - AMBANG_MS
+
+        fun sisaDetik(): Long =
+            (kedaluwarsa - System.currentTimeMillis()) / 1000
+
+        override fun toString(): String =
+            "Sesi($host viewer=$viewerId sisa=${sisaDetik()}s)"
     }
 
     /** Sesi per host player. Host bisa berbeda antar judul karena berotasi. */
     private val sesiPerHost = HashMap<String, Sesi>()
 
     /**
-     * Selisih keamanan sebelum kedaluwarsa, supaya sesi tidak dipakai tepat
-     * di ambang batas lalu ditolak di tengah rantai.
+     * Selisih keamanan sebelum kedaluwarsa.
+     *
+     * Rantai captcha, PoW, dan playback memakan beberapa detik, sehingga sesi
+     * yang tersisa sedikit bisa kedaluwarsa DI TENGAH rantai. Ambang 45 detik
+     * memberi ruang untuk PoW terlama yang terpantau (sekitar 9 detik) plus
+     * tiga permintaan jaringan, dengan margin yang lapang.
      */
-    private const val AMBANG_MS = 30_000L
+    private const val AMBANG_MS = 45_000L
 
     /** Umur cadangan bila `expires_at` tidak dapat diurai. */
     private const val UMUR_CADANGAN_MS = 4 * 60_000L
@@ -387,75 +409,31 @@ object ByseClient {
         val toples = Toples()
         catat("1. player=$player  segmen=${frame.path}")
 
-        fun postJson(
-            jalur: String,
-            badan: JSONObject,
-            captcha: String? = null
-        ): Respons? = minta(
-            player + jalur, "POST", badan.toString(), toples,
-            referer = frameUrl, origin = player, parent = parent, captchaToken = captcha
-        )
-
         // --- 2. buka halaman player ---
         minta(frameUrl, toples = toples, referer = frameUrl, origin = player, parent = parent)
 
         // --- 3 & 4. sesi attestation, dipakai ulang bila masih berlaku ---
         val sesi = sesiUntuk(player, frameUrl, parent, toples) ?: return null
-        val badanSidik = JSONObject().put("fingerprint", sesi.fingerprint)
 
-        // --- 5. captcha ---
-        val cap = postJson("/api/videos/$code/embed/captcha", badanSidik)
-        if (cap == null || cap.status != 200) {
-            catat("5. captcha gagal: ${cap?.status}")
-            return null
-        }
-        val capJson = cap.json ?: return null
-        val powNonce = capJson.optString("pow_nonce").takeIf { it.isNotBlank() } ?: return null
-        val difficulty = capJson.optInt("pow_difficulty", 0)
-        val powToken = capJson.optString("pow_token").takeIf { it.isNotBlank() } ?: return null
-        val expiresIn = capJson.optInt("expires_in", 1800)
+        // --- 5 s.d. 8. rantai per video ---
+        //
+        // Sesi bisa dibatalkan server lebih cepat daripada `expires_at`, jadi
+        // waktu kedaluwarsa saja tidak cukup. Bila server menolak dengan 401,
+        // 403, atau captcha/verify gagal padahal sesi dianggap masih hidup,
+        // sesi dibuang lalu rantai diulang SEKALI dengan attestation baru.
+        var blob = rantaiVideo(code, player, frameUrl, parent, toples, sesi)
 
-        // --- 6. PoW ---
-        val mulai = System.currentTimeMillis()
-        val solusi = BysePow.pecahkan(powNonce, difficulty, BysePow.batasWaktu(expiresIn))
-        if (solusi == null) {
-            catat("6. PoW melewati batas waktu, difficulty=$difficulty")
-            return null
+        if (blob == null && penolakanTerakhir) {
+            catat("server menolak sesi, membuat attestation baru lalu mengulang")
+            sesiPerHost.remove(player)
+            val toplesBaru = Toples()
+            minta(frameUrl, toples = toplesBaru, referer = frameUrl,
+                  origin = player, parent = parent)
+            val sesiBaru = sesiUntuk(player, frameUrl, parent, toplesBaru, paksaBaru = true)
+                ?: return null
+            blob = rantaiVideo(code, player, frameUrl, parent, toplesBaru, sesiBaru)
         }
-        catat("6. PoW solusi=$solusi difficulty=$difficulty ${System.currentTimeMillis() - mulai}ms")
-
-        // --- 7. captcha/verify ---
-        val ver = postJson(
-            "/api/videos/$code/embed/captcha/verify",
-            JSONObject().apply {
-                put("pow_token", powToken)
-                put("solution", solusi)
-                put("fingerprint", fingerprint)
-            }
-        )
-        if (ver == null || ver.status != 200) {
-            catat("7. verify gagal: ${ver?.status}")
-            return null
-        }
-        val verJson = ver.json
-        if (verJson?.optString("status") != "ok") {
-            catat("7. verify menolak: ${verJson?.optString("status")}")
-            return null
-        }
-        val captchaToken = verJson.optString("token").takeIf { it.isNotBlank() } ?: return null
-
-        // --- 8. playback ---
-        val pb = postJson("/api/videos/$code/embed/playback", badanSidik, captchaToken)
-        if (pb == null || pb.status != 200) {
-            catat("8. playback gagal: ${pb?.status}")
-            return null
-        }
-        val blob = pb.json?.optJSONObject("playback") ?: run {
-            catat("8. playback 200 tetapi tanpa objek playback")
-            return null
-        }
-        catat("8. version=${blob.optString("version")} " +
-            "key_parts=${blob.optJSONArray("key_parts")?.length()}")
+        if (blob == null) return null
 
         // --- 9. dekripsi ---
         val hasil = BysePlayback.dekripsi(blob) ?: run {
@@ -485,6 +463,113 @@ object ByseClient {
      *         URL master apa adanya bila hasilnya null.
      */
     /**
+     * Penanda bahwa kegagalan terakhir berupa penolakan sesi, bukan galat lain.
+     *
+     * Dipakai untuk memutuskan apakah rantai layak diulang dengan attestation
+     * baru. Kegagalan seperti jaringan putus atau PoW melewati batas waktu
+     * TIDAK ditandai, karena mengulang attestation tidak akan menolongnya.
+     */
+    private var penolakanTerakhir: Boolean = false
+
+    /** Status yang menandakan sesi ditolak dan attestation perlu diperbarui. */
+    private fun statusPenolakan(status: Int?): Boolean =
+        status == 401 || status == 403
+
+    /**
+     * Langkah 5 sampai 8: captcha, PoW, verify, playback.
+     *
+     * Dipisahkan dari [jalankan] agar dapat diulang dengan sesi baru bila
+     * server menolak sesi yang dipakai ulang.
+     *
+     * @return objek `playback` terenkripsi, atau null bila gagal. Bila
+     *         kegagalannya berupa penolakan sesi, [penolakanTerakhir] disetel
+     *         true supaya pemanggil tahu rantai layak diulang.
+     */
+    private fun rantaiVideo(
+        code: String,
+        player: String,
+        frameUrl: String,
+        parent: String,
+        toples: Toples,
+        sesi: Sesi
+    ): JSONObject? {
+        penolakanTerakhir = false
+
+        fun postJson(jalur: String, badan: JSONObject, captcha: String? = null): Respons? =
+            minta(
+                player + jalur, "POST", badan.toString(), toples,
+                referer = frameUrl, origin = player, parent = parent,
+                captchaToken = captcha
+            )
+
+        val badanSidik = JSONObject().put("fingerprint", sesi.fingerprint)
+
+        // --- 5. captcha ---
+        val cap = postJson("/api/videos/$code/embed/captcha", badanSidik)
+        if (cap == null || cap.status != 200) {
+            penolakanTerakhir = statusPenolakan(cap?.status)
+            catat("5. captcha gagal: ${cap?.status}")
+            return null
+        }
+        val capJson = cap.json ?: return null
+        val powNonce = capJson.optString("pow_nonce").takeIf { it.isNotBlank() } ?: return null
+        val difficulty = capJson.optInt("pow_difficulty", 0)
+        val powToken = capJson.optString("pow_token").takeIf { it.isNotBlank() } ?: return null
+        val expiresIn = capJson.optInt("expires_in", 1800)
+
+        // --- 6. PoW ---
+        val mulai = System.currentTimeMillis()
+        val solusi = BysePow.pecahkan(powNonce, difficulty, BysePow.batasWaktu(expiresIn))
+        if (solusi == null) {
+            // Bukan penolakan sesi; mengulang attestation tidak akan menolong.
+            catat("6. PoW melewati batas waktu, difficulty=$difficulty")
+            return null
+        }
+        catat("6. PoW solusi=$solusi difficulty=$difficulty ${System.currentTimeMillis() - mulai}ms")
+
+        // --- 7. captcha/verify ---
+        val ver = postJson(
+            "/api/videos/$code/embed/captcha/verify",
+            JSONObject().apply {
+                put("pow_token", powToken)
+                put("solution", solusi)
+                put("fingerprint", sesi.fingerprint)
+            }
+        )
+        if (ver == null || ver.status != 200) {
+            penolakanTerakhir = statusPenolakan(ver?.status)
+            catat("7. verify gagal: ${ver?.status}")
+            return null
+        }
+        val verJson = ver.json
+        if (verJson?.optString("status") != "ok") {
+            // Verify menolak solusi meski HTTP 200. Sesi kemungkinan sudah
+            // tidak diakui, jadi layak diulang dengan attestation baru.
+            penolakanTerakhir = true
+            catat("7. verify menolak: status=${verJson?.optString("status")} " +
+                "reason=${verJson?.optString("reason")}")
+            return null
+        }
+        val captchaToken = verJson.optString("token").takeIf { it.isNotBlank() } ?: return null
+
+        // --- 8. playback ---
+        val pb = postJson("/api/videos/$code/embed/playback", badanSidik, captchaToken)
+        if (pb == null || pb.status != 200) {
+            penolakanTerakhir = statusPenolakan(pb?.status)
+            catat("8. playback gagal: ${pb?.status}")
+            return null
+        }
+        val blob = pb.json?.optJSONObject("playback")
+        if (blob == null) {
+            catat("8. playback 200 tetapi tanpa objek playback")
+            return null
+        }
+        catat("8. version=${blob.optString("version")} " +
+            "key_parts=${blob.optJSONArray("key_parts")?.length()}")
+        return blob
+    }
+
+    /**
      * Ambil sesi attestation untuk sebuah host player.
      *
      * Bila sesi sebelumnya masih berlaku, cookie-nya disalin ke [toples] dan
@@ -496,15 +581,21 @@ object ByseClient {
         player: String,
         frameUrl: String,
         parent: String,
-        toples: Toples
+        toples: Toples,
+        paksaBaru: Boolean = false
     ): Sesi? {
-        sesiPerHost[player]?.let { lama ->
-            if (lama.masihBerlaku()) {
-                toples.salinDari(lama.toples)
-                catat("sesi attestation dipakai ulang untuk $player")
-                return lama
-            }
+        if (paksaBaru) {
             sesiPerHost.remove(player)
+        } else {
+            sesiPerHost[player]?.let { lama ->
+                if (lama.masihBerlaku()) {
+                    toples.salinDari(lama.toples)
+                    catat("sesi dipakai ulang: $lama")
+                    return lama
+                }
+                catat("sesi kedaluwarsa, membuat ulang: $lama")
+                sesiPerHost.remove(player)
+            }
         }
 
         fun postJson(jalur: String, badan: JSONObject): Respons? = minta(
@@ -556,9 +647,17 @@ object ByseClient {
             hasil.confidence?.let { put("confidence", it.toDoubleOrNull() ?: it) }
         }
 
-        val batas = uraiKedaluwarsa(hasil.expiresAt) - AMBANG_MS
-        val sesi = Sesi(toples.salinan(), fingerprint, batas)
+        val sesi = Sesi(
+            host = player,
+            viewerId = hasil.viewerId,
+            deviceId = hasil.deviceId,
+            token = hasil.token,
+            toples = toples.salinan(),
+            fingerprint = fingerprint,
+            kedaluwarsa = uraiKedaluwarsa(hasil.expiresAt)
+        )
         sesiPerHost[player] = sesi
+        catat("sesi baru: $sesi")
         return sesi
     }
 
