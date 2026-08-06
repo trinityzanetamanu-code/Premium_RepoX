@@ -186,67 +186,7 @@ class MovieboxProvider : MainAPI() {
             if (star.name != null) ActorData(actor = Actor(star.name, star.avatarUrl), roleString = star.character) else null
         }
 
-        /*
-         * =============================================================
-         * PENENTUAN PASANGAN (se, ep) — diperbaiki 2026-08-07
-         * =============================================================
-         * SUMBER KEBENARAN adalah resource.seasons, BUKAN subjectType.
-         *
-         * Terbukti lewat pengujian 60 judul lintas subjectType:
-         *   aturan berbasis seasons : 59/60 berhasil (98,3%)
-         *   logika lama (subjectType): 38/60 berhasil (63,3%)
-         *   rincian tipe 6 (Music)  : 20/20 vs 1/20
-         *
-         * subjectType tidak konsisten. Contoh nyata:
-         *   avatar-KdJVp5CwFH3  -> subjectType=1, seasons se=2 & se=3
-         *   wrestlemania-vegas  -> subjectType=1, seasons se=1 maxEp=1
-         *   21-days-with-snake  -> subjectType=1, seasons se=0 maxEp=10
-         * Ketiganya "Movie" menurut API tapi butuh se/ep non-(0,0).
-         * =============================================================
-         */
-        val seasonsData = wrapper.resource?.seasons.orEmpty()
-        val legacyEpisodes = res.episodes.orEmpty()
-
-        // Item tunggal: satu musim dengan se=0 DAN maxEp=0.
-        val isSingleItem = seasonsData.size == 1 &&
-                (seasonsData[0].se ?: 0) == 0 &&
-                (seasonsData[0].maxEp ?: 0) == 0
-
-        val episodesList = mutableListOf<Episode>()
-
-        if (seasonsData.isNotEmpty()) {
-            if (!isSingleItem) {
-                seasonsData.forEach { season ->
-                    val sNum = season.se ?: 0
-                    // coerceAtLeast(1): musim dengan maxEp=0 tetap menghasilkan
-                    // satu episode, supaya tidak menghasilkan daftar kosong.
-                    val epCount = (season.maxEp ?: 0).coerceAtLeast(1)
-                    for (eNum in 1..epCount) {
-                        episodesList.add(
-                            newEpisode(LinkData(res.subjectId ?: "", slug, sNum, eNum, true).toJson()) {
-                                this.name = "Episode $eNum"
-                                // sNum=0 valid untuk API, tapi tampilkan sebagai 1 di UI.
-                                this.season = if (sNum > 0) sNum else 1
-                                this.episode = eNum
-                            }
-                        )
-                    }
-                }
-            }
-        } else if (legacyEpisodes.isNotEmpty()) {
-            // Jalur lama, dipertahankan apa adanya.
-            legacyEpisodes.forEach { ep ->
-                episodesList.add(
-                    newEpisode(LinkData(res.subjectId ?: "", slug, ep.seasonNum ?: 1, ep.episodeNum ?: 1, true).toJson()) {
-                        this.name = ep.title
-                        this.season = ep.seasonNum
-                        this.episode = ep.episodeNum
-                    }
-                )
-            }
-        }
-
-        return if (episodesList.isEmpty()) {
+        return if (res.subjectType == 1) {
             newMovieLoadResponse(res.title ?: "", url, TvType.Movie, LinkData(res.subjectId ?: "", slug, 0, 0, false).toJson()) {
                 this.posterUrl = res.cover?.url
                 this.plot = res.description
@@ -256,6 +196,37 @@ class MovieboxProvider : MainAPI() {
                 this.score = Score.from10(res.imdbRatingValue)
             }
         } else {
+            val episodesList = mutableListOf<Episode>()
+            val seasonsData = wrapper.resource?.seasons
+
+            if (!seasonsData.isNullOrEmpty()) {
+                seasonsData.forEach { season ->
+                    val sNum = season.se ?: 1
+                    val maxEp = season.maxEp ?: 0
+                    if (maxEp > 0) {
+                        for (eNum in 1..maxEp) {
+                            episodesList.add(
+                                newEpisode(LinkData(res.subjectId ?: "", slug, sNum, eNum, true).toJson()) {
+                                    this.name = "Episode $eNum"
+                                    this.season = sNum
+                                    this.episode = eNum
+                                }
+                            )
+                        }
+                    }
+                }
+            } else if (!res.episodes.isNullOrEmpty()) {
+                res.episodes.forEach { ep ->
+                    episodesList.add(
+                        newEpisode(LinkData(res.subjectId ?: "", slug, ep.seasonNum ?: 1, ep.episodeNum ?: 1, true).toJson()) {
+                            this.name = ep.title
+                            this.season = ep.seasonNum
+                            this.episode = ep.episodeNum
+                        }
+                    )
+                }
+            }
+
             newTvSeriesLoadResponse(res.title ?: "", url, TvType.TvSeries, episodesList) {
                 this.posterUrl = res.cover?.url
                 this.plot = res.description
