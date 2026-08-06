@@ -24,30 +24,48 @@ class MovieboxProvider : MainAPI() {
 
     /*
      * ===================================================================
-     * CATATAN PERUBAHAN — hasil investigasi 2026-08-06
+     * CATATAN PENTING — hasil investigasi 2026-08-06
      * ===================================================================
-     * Header "Authorization: Bearer <JWT>" SUDAH DIHAPUS.
+     * API ini TIDAK KONSISTEN soal Authorization. Sudah dibuktikan lewat
+     * pengujian langsung per-endpoint:
      *
-     * Bukti: token lama terikat pada uid 6544730643964516232 yang sudah
-     * kehabisan kuota tonton gratis. Server tetap membalas HTTP 200 dengan
-     * code=0 message="ok", tetapi mengosongkan streams:
+     *   /subject/search  -> WAJIB token. Tanpa token: HTTP 400 "invalid token"
+     *   /home, /detail   -> token opsional (jalan dengan maupun tanpa)
+     *   /subject/play    -> HARUS TANPA token
+     *
+     * Sebab /subject/play menolak token: uid 6544730643964516232 sudah
+     * kehabisan kuota tonton gratis. Server membalas HTTP 200 code=0 "ok"
+     * tetapi mengosongkan streams:
      *
      *   dengan token   -> {"limited":true,  "freeNum":3,   "streams":[]}
      *   tanpa token    -> {"limited":false, "freeNum":999, "streams":[...]}
      *
-     * Jadi header inilah satu-satunya penyebab playback gagal. Endpoint,
-     * format JSON, host API, dan CDN semuanya tidak berubah.
+     * Karena itu header dipisah jadi dua fungsi di bawah. JANGAN disatukan.
      *
-     * JANGAN menambahkan kembali Authorization tanpa token yang benar-benar
-     * baru dan belum kena kuota.
+     * MASA BERLAKU TOKEN: exp = 2026-09-25 04:43:22 UTC.
+     * Setelah tanggal itu search & home akan mati dengan "invalid token".
      * ===================================================================
      */
+    private val bearerToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjY1NDQ3MzA2NDM5NjQ1MTYyMzIsImF0cCI6MywiZXh0IjoiMTc4MjUzNTQwMiIsImV4cCI6MTc5MDMxMTQwMiwiaWF0IjoxNzgyNTM1MTAyfQ.d2WpLFeF0erMdSlaaM1RMgnpyB4j1R1s2xVcY6a2Ut8"
+
+    /** Header untuk home / search / detail / rec — DENGAN token. */
     private fun getApiHeaders(customReferer: String = "$mainUrl/"): Map<String, String> {
         return mapOf(
             "Accept" to "application/json",
             "x-client-info" to """{"timezone":"Asia/Jakarta"}""",
             "x-request-lang" to "en",
-            "x-source" to "",
+            "Origin" to mainUrl,
+            "Referer" to customReferer,
+            "Authorization" to "Bearer $bearerToken"
+        )
+    }
+
+    /** Header khusus playback — TANPA token, kalau tidak streams akan kosong. */
+    private fun getPlayHeaders(customReferer: String): Map<String, String> {
+        return mapOf(
+            "Accept" to "application/json",
+            "x-client-info" to """{"timezone":"Asia/Jakarta"}""",
+            "x-request-lang" to "en",
             "Origin" to mainUrl,
             "Referer" to customReferer
         )
@@ -249,9 +267,9 @@ class MovieboxProvider : MainAPI() {
                     "?id=${linkData.subjectId}&type=/movie/detail" +
                     "&detailSe=&detailEp=&lang=en"
         }
-        val reqHeaders = getApiHeaders(specificReferer)
+        val playHeaders = getPlayHeaders(specificReferer)
 
-        val response = app.get(playUrl, headers = reqHeaders)
+        val response = app.get(playUrl, headers = playHeaders)
         val playRes = tryParseJson<PlayResponse>(response.text)
         val playData = playRes?.data
 
@@ -333,14 +351,24 @@ class MovieboxProvider : MainAPI() {
                     "&id=${first.id}" +
                     "&subjectId=${linkData.subjectId}" +
                     "&detailPath=${linkData.detailPath}"
-            app.get(captionUrl, headers = reqHeaders)
-                .parsedSafe<CaptionResponse>()?.data?.captions?.forEach { cap ->
-                    if (!cap.url.isNullOrBlank()) {
-                        subtitleCallback.invoke(
-                            newSubtitleFile(cap.lanName ?: "Unknown", cap.url)
-                        )
-                    }
+            /*
+             * Endpoint caption belum diuji soal token, dan API ini terbukti
+             * berbeda-beda per-endpoint. Jadi coba tanpa token dulu (sejalan
+             * dengan sesi playback), lalu ulangi dengan token bila kosong.
+             */
+            val captions = app.get(captionUrl, headers = playHeaders)
+                .parsedSafe<CaptionResponse>()?.data?.captions
+                ?.takeIf { it.isNotEmpty() }
+                ?: app.get(captionUrl, headers = getApiHeaders(specificReferer))
+                    .parsedSafe<CaptionResponse>()?.data?.captions
+
+            captions?.forEach { cap ->
+                if (!cap.url.isNullOrBlank()) {
+                    subtitleCallback.invoke(
+                        newSubtitleFile(cap.lanName ?: "Unknown", cap.url)
+                    )
                 }
+            }
         }
 
         return true
