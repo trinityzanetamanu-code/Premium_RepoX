@@ -24,29 +24,12 @@ class MovieboxProvider : MainAPI() {
 
     /*
      * ===================================================================
-     * CATATAN PENTING — hasil investigasi 2026-08-06
+     * TOKEN BERHASIL DIPERBARUI — 2026-08-09
      * ===================================================================
-     * API ini TIDAK KONSISTEN soal Authorization. Sudah dibuktikan lewat
-     * pengujian langsung per-endpoint:
-     *
-     *   /subject/search  -> WAJIB token. Tanpa token: HTTP 400 "invalid token"
-     *   /home, /detail   -> token opsional (jalan dengan maupun tanpa)
-     *   /subject/play    -> HARUS TANPA token
-     *
-     * Sebab /subject/play menolak token: uid 6544730643964516232 sudah
-     * kehabisan kuota tonton gratis. Server membalas HTTP 200 code=0 "ok"
-     * tetapi mengosongkan streams:
-     *
-     *   dengan token   -> {"limited":true,  "freeNum":3,   "streams":[]}
-     *   tanpa token    -> {"limited":false, "freeNum":999, "streams":[...]}
-     *
-     * Karena itu header dipisah jadi dua fungsi di bawah. JANGAN disatukan.
-     *
-     * MASA BERLAKU TOKEN: exp = 2026-09-25 04:43:22 UTC.
-     * Setelah tanggal itu search & home akan mati dengan "invalid token".
+     * Token diambil dari sesi aktif netfilm/moviebox.
      * ===================================================================
      */
-    private val bearerToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjY1NDQ3MzA2NDM5NjQ1MTYyMzIsImF0cCI6MywiZXh0IjoiMTc4MjUzNTQwMiIsImV4cCI6MTc5Mzk5MzM1NSwiaWF0IjoxNzgyNTM1MTAyfQ.d2WpLFeF0erMdSlaaM1RMgnpyB4j1R1s2xVcY6a2Ut8"
+    private val bearerToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjU4MDg2MzQwNDAzOTY3OTQ5MjgsImF0cCI6MywiZXh0IjoiMTc4NjIxNzM1NSIsImV4cCI6MTc5Mzk5MzM1NSwiaWF0IjoxNzg2MjE3MDU1fQ.MumftTE0k8I-DbOaQtfPYiuubVJa_IXQJnN_JuXPadI"
 
     /** Header untuk home / search / detail / rec — DENGAN token. */
     private fun getApiHeaders(customReferer: String = "$mainUrl/"): Map<String, String> {
@@ -79,7 +62,11 @@ class MovieboxProvider : MainAPI() {
     data class BannerItem(@param:JsonProperty("subject") val subject: Subject?)
 
     data class SearchApiResponse(@param:JsonProperty("data") val data: SearchData?)
-    data class SearchData(@param:JsonProperty("subjectList") val subjectList: List<Subject>?, @param:JsonProperty("items") val items: List<Subject>?, @param:JsonProperty("list") val list: List<Subject>?)
+    data class SearchData(
+        @param:JsonProperty("subjectList") val subjectList: List<Subject>?, 
+        @param:JsonProperty("items") val items: List<Subject>?, 
+        @param:JsonProperty("list") val list: List<Subject>?
+    )
     data class Subject(@param:JsonProperty("title") val title: String?, @param:JsonProperty("subjectId") val subjectId: String?, @param:JsonProperty("subjectType") val subjectType: Int?, @param:JsonProperty("detailPath") val detailPath: String?, @param:JsonProperty("releaseDate") val releaseDate: String?, @param:JsonProperty("cover") val cover: ImageInfo?)
     data class ImageInfo(@param:JsonProperty("url") val url: String?)
 
@@ -159,13 +146,27 @@ class MovieboxProvider : MainAPI() {
             "subjectType" to 0
         ).toJson().toRequestBody(RequestBodyTypes.JSON.toMediaTypeOrNull())
 
-        val response = app.post(
+        // 1. Coba request dengan Bearer Token
+        var response = app.post(
             apiUrl,
             headers = getApiHeaders(),
             requestBody = payload
         ).parsedSafe<SearchApiResponse>()
 
-        val list = response?.data?.items ?: response?.data?.subjectList ?: emptyList()
+        // 2. Fallback: Jika token ditolak/gagal, coba request tanpa token
+        if (response?.data == null) {
+            response = app.post(
+                apiUrl,
+                headers = getPlayHeaders("$mainUrl/"),
+                requestBody = payload
+            ).parsedSafe<SearchApiResponse>()
+        }
+
+        val list = response?.data?.items 
+            ?: response?.data?.subjectList 
+            ?: response?.data?.list 
+            ?: emptyList()
+
         return list.mapNotNull { it.toSearchResponse() }
     }
 
@@ -186,24 +187,12 @@ class MovieboxProvider : MainAPI() {
         val seasonsData = wrapper.resource?.seasons.orEmpty()
         val legacyEpisodes = res.episodes.orEmpty()
 
-        // Item tunggal: satu musim dengan se=0 DAN maxEp=0.
         val isSingleItem = seasonsData.size == 1 &&
                 (seasonsData[0].se ?: 0) == 0 &&
                 (seasonsData[0].maxEp ?: 0) == 0
 
         val episodesList = mutableListOf<Episode>()
 
-        /*
-         * =============================================================
-         * PENENTUAN EPISODE (Diperbaiki)
-         * =============================================================
-         * 1. Utamakan array `episodes` eksplisit dari API jika ada.
-         *    Ini menyelesaikan kasus seperti "The Manager 2026" yang
-         *    episodenya tidak mulai dari 1 (contoh: 379..409).
-         * 2. Jika array `episodes` kosong, gunakan fallback loop `1..maxEp`
-         *    dari `seasonsData`.
-         * =============================================================
-         */
         if (legacyEpisodes.isNotEmpty()) {
             val fallbackSeason = seasonsData.firstOrNull()?.se?.takeIf { it > 0 } ?: 1
 
