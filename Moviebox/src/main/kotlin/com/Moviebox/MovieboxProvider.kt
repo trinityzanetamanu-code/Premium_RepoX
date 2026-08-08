@@ -26,8 +26,6 @@ class MovieboxProvider : MainAPI() {
      * ===================================================================
      * TOKEN BERHASIL DIPERBARUI — 2026-08-09
      * ===================================================================
-     * Token diambil dari sesi aktif netfilm/moviebox.
-     * ===================================================================
      */
     private val bearerToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjU4MDg2MzQwNDAzOTY3OTQ5MjgsImF0cCI6MywiZXh0IjoiMTc4NjIxNzM1NSIsImV4cCI6MTc5Mzk5MzM1NSwiaWF0IjoxNzg2MjE3MDU1fQ.MumftTE0k8I-DbOaQtfPYiuubVJa_IXQJnN_JuXPadI"
 
@@ -75,7 +73,14 @@ class MovieboxProvider : MainAPI() {
     data class DetailData(@param:JsonProperty("subjectId") val subjectId: String?, @param:JsonProperty("title") val title: String?, @param:JsonProperty("description") val description: String?, @param:JsonProperty("releaseDate") val releaseDate: String?, @param:JsonProperty("cover") val cover: ImageInfo?, @param:JsonProperty("imdbRatingValue") val imdbRatingValue: String?, @param:JsonProperty("subjectType") val subjectType: Int?, @param:JsonProperty("episodes") val episodes: List<EpisodeInfo>?)
     data class Star(@param:JsonProperty("name") val name: String?, @param:JsonProperty("avatarUrl") val avatarUrl: String?, @param:JsonProperty("character") val character: String?)
     data class ResourceData(@param:JsonProperty("seasons") val seasons: List<SeasonDataApi>?)
-    data class SeasonDataApi(@param:JsonProperty("se") val se: Int?, @param:JsonProperty("maxEp") val maxEp: Int?)
+    
+    // Menambahkan minEp & startEp untuk menangani series yang episode terawalnya bukan episode 1
+    data class SeasonDataApi(
+        @param:JsonProperty("se") val se: Int?, 
+        @param:JsonProperty("maxEp") val maxEp: Int?,
+        @param:JsonProperty("minEp") val minEp: Int? = null,
+        @param:JsonProperty("startEp") val startEp: Int? = null
+    )
     data class EpisodeInfo(@param:JsonProperty("episodeId") val episodeId: String?, @param:JsonProperty("title") val title: String?, @param:JsonProperty("episodeNum") val episodeNum: Int?, @param:JsonProperty("seasonNum") val seasonNum: Int?)
 
     data class RecResponse(@param:JsonProperty("data") val data: RecData?)
@@ -146,14 +151,12 @@ class MovieboxProvider : MainAPI() {
             "subjectType" to 0
         ).toJson().toRequestBody(RequestBodyTypes.JSON.toMediaTypeOrNull())
 
-        // 1. Coba request dengan Bearer Token
         var response = app.post(
             apiUrl,
             headers = getApiHeaders(),
             requestBody = payload
         ).parsedSafe<SearchApiResponse>()
 
-        // 2. Fallback: Jika token ditolak/gagal, coba request tanpa token
         if (response?.data == null) {
             response = app.post(
                 apiUrl,
@@ -212,15 +215,22 @@ class MovieboxProvider : MainAPI() {
             if (!isSingleItem) {
                 seasonsData.forEach { season ->
                     val sNum = season.se ?: 0
-                    val epCount = (season.maxEp ?: 0).coerceAtLeast(1)
-                    for (eNum in 1..epCount) {
-                        episodesList.add(
-                            newEpisode(LinkData(res.subjectId ?: "", slug, sNum, eNum, true).toJson()) {
-                                this.name = "Episode $eNum"
-                                this.season = if (sNum > 0) sNum else 1
-                                this.episode = eNum
-                            }
-                        )
+                    val maxEpisode = season.maxEp ?: 0
+                    // Gunakan minEp dari API jika ada, default ke 1 jika tidak ada/null
+                    val minEpisode = season.minEp?.takeIf { it > 0 } 
+                        ?: season.startEp?.takeIf { it > 0 } 
+                        ?: 1
+
+                    if (maxEpisode >= minEpisode) {
+                        for (eNum in minEpisode..maxEpisode) {
+                            episodesList.add(
+                                newEpisode(LinkData(res.subjectId ?: "", slug, sNum, eNum, true).toJson()) {
+                                    this.name = "Episode $eNum"
+                                    this.season = if (sNum > 0) sNum else 1
+                                    this.episode = eNum
+                                }
+                            )
+                        }
                     }
                 }
             }
