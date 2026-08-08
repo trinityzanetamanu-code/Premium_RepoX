@@ -46,7 +46,7 @@ class MovieboxProvider : MainAPI() {
      * Setelah tanggal itu search & home akan mati dengan "invalid token".
      * ===================================================================
      */
-    private val bearerToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjY1NDQ3MzA2NDM5NjQ1MTYyMzIsImF0cCI6MywiZXh0IjoiMTc4MjUzNTQwMiIsImV4cCI6MTc5MDMxMTQwMiwiaWF0IjoxNzgyNTM1MTAyfQ.d2WpLFeF0erMdSlaaM1RMgnpyB4j1R1s2xVcY6a2Ut8"
+    private val bearerToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjY1NDQ3MzA2NDM5NjQ1MTYyMzIsImF0cCI6MywiZXh0IjoiMTc4MjUzNTQwMiIsImV4cCI6MTc5Mzk5MzM1NSwiaWF0IjoxNzgyNTM1MTAyfQ.d2WpLFeF0erMdSlaaM1RMgnpyB4j1R1s2xVcY6a2Ut8"
 
     /** Header untuk home / search / detail / rec — DENGAN token. */
     private fun getApiHeaders(customReferer: String = "$mainUrl/"): Map<String, String> {
@@ -102,8 +102,6 @@ class MovieboxProvider : MainAPI() {
         @param:JsonProperty("isTv") val isTv: Boolean = false
     )
 
-    // PlayResponse diperluas: code/message/limited/freeNum kini DIBACA,
-    // supaya kegagalan berikutnya bisa didiagnosis tanpa curl.
     data class PlayResponse(
         @param:JsonProperty("code") val code: Int?,
         @param:JsonProperty("message") val message: String?,
@@ -120,7 +118,6 @@ class MovieboxProvider : MainAPI() {
         @param:JsonProperty("vipLocked") val vipLocked: Boolean?
     )
 
-    // Field baru sesuai respons asli server
     data class StreamItem(
         @param:JsonProperty("id") val id: String?,
         @param:JsonProperty("url") val url: String?,
@@ -186,24 +183,6 @@ class MovieboxProvider : MainAPI() {
             if (star.name != null) ActorData(actor = Actor(star.name, star.avatarUrl), roleString = star.character) else null
         }
 
-        /*
-         * =============================================================
-         * PENENTUAN PASANGAN (se, ep) — diperbaiki 2026-08-07
-         * =============================================================
-         * SUMBER KEBENARAN adalah resource.seasons, BUKAN subjectType.
-         *
-         * Terbukti lewat pengujian 60 judul lintas subjectType:
-         *   aturan berbasis seasons : 59/60 berhasil (98,3%)
-         *   logika lama (subjectType): 38/60 berhasil (63,3%)
-         *   rincian tipe 6 (Music)  : 20/20 vs 1/20
-         *
-         * subjectType tidak konsisten. Contoh nyata:
-         *   avatar-KdJVp5CwFH3  -> subjectType=1, seasons se=2 & se=3
-         *   wrestlemania-vegas  -> subjectType=1, seasons se=1 maxEp=1
-         *   21-days-with-snake  -> subjectType=1, seasons se=0 maxEp=10
-         * Ketiganya "Movie" menurut API tapi butuh se/ep non-(0,0).
-         * =============================================================
-         */
         val seasonsData = wrapper.resource?.seasons.orEmpty()
         val legacyEpisodes = res.episodes.orEmpty()
 
@@ -214,35 +193,47 @@ class MovieboxProvider : MainAPI() {
 
         val episodesList = mutableListOf<Episode>()
 
-        if (seasonsData.isNotEmpty()) {
+        /*
+         * =============================================================
+         * PENENTUAN EPISODE (Diperbaiki)
+         * =============================================================
+         * 1. Utamakan array `episodes` eksplisit dari API jika ada.
+         *    Ini menyelesaikan kasus seperti "The Manager 2026" yang
+         *    episodenya tidak mulai dari 1 (contoh: 379..409).
+         * 2. Jika array `episodes` kosong, gunakan fallback loop `1..maxEp`
+         *    dari `seasonsData`.
+         * =============================================================
+         */
+        if (legacyEpisodes.isNotEmpty()) {
+            val fallbackSeason = seasonsData.firstOrNull()?.se?.takeIf { it > 0 } ?: 1
+
+            legacyEpisodes.forEach { ep ->
+                val epNum = ep.episodeNum ?: 1
+                val sNum = ep.seasonNum?.takeIf { it > 0 } ?: fallbackSeason
+
+                episodesList.add(
+                    newEpisode(LinkData(res.subjectId ?: "", slug, sNum, epNum, true).toJson()) {
+                        this.name = ep.title?.takeIf { it.isNotBlank() } ?: "Episode $epNum"
+                        this.season = sNum
+                        this.episode = epNum
+                    }
+                )
+            }
+        } else if (seasonsData.isNotEmpty()) {
             if (!isSingleItem) {
                 seasonsData.forEach { season ->
                     val sNum = season.se ?: 0
-                    // coerceAtLeast(1): musim dengan maxEp=0 tetap menghasilkan
-                    // satu episode, supaya tidak menghasilkan daftar kosong.
                     val epCount = (season.maxEp ?: 0).coerceAtLeast(1)
                     for (eNum in 1..epCount) {
                         episodesList.add(
                             newEpisode(LinkData(res.subjectId ?: "", slug, sNum, eNum, true).toJson()) {
                                 this.name = "Episode $eNum"
-                                // sNum=0 valid untuk API, tapi tampilkan sebagai 1 di UI.
                                 this.season = if (sNum > 0) sNum else 1
                                 this.episode = eNum
                             }
                         )
                     }
                 }
-            }
-        } else if (legacyEpisodes.isNotEmpty()) {
-            // Jalur lama, dipertahankan apa adanya.
-            legacyEpisodes.forEach { ep ->
-                episodesList.add(
-                    newEpisode(LinkData(res.subjectId ?: "", slug, ep.seasonNum ?: 1, ep.episodeNum ?: 1, true).toJson()) {
-                        this.name = ep.title
-                        this.season = ep.seasonNum
-                        this.episode = ep.episodeNum
-                    }
-                )
             }
         }
 
@@ -270,10 +261,6 @@ class MovieboxProvider : MainAPI() {
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val linkData = tryParseJson<LinkData>(data) ?: return false
 
-        /*
-         * streamSignType=1 mengikuti klien web resmi. Tidak terbukti
-         * mengubah hasil, tapi dipertahankan demi kesamaan dengan klien asli.
-         */
         val playUrl = "$apiBaseUrl/subject/play" +
                 "?subjectId=${linkData.subjectId}" +
                 "&se=${linkData.season}" +
@@ -281,12 +268,6 @@ class MovieboxProvider : MainAPI() {
                 "&detailPath=${linkData.detailPath}" +
                 "&streamSignType=1"
 
-        /*
-         * Referer WAJIB berupa URL halaman videoPlayPage.
-         * Terbukti: dengan referer halaman detail / root / tanpa referer,
-         * server membalas hasResource=false dan streams kosong.
-         * Jangan disederhanakan.
-         */
         val specificReferer = if (linkData.isTv || linkData.season > 0) {
             "$mainUrl/spa/videoPlayPage/tv/${linkData.detailPath}" +
                     "?id=${linkData.subjectId}&type=/tv/detail" +
@@ -302,8 +283,6 @@ class MovieboxProvider : MainAPI() {
         val playRes = tryParseJson<PlayResponse>(response.text)
         val playData = playRes?.data
 
-        // Gabungkan ketiga daftar. Saat ini hanya "streams" yang terisi,
-        // tapi dash/hls sudah ada di skema server.
         val allStreams = buildList {
             playData?.streams?.let { addAll(it) }
             playData?.dash?.let { addAll(it) }
@@ -311,11 +290,9 @@ class MovieboxProvider : MainAPI() {
         }.filter { !it.url.isNullOrBlank() }
 
         if (allStreams.isEmpty()) {
-            // Diagnostik eksplisit: server membalas 200 "ok" walau menolak.
             val reason = when {
                 playData?.limited == true ->
-                    "Kuota tonton gratis habis (freeNum=${playData.freeNum}). " +
-                    "Server menolak memberikan stream untuk sesi ini."
+                    "Kuota tonton gratis habis (freeNum=${playData.freeNum}). Server menolak memberikan stream untuk sesi ini."
                 playData?.hasResource == false ->
                     "Server melaporkan hasResource=false. Referer kemungkinan tidak diterima."
                 playData?.vipLocked == true ->
@@ -335,14 +312,6 @@ class MovieboxProvider : MainAPI() {
             val isHls = stream.format?.contains("M3U8", true) == true ||
                     streamUrl.contains(".m3u8", true)
 
-            /*
-             * CDN (hakunaymatata.com) WAJIB menerima Referer.
-             * Terbukti: tanpa Referer -> HTTP 429; dengan Referer -> HTTP 206.
-             * User-Agent tidak berpengaruh.
-             *
-             * signCookie / signHeaderKey saat ini kosong, tetapi disertakan
-             * kalau suatu saat server mulai mengisinya.
-             */
             val cdnHeaders = mutableMapOf("Referer" to "$mainUrl/")
             if (!stream.signCookie.isNullOrBlank()) {
                 cdnHeaders["Cookie"] = stream.signCookie
@@ -373,18 +342,13 @@ class MovieboxProvider : MainAPI() {
             )
         }
 
-        // Subtitle diambil sekali saja, dari stream pertama yang valid.
         allStreams.firstOrNull { !it.id.isNullOrBlank() }?.let { first ->
             val captionUrl = "$apiBaseUrl/subject/caption" +
                     "?format=${first.format}" +
                     "&id=${first.id}" +
                     "&subjectId=${linkData.subjectId}" +
                     "&detailPath=${linkData.detailPath}"
-            /*
-             * Endpoint caption belum diuji soal token, dan API ini terbukti
-             * berbeda-beda per-endpoint. Jadi coba tanpa token dulu (sejalan
-             * dengan sesi playback), lalu ulangi dengan token bila kosong.
-             */
+
             val captions = app.get(captionUrl, headers = playHeaders)
                 .parsedSafe<CaptionResponse>()?.data?.captions
                 ?.takeIf { it.isNotEmpty() }
