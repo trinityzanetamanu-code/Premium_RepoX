@@ -8,6 +8,8 @@ import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import android.util.Base64
+import java.net.URLEncoder
+import java.net.URLDecoder
 
 class MovieBoxProvider : MainAPI() {
     override var mainUrl = "https://api3.aoneroom.com"
@@ -54,6 +56,14 @@ class MovieBoxProvider : MainAPI() {
         private fun generateGuestToken(ts: String): String {
             val revTs = ts.reversed()
             return "$ts,${md5(revTs)}"
+        }
+
+        private fun encodeParam(str: String?): String {
+            return if (str.isNullOrBlank()) "" else URLEncoder.encode(str, "UTF-8")
+        }
+
+        private fun decodeParam(str: String?): String {
+            return if (str.isNullOrBlank()) "" else URLDecoder.decode(str, "UTF-8")
         }
     }
 
@@ -112,32 +122,33 @@ class MovieBoxProvider : MainAPI() {
         val homeItems = dataObj.subjects?.mapNotNull { item ->
             val subjectId = item.subjectId ?: return@mapNotNull null
             val title = item.title ?: "Unknown"
-            val posterUrl = item.cover?.url
+            val posterUrl = item.cover?.url ?: ""
+            val subjectType = item.subjectType ?: 1
 
-            newMovieSearchResponse(title, subjectId, TvType.Movie) {
-                this.posterUrl = posterUrl
+            // Format URL terstruktur membawa metadata
+            val detailUrl = "$mainUrl/detail?id=$subjectId&title=${encodeParam(title)}&poster=${encodeParam(posterUrl)}&type=$subjectType"
+
+            if (subjectType == 2) {
+                newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
+                    this.posterUrl = posterUrl
+                }
+            } else {
+                newMovieSearchResponse(title, detailUrl, TvType.Movie) {
+                    this.posterUrl = posterUrl
+                }
             }
         } ?: emptyList()
 
         return newHomePageResponse(request.name, homeItems)
     }
 
-    // Data Class untuk Komunikasi Parameter Episode
-    data class EpData(
-        val subjectId: String,
-        val se: Int,
-        val ep: Int
-    )
-
-    // 2. LOAD (DETAIL & EPISODE GENERATION VIA SEASON-INFO)
-    override suspend fun load(url: String): LoadResponse? {
-        val subjectId = url.trim()
+    // 2. SEARCH (PENSETAN & PENCARIAN)
+    override suspend fun search(query: String): List<SearchResponse>? {
         val bearerToken = getBearerToken() ?: return null
-
         val ts = System.currentTimeMillis().toString()
-        val path = "/wefeed-mobile-bff/subject-api/season-info"
-        val query = "subjectId=$subjectId"
-        val fullUrl = "$mainUrl$path?$query"
+        val path = "/wefeed-mobile-bff/search/search-list"
+        val queryStr = "keyword=${encodeParam(query)}&page=1&perPage=20"
+        val fullUrl = "$mainUrl$path?$queryStr"
 
         val response = app.get(
             fullUrl,
@@ -147,16 +158,91 @@ class MovieBoxProvider : MainAPI() {
                 "accept" to "application/json",
                 "content-type" to "application/json",
                 "x-client-token" to generateGuestToken(ts),
-                "x-tr-signature" to generateSignature("$path?$query", ts),
+                "x-tr-signature" to generateSignature("$path?$queryStr", ts),
                 "x-client-info" to CLIENT_INFO,
                 "x-client-status" to "0"
             )
         )
 
-        val seasonRes = response.parsedSafe<SeasonInfoResponse>()
-        val seasonData = seasonRes?.data
-        val seasons = seasonData?.seasons
+        val searchRes = response.parsedSafe<SearchResponseData>()
+        val items = searchRes?.data?.list ?: searchRes?.data?.subjects
 
+        return items?.mapNotNull { item ->
+            val subjectId = item.subjectId ?: return@mapNotNull null
+            val title = item.title ?: "Unknown"
+            val posterUrl = item.cover?.url ?: ""
+            val subjectType = item.subjectType ?: 1
+
+            val detailUrl = "$mainUrl/detail?id=$subjectId&title=${encodeParam(title)}&poster=${encodeParam(posterUrl)}&type=$subjectType"
+
+            if (subjectType == 2) {
+                newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
+                    this.posterUrl = posterUrl
+                }
+            } else {
+                newMovieSearchResponse(title, detailUrl, TvType.Movie) {
+                    this.posterUrl = posterUrl
+                }
+            }
+        }
+    }
+
+    data class EpData(
+        val subjectId: String,
+        val se: Int,
+        val ep: Int
+    )
+
+    // 3. LOAD (DETAIL & HALAMAN ITEM)
+    override suspend fun load(url: String): LoadResponse? {
+        // Pembersihan ID dari String URL mentah
+        val cleanId = when {
+            url.contains("id=") -> url.substringAfter("id=").substringBefore("&")
+            url.contains("/") -> url.substringAfterLast("/").substringBefore("?")
+            else -> url.trim()
+        }
+
+        val params = try {
+            if (url.contains("?")) {
+                url.substringAfter("?").split("&").associate {
+                    val pair = it.split("=")
+                    if (pair.size == 2) pair[0] to decodeParam(pair[1]) else "" to ""
+                }
+            } else emptyMap()
+        } catch (_: Exception) { emptyMap() }
+
+        val rawTitle = params["title"]?.takeIf { it.isNotBlank() }
+        val poster = params["poster"]?.takeIf { it.isNotBlank() }
+        val typeInt = params["type"]?.toIntOrNull() ?: 1
+
+        val bearerToken = getBearerToken()
+
+        var seasons: List<SeasonItem>? = null
+        if (bearerToken != null) {
+            val ts = System.currentTimeMillis().toString()
+            val path = "/wefeed-mobile-bff/subject-api/season-info"
+            val query = "subjectId=$cleanId"
+            val fullUrl = "$mainUrl$path?$query"
+
+            val response = app.get(
+                fullUrl,
+                headers = mapOf(
+                    "authorization" to "Bearer $bearerToken",
+                    "user-agent" to CS_USER_AGENT,
+                    "accept" to "application/json",
+                    "content-type" to "application/json",
+                    "x-client-token" to generateGuestToken(ts),
+                    "x-tr-signature" to generateSignature("$path?$query", ts),
+                    "x-client-info" to CLIENT_INFO,
+                    "x-client-status" to "0"
+                )
+            )
+
+            val seasonRes = response.parsedSafe<SeasonInfoResponse>()
+            seasons = seasonRes?.data?.seasons
+        }
+
+        val displayTitle = if (!rawTitle.isNullOrBlank()) rawTitle else "MovieBox Content"
         val episodesList = mutableListOf<Episode>()
 
         seasons?.forEach { seasonItem ->
@@ -165,7 +251,7 @@ class MovieBoxProvider : MainAPI() {
 
             for (epNum in 1..maxEp) {
                 episodesList.add(
-                    newEpisode(EpData(subjectId, seNum, epNum)) {
+                    newEpisode(EpData(cleanId, seNum, epNum)) {
                         this.name = "Episode $epNum"
                         this.season = seNum
                         this.episode = epNum
@@ -174,14 +260,31 @@ class MovieBoxProvider : MainAPI() {
             }
         }
 
-        if (episodesList.isEmpty()) {
-            return newMovieLoadResponse(subjectId, url, TvType.Movie, EpData(subjectId, 1, 1))
-        }
+        val isSeries = typeInt == 2 || episodesList.size > 1
 
-        return newTvSeriesLoadResponse(subjectId, url, TvType.TvSeries, episodesList)
+        return if (isSeries) {
+            if (episodesList.isEmpty()) {
+                episodesList.add(
+                    newEpisode(EpData(cleanId, 1, 1)) {
+                        this.name = "Episode 1"
+                        this.season = 1
+                        this.episode = 1
+                    }
+                )
+            }
+            newTvSeriesLoadResponse(displayTitle, url, TvType.TvSeries, episodesList) {
+                this.posterUrl = poster
+                this.plot = "Saksikan $displayTitle di MovieBox."
+            }
+        } else {
+            newMovieLoadResponse(displayTitle, url, TvType.Movie, EpData(cleanId, 1, 1)) {
+                this.posterUrl = poster
+                this.plot = "Saksikan $displayTitle di MovieBox."
+            }
+        }
     }
 
-    // 3. INTERCEPTOR COOKIE EXOPLAYER
+    // 4. INTERCEPTOR COOKIE EXOPLAYER
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
         return Interceptor { chain ->
             val request = chain.request()
@@ -198,7 +301,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 4. LOAD LINKS (PLAYBACK STREAM VIA PLAY-INFO)
+    // 5. LOAD LINKS (PEMUTARAN)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -253,7 +356,7 @@ class MovieBoxProvider : MainAPI() {
         return true
     }
 
-    // MODELS
+    // DATA MODELS
     data class RankingResponse(val code: Int?, val data: RankingData?)
     data class RankingData(
         val categoryList: List<CategoryItem>?,
@@ -263,9 +366,16 @@ class MovieBoxProvider : MainAPI() {
     data class SubjectItem(
         val subjectId: String?,
         val title: String?,
-        val cover: CoverItem?
+        val cover: CoverItem?,
+        val subjectType: Int?
     )
     data class CoverItem(val url: String?)
+
+    data class SearchResponseData(val code: Int?, val data: SearchInnerData?)
+    data class SearchInnerData(
+        val list: List<SubjectItem>?,
+        val subjects: List<SubjectItem>?
+    )
 
     data class SeasonInfoResponse(val code: Int?, val data: SeasonInfoData?)
     data class SeasonInfoData(
