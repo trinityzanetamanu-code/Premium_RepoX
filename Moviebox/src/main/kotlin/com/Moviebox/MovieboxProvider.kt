@@ -236,9 +236,12 @@ class MovieBoxProvider : MainAPI() {
         val trailerUrl = subject.trailer?.videoAddress?.url
         val genreTags = subject.genre?.split(",")?.map { it.trim() } ?: emptyList()
 
-        val castActorsPair = subject.staffList?.mapNotNull { staff ->
+        val castActors = subject.staffList?.mapNotNull { staff ->
             val staffName = staff.name ?: return@mapNotNull null
-            Actor(staffName, staff.avatarUrl) to staff.character
+            ActorData(
+                actor = Actor(staffName, staff.avatarUrl),
+                roleString = staff.character
+            )
         } ?: emptyList()
 
         val tsSeason = System.currentTimeMillis().toString()
@@ -297,10 +300,10 @@ class MovieBoxProvider : MainAPI() {
                 this.plot = description
                 this.year = yearInt
                 this.score = Score.from(ratingStr, 10)
-                this.addActors(castActorsPair)
+                this.actors = castActors
                 this.tags = genreTags
                 if (!trailerUrl.isNullOrBlank()) {
-                    this.addTrailer(trailerUrl, referer = mainUrl, addRaw = true)
+                    this.trailers.add(TrailerData(trailerUrl, mainUrl, true))
                 }
             }
         } else {
@@ -309,10 +312,10 @@ class MovieBoxProvider : MainAPI() {
                 this.plot = description
                 this.year = yearInt
                 this.score = Score.from(ratingStr, 10)
-                this.addActors(castActorsPair)
+                this.actors = castActors
                 this.tags = genreTags
                 if (!trailerUrl.isNullOrBlank()) {
-                    this.addTrailer(trailerUrl, referer = mainUrl, addRaw = true)
+                    this.trailers.add(TrailerData(trailerUrl, mainUrl, true))
                 }
             }
         }
