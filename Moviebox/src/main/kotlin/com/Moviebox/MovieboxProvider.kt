@@ -240,7 +240,7 @@ class MovieBoxProvider : MainAPI() {
             val staffName = staff.name ?: return@mapNotNull null
             ActorData(
                 actor = Actor(staffName, staff.avatarUrl),
-                role = staff.character
+                role = ActorRole.Main
             )
         } ?: emptyList()
 
@@ -303,13 +303,17 @@ class MovieBoxProvider : MainAPI() {
                 this.actors = castActors
                 this.tags = genreTags
                 if (!trailerUrl.isNullOrBlank()) {
-                    this.trailers = listOf(
-                        ExtractorLink(
-                            source = name,
-                            name = "Trailer",
-                            url = trailerUrl,
-                            referer = mainUrl,
-                            quality = Qualities.Unknown.value
+                    this.trailers.add(
+                        TrailerData(
+                            extractorLink = newExtractorLink(
+                                source = name,
+                                name = "Trailer",
+                                url = trailerUrl,
+                                type = ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = mainUrl
+                                this.quality = Qualities.Unknown.value
+                            }
                         )
                     )
                 }
@@ -323,13 +327,17 @@ class MovieBoxProvider : MainAPI() {
                 this.actors = castActors
                 this.tags = genreTags
                 if (!trailerUrl.isNullOrBlank()) {
-                    this.trailers = listOf(
-                        ExtractorLink(
-                            source = name,
-                            name = "Trailer",
-                            url = trailerUrl,
-                            referer = mainUrl,
-                            quality = Qualities.Unknown.value
+                    this.trailers.add(
+                        TrailerData(
+                            extractorLink = newExtractorLink(
+                                source = name,
+                                name = "Trailer",
+                                url = trailerUrl,
+                                type = ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = mainUrl
+                                this.quality = Qualities.Unknown.value
+                            }
                         )
                     )
                 }
@@ -407,19 +415,20 @@ class MovieBoxProvider : MainAPI() {
         val cleanCookie = rawCookie.trimEnd(';')
 
         callback(
-            ExtractorLink(
+            newExtractorLink(
                 source = name,
                 name = "MovieBox (DASH HEVC)",
                 url = mpdUrl,
-                referer = mainUrl,
-                quality = Qualities.P1080.value,
-                type = ExtractorLinkType.DASH,
-                headers = mapOf(
+                type = ExtractorLinkType.DASH
+            ) {
+                this.referer = mainUrl
+                this.quality = Qualities.P1080.value
+                this.headers = mapOf(
                     "User-Agent" to CS_USER_AGENT,
                     "Cookie" to cleanCookie,
                     "Referer" to mainUrl
                 )
-            )
+            }
         )
 
         return true
