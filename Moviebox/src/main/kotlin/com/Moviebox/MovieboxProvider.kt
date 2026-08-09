@@ -284,14 +284,14 @@ class MovieBoxProvider : MainAPI() {
                 this.posterUrl = poster
                 this.plot = descStr ?: "Saksikan $displayTitle di MovieBox."
                 this.year = yearInt
-                addScore(ratingStr, 10)
+                this.score = Score.from(ratingStr, 10)
             }
         } else {
             newMovieLoadResponse(displayTitle, url, TvType.Movie, EpData(cleanId, 0, 0, 1)) {
                 this.posterUrl = poster
                 this.plot = descStr ?: "Saksikan $displayTitle di MovieBox."
                 this.year = yearInt
-                addScore(ratingStr, 10)
+                this.score = Score.from(ratingStr, 10)
             }
         }
     }
@@ -313,7 +313,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 5. LOAD LINKS (PLAYBACK WITH RETRY FALLBACK FOR MOVIES & SERIES)
+    // 5. LOAD LINKS
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -323,7 +323,6 @@ class MovieBoxProvider : MainAPI() {
         val epData = AppUtils.tryParseJson<EpData>(data) ?: return false
         val bearerToken = getBearerToken() ?: return false
 
-        // Variasi parameter fallback untuk menjamin keterpenuhan Movie dan Series
         val candidatePairs = if (epData.subjectType == 1 || (epData.se == 0 && epData.ep == 0)) {
             listOf(0 to 0, 1 to 0, 1 to 1, 0 to 1)
         } else {
