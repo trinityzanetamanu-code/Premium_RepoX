@@ -236,11 +236,9 @@ class MovieBoxProvider : MainAPI() {
         val trailerUrl = subject.trailer?.videoAddress?.url
         val genreTags = subject.genre?.split(",")?.map { it.trim() } ?: emptyList()
 
-        val castActors = subject.staffList?.mapNotNull { staff ->
+        val castActorsPair = subject.staffList?.mapNotNull { staff ->
             val staffName = staff.name ?: return@mapNotNull null
-            ActorData(
-                actor = Actor(staffName, staff.avatarUrl)
-            )
+            Actor(staffName, staff.avatarUrl) to staff.character
         } ?: emptyList()
 
         val tsSeason = System.currentTimeMillis().toString()
@@ -299,22 +297,10 @@ class MovieBoxProvider : MainAPI() {
                 this.plot = description
                 this.year = yearInt
                 this.score = Score.from(ratingStr, 10)
-                this.actors = castActors
+                this.addActors(castActorsPair)
                 this.tags = genreTags
                 if (!trailerUrl.isNullOrBlank()) {
-                    this.trailers.add(
-                        TrailerData(
-                            extractorLink = newExtractorLink(
-                                source = name,
-                                name = "Trailer",
-                                url = trailerUrl,
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = mainUrl
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                    )
+                    this.addTrailer(trailerUrl, referer = mainUrl, addRaw = true)
                 }
             }
         } else {
@@ -323,22 +309,10 @@ class MovieBoxProvider : MainAPI() {
                 this.plot = description
                 this.year = yearInt
                 this.score = Score.from(ratingStr, 10)
-                this.actors = castActors
+                this.addActors(castActorsPair)
                 this.tags = genreTags
                 if (!trailerUrl.isNullOrBlank()) {
-                    this.trailers.add(
-                        TrailerData(
-                            extractorLink = newExtractorLink(
-                                source = name,
-                                name = "Trailer",
-                                url = trailerUrl,
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = mainUrl
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                    )
+                    this.addTrailer(trailerUrl, referer = mainUrl, addRaw = true)
                 }
             }
         }
