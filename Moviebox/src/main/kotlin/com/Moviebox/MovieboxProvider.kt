@@ -1,10 +1,9 @@
-package com.moviebox
+package com.Moviebox
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.app
 import okhttp3.Interceptor
-import okhttp3.OkHttpClient
 import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -17,10 +16,9 @@ class MovieBoxProvider : MainAPI() {
     override var hasMainPage = true
 
     companion object {
-        private const val USER_AGENT = "com.community.oneroom/50020088 (Linux; U; Android 13; en_US; Samsung; Build/TQ3A.230901.001)"
+        private const val CS_USER_AGENT = "com.community.oneroom/50020088 (Linux; U; Android 13; en_US; Samsung; Build/TQ3A.230901.001)"
         private const val CLIENT_INFO = """{"package_name":"com.community.oneroom","version_name":"3.0.13.0325.03","version_code":50020088,"os":"android","os_version":"13","device_id":"71e0f7746936dc98","install_store":"ps","system_language":"en","net":"NETWORK_WIFI","region":"US","timezone":"Asia/Calcutta","sp_code":""}"""
         
-        // Key Secret HMAC (Double Base64 Decoded Key: 76iRl07s0xSN9jqmEWAt79EBJZulIQIsV64FZr2O)
         private val SECRET_BYTES: ByteArray by lazy {
             val step1 = String(Base64.decode("NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw==", Base64.DEFAULT), Charsets.UTF_8)
             Base64.decode(step1, Base64.DEFAULT)
@@ -46,38 +44,50 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // Helper Bootstrap Session untuk mendapatkan Bearer JWT Token
     private suspend fun getBearerToken(): String? {
         val ts = System.currentTimeMillis().toString()
         val path = "/wefeed-mobile-bff/tab/ranking-list"
         val query = "categoryType=4516404531735022304&page=1&perPage=1&tabId=0"
         val fullUrl = "$mainUrl$path?$query"
 
-        val guestToken = generateGuestToken(ts)
-        val signature = generateSignature("$path?$query", ts)
-
         val response = app.get(
             fullUrl,
             headers = mapOf(
-                "user-agent" to USER_AGENT,
+                "user-agent" to CS_USER_AGENT,
                 "accept" to "application/json",
                 "content-type" to "application/json",
-                "x-client-token" to guestToken,
-                "x-tr-signature" to signature,
+                "x-client-token" to generateGuestToken(ts),
+                "x-tr-signature" to generateSignature("$path?$query", ts),
                 "x-client-info" to CLIENT_INFO,
                 "x-client-status" to "0"
             )
         )
 
         val xUserHeader = response.headers["x-user"] ?: return null
-        val json = app.baseClient.newBuilder().build()
-        // Extract JWT dari JSON String {"token":"eyJ...", "userId":"..."}
         val tokenMatch = """"token"\s*:\s*"([^"]+)"""".toRegex().find(xUserHeader)
         return tokenMatch?.groupValues?.get(1)
     }
 
+    // 1. Menggunakan Interceptor untuk Menjamin Header Cookie pada OkHttpDataSource
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
+        return Interceptor { chain ->
+            val request = chain.request()
+            val cookie = extractorLink.headers["Cookie"]
+            if (!cookie.isNullOrBlank()) {
+                val newRequest = request.newBuilder()
+                    .header("Cookie", cookie)
+                    .header("User-Agent", CS_USER_AGENT)
+                    .build()
+                chain.proceed(newRequest)
+            } else {
+                chain.proceed(request)
+            }
+        }
+    }
+
+    // 2. Load Links Menggunakan Standards ExtractorLink
     override suspend fun loadLinks(
-        data: String, // subjectId, misal: "74738785354956752"
+        data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
@@ -87,22 +97,18 @@ class MovieBoxProvider : MainAPI() {
 
         val ts = System.currentTimeMillis().toString()
         val path = "/wefeed-mobile-bff/subject-api/play-info"
-        // Query Wajib Terurut Alfabetis
         val query = "ep=0&se=0&subjectId=$subjectId"
         val fullUrl = "$mainUrl$path?$query"
-
-        val guestToken = generateGuestToken(ts)
-        val signature = generateSignature("$path?$query", ts)
 
         val response = app.get(
             fullUrl,
             headers = mapOf(
                 "authorization" to "Bearer $bearerToken",
-                "user-agent" to USER_AGENT,
+                "user-agent" to CS_USER_AGENT,
                 "accept" to "application/json",
                 "content-type" to "application/json",
-                "x-client-token" to guestToken,
-                "x-tr-signature" to signature,
+                "x-client-token" to generateGuestToken(ts),
+                "x-tr-signature" to generateSignature("$path?$query", ts),
                 "x-client-info" to CLIENT_INFO,
                 "x-client-status" to "0"
             )
@@ -115,7 +121,6 @@ class MovieBoxProvider : MainAPI() {
         val rawCookie = stream.signCookie ?: return false
         val cleanCookie = rawCookie.trimEnd(';')
 
-        // Rakit ExtractorLink khusus DASH
         callback(
             ExtractorLink(
                 source = name,
@@ -125,7 +130,7 @@ class MovieBoxProvider : MainAPI() {
                 quality = Qualities.P1080.value,
                 type = ExtractorLinkType.DASH,
                 headers = mapOf(
-                    "User-Agent" to USER_AGENT,
+                    "User-Agent" to CS_USER_AGENT,
                     "Cookie" to cleanCookie,
                     "Referer" to mainUrl
                 )
@@ -135,17 +140,9 @@ class MovieBoxProvider : MainAPI() {
         return true
     }
 
-    // Data Classes untuk Response Parsing
-    data class PlayInfoResponse(
-        val code: Int?,
-        val message: String?,
-        val data: PlayData?
-    )
-
-    data class PlayData(
-        val streams: List<StreamItem>?
-    )
-
+    // Models
+    data class PlayInfoResponse(val code: Int?, val message: String?, val data: PlayData?)
+    data class PlayData(val streams: List<StreamItem>?)
     data class StreamItem(
         val format: String?,
         val id: String?,
