@@ -13,7 +13,13 @@ class MovieBoxProvider : MainAPI() {
     override var mainUrl = "https://api3.aoneroom.com"
     override var name = "MovieBox"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    
+    // AKTIFKAN MAIN PAGE
     override var hasMainPage = true
+
+    override val mainPage = mainPageOf(
+        "4516404531735022304" to "Trending Movies"
+    )
 
     companion object {
         private const val CS_USER_AGENT = "com.community.oneroom/50020088 (Linux; U; Android 13; en_US; Samsung; Build/TQ3A.230901.001)"
@@ -68,7 +74,54 @@ class MovieBoxProvider : MainAPI() {
         return tokenMatch?.groupValues?.get(1)
     }
 
-    // 1. Menggunakan Interceptor untuk Menjamin Header Cookie pada OkHttpDataSource
+    // --- IMPLEMENTASI GETMAINPAGE (BERANDA) ---
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse? {
+        val bearerToken = getBearerToken() ?: return null
+        val ts = System.currentTimeMillis().toString()
+        val path = "/wefeed-mobile-bff/tab/ranking-list"
+        val query = "categoryType=${request.data}&page=$page&perPage=20&tabId=0"
+        val fullUrl = "$mainUrl$path?$query"
+
+        val response = app.get(
+            fullUrl,
+            headers = mapOf(
+                "authorization" to "Bearer $bearerToken",
+                "user-agent" to CS_USER_AGENT,
+                "accept" to "application/json",
+                "content-type" to "application/json",
+                "x-client-token" to generateGuestToken(ts),
+                "x-tr-signature" to generateSignature("$path?$query", ts),
+                "x-client-info" to CLIENT_INFO,
+                "x-client-status" to "0"
+            )
+        )
+
+        val jsonRes = response.parsedSafe<RankingResponse>() ?: return null
+        val items = jsonRes.data?.list?.mapNotNull { item ->
+            val id = item.subjectId ?: return@mapNotNull null
+            val title = item.title ?: "Unknown"
+            val poster = item.cover?.url
+
+            newMovieSearchResponse(title, id, TvType.Movie) {
+                this.posterUrl = poster
+            }
+        } ?: emptyList()
+
+        return newHomePageResponse(request.name, items)
+    }
+
+    // --- IMPLEMENTASI LOAD (DETAIL ITEM) ---
+    override suspend fun load(url: String): LoadResponse? {
+        val subjectId = url.trim()
+        return newMovieLoadResponse(subjectId, subjectId, TvType.Movie, subjectId) {
+            this.posterUrl = ""
+        }
+    }
+
+    // --- INTERCEPTOR OKHTTP DATA SOURCE ---
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
         return Interceptor { chain ->
             val request = chain.request()
@@ -85,7 +138,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 2. Load Links Menggunakan Standards ExtractorLink
+    // --- LOAD LINKS ---
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -141,6 +194,11 @@ class MovieBoxProvider : MainAPI() {
     }
 
     // Models
+    data class RankingResponse(val code: Int?, val data: RankingData?)
+    data class RankingData(val list: List<RankingItem>?)
+    data class RankingItem(val subjectId: String?, val title: String?, val cover: CoverItem?)
+    data class CoverItem(val url: String?)
+
     data class PlayInfoResponse(val code: Int?, val message: String?, val data: PlayData?)
     data class PlayData(val streams: List<StreamItem>?)
     data class StreamItem(
