@@ -13,12 +13,19 @@ class MovieBoxProvider : MainAPI() {
     override var mainUrl = "https://api3.aoneroom.com"
     override var name = "MovieBox"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
-    
-    // AKTIFKAN MAIN PAGE
     override var hasMainPage = true
 
     override val mainPage = mainPageOf(
-        "4516404531735022304" to "Trending Movies"
+        "872031290915189720" to "Trending",
+        "8821254238245470240" to "Film",
+        "6528093688173053896" to "Indo Film",
+        "4380734070238626200" to "K-Drama",
+        "5283462032510044280" to "Indo Drama",
+        "8617025562613270856" to "Anime",
+        "1469286917119311888" to "Hollywood",
+        "8624142774394406504" to "C-Drama",
+        "5848753831881965888" to "Horror",
+        "1164329479448281992" to "Thai-Drama"
     )
 
     companion object {
@@ -53,7 +60,7 @@ class MovieBoxProvider : MainAPI() {
     private suspend fun getBearerToken(): String? {
         val ts = System.currentTimeMillis().toString()
         val path = "/wefeed-mobile-bff/tab/ranking-list"
-        val query = "categoryType=4516404531735022304&page=1&perPage=1&tabId=0"
+        val query = "page=1&perPage=1&tabId=0"
         val fullUrl = "$mainUrl$path?$query"
 
         val response = app.get(
@@ -74,7 +81,7 @@ class MovieBoxProvider : MainAPI() {
         return tokenMatch?.groupValues?.get(1)
     }
 
-    // --- IMPLEMENTASI GETMAINPAGE (BERANDA) ---
+    // 1. GET MAIN PAGE (HOMEPAGE & CATEGORIES)
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -82,7 +89,7 @@ class MovieBoxProvider : MainAPI() {
         val bearerToken = getBearerToken() ?: return null
         val ts = System.currentTimeMillis().toString()
         val path = "/wefeed-mobile-bff/tab/ranking-list"
-        val query = "categoryType=${request.data}&page=$page&perPage=20&tabId=0"
+        val query = "categoryType=${request.data}&page=$page&perPage=10&tabId=0"
         val fullUrl = "$mainUrl$path?$query"
 
         val response = app.get(
@@ -100,28 +107,81 @@ class MovieBoxProvider : MainAPI() {
         )
 
         val jsonRes = response.parsedSafe<RankingResponse>() ?: return null
-        val items = jsonRes.data?.list?.mapNotNull { item ->
-            val id = item.subjectId ?: return@mapNotNull null
-            val title = item.title ?: "Unknown"
-            val poster = item.cover?.url
+        val dataObj = jsonRes.data ?: return null
 
-            newMovieSearchResponse(title, id, TvType.Movie) {
-                this.posterUrl = poster
+        val homeItems = dataObj.subjects?.mapNotNull { item ->
+            val subjectId = item.subjectId ?: return@mapNotNull null
+            val title = item.title ?: "Unknown"
+            val posterUrl = item.cover?.url
+
+            newMovieSearchResponse(title, subjectId, TvType.Movie) {
+                this.posterUrl = posterUrl
             }
         } ?: emptyList()
 
-        return newHomePageResponse(request.name, items)
+        return newHomePageResponse(request.name, homeItems)
     }
 
-    // --- IMPLEMENTASI LOAD (DETAIL ITEM) ---
+    // Data Class untuk Komunikasi Parameter Episode
+    data class EpData(
+        val subjectId: String,
+        val se: Int,
+        val ep: Int
+    )
+
+    // 2. LOAD (DETAIL & EPISODE GENERATION VIA SEASON-INFO)
     override suspend fun load(url: String): LoadResponse? {
         val subjectId = url.trim()
-        return newMovieLoadResponse(subjectId, subjectId, TvType.Movie, subjectId) {
-            this.posterUrl = ""
+        val bearerToken = getBearerToken() ?: return null
+
+        val ts = System.currentTimeMillis().toString()
+        val path = "/wefeed-mobile-bff/subject-api/season-info"
+        val query = "subjectId=$subjectId"
+        val fullUrl = "$mainUrl$path?$query"
+
+        val response = app.get(
+            fullUrl,
+            headers = mapOf(
+                "authorization" to "Bearer $bearerToken",
+                "user-agent" to CS_USER_AGENT,
+                "accept" to "application/json",
+                "content-type" to "application/json",
+                "x-client-token" to generateGuestToken(ts),
+                "x-tr-signature" to generateSignature("$path?$query", ts),
+                "x-client-info" to CLIENT_INFO,
+                "x-client-status" to "0"
+            )
+        )
+
+        val seasonRes = response.parsedSafe<SeasonInfoResponse>()
+        val seasonData = seasonRes?.data
+        val seasons = seasonData?.seasons
+
+        val episodesList = mutableListOf<Episode>()
+
+        seasons?.forEach { seasonItem ->
+            val seNum = seasonItem.se ?: 1
+            val maxEp = seasonItem.maxEp ?: 1
+
+            for (epNum in 1..maxEp) {
+                episodesList.add(
+                    newEpisode(EpData(subjectId, seNum, epNum)) {
+                        this.name = "Episode $epNum"
+                        this.season = seNum
+                        this.episode = epNum
+                    }
+                )
+            }
         }
+
+        if (episodesList.isEmpty()) {
+            return newMovieLoadResponse(subjectId, url, TvType.Movie, EpData(subjectId, 1, 1))
+        }
+
+        return newTvSeriesLoadResponse(subjectId, url, TvType.TvSeries, episodesList)
     }
 
-    // --- INTERCEPTOR OKHTTP DATA SOURCE ---
+    // 3. INTERCEPTOR COOKIE EXOPLAYER
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
         return Interceptor { chain ->
             val request = chain.request()
@@ -138,19 +198,19 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // --- LOAD LINKS ---
+    // 4. LOAD LINKS (PLAYBACK STREAM VIA PLAY-INFO)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val subjectId = data.trim()
+        val epData = AppUtils.tryParseJson<EpData>(data) ?: return false
         val bearerToken = getBearerToken() ?: return false
 
         val ts = System.currentTimeMillis().toString()
         val path = "/wefeed-mobile-bff/subject-api/play-info"
-        val query = "ep=0&se=0&subjectId=$subjectId"
+        val query = "ep=${epData.ep}&se=${epData.se}&subjectId=${epData.subjectId}"
         val fullUrl = "$mainUrl$path?$query"
 
         val response = app.get(
@@ -177,7 +237,7 @@ class MovieBoxProvider : MainAPI() {
         callback(
             ExtractorLink(
                 source = name,
-                name = "MovieBox (DASH 1080p HEVC)",
+                name = "MovieBox (DASH HEVC)",
                 url = mpdUrl,
                 referer = mainUrl,
                 quality = Qualities.P1080.value,
@@ -193,11 +253,30 @@ class MovieBoxProvider : MainAPI() {
         return true
     }
 
-    // Models
+    // MODELS
     data class RankingResponse(val code: Int?, val data: RankingData?)
-    data class RankingData(val list: List<RankingItem>?)
-    data class RankingItem(val subjectId: String?, val title: String?, val cover: CoverItem?)
+    data class RankingData(
+        val categoryList: List<CategoryItem>?,
+        val subjects: List<SubjectItem>?
+    )
+    data class CategoryItem(val name: String?, val type: String?)
+    data class SubjectItem(
+        val subjectId: String?,
+        val title: String?,
+        val cover: CoverItem?
+    )
     data class CoverItem(val url: String?)
+
+    data class SeasonInfoResponse(val code: Int?, val data: SeasonInfoData?)
+    data class SeasonInfoData(
+        val subjectId: String?,
+        val subjectType: Int?,
+        val seasons: List<SeasonItem>?
+    )
+    data class SeasonItem(
+        val se: Int?,
+        val maxEp: Int?
+    )
 
     data class PlayInfoResponse(val code: Int?, val message: String?, val data: PlayData?)
     data class PlayData(val streams: List<StreamItem>?)
