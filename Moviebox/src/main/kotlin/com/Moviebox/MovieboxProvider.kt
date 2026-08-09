@@ -239,8 +239,7 @@ class MovieBoxProvider : MainAPI() {
         val castActors = subject.staffList?.mapNotNull { staff ->
             val staffName = staff.name ?: return@mapNotNull null
             ActorData(
-                actor = Actor(staffName, staff.avatarUrl),
-                role = ActorRole.Main
+                actor = Actor(staffName, staff.avatarUrl)
             )
         } ?: emptyList()
 
@@ -362,7 +361,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 5. LOAD LINKS (PEMUTARAN)
+    // 5. LOAD LINKS
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
