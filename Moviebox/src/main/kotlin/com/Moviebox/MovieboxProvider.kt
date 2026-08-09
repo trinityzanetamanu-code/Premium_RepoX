@@ -205,7 +205,6 @@ class MovieBoxProvider : MainAPI() {
 
         val bearerToken = getBearerToken() ?: return null
 
-        // A. Ambil Detail Lengkap (Subject) dari /subject-api/get
         val ts = System.currentTimeMillis().toString()
         val pathGet = "/wefeed-mobile-bff/subject-api/get"
         val queryGet = "subjectId=$cleanId"
@@ -239,10 +238,12 @@ class MovieBoxProvider : MainAPI() {
 
         val castActors = subject.staffList?.mapNotNull { staff ->
             val staffName = staff.name ?: return@mapNotNull null
-            Actor(staffName, staff.avatarUrl, role = staff.character)
+            ActorData(
+                actor = Actor(staffName, staff.avatarUrl),
+                role = staff.character
+            )
         } ?: emptyList()
 
-        // B. Ambil Struktur Season & Episode dari /subject-api/season-info
         val tsSeason = System.currentTimeMillis().toString()
         val pathSeason = "/wefeed-mobile-bff/subject-api/season-info"
         val querySeason = "subjectId=$cleanId"
@@ -302,7 +303,15 @@ class MovieBoxProvider : MainAPI() {
                 this.actors = castActors
                 this.tags = genreTags
                 if (!trailerUrl.isNullOrBlank()) {
-                    this.addTrailer(trailerUrl)
+                    this.trailers = listOf(
+                        ExtractorLink(
+                            source = name,
+                            name = "Trailer",
+                            url = trailerUrl,
+                            referer = mainUrl,
+                            quality = Qualities.Unknown.value
+                        )
+                    )
                 }
             }
         } else {
@@ -314,7 +323,15 @@ class MovieBoxProvider : MainAPI() {
                 this.actors = castActors
                 this.tags = genreTags
                 if (!trailerUrl.isNullOrBlank()) {
-                    this.addTrailer(trailerUrl)
+                    this.trailers = listOf(
+                        ExtractorLink(
+                            source = name,
+                            name = "Trailer",
+                            url = trailerUrl,
+                            referer = mainUrl,
+                            quality = Qualities.Unknown.value
+                        )
+                    )
                 }
             }
         }
