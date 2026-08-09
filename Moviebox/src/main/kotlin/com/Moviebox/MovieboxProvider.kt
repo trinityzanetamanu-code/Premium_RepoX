@@ -58,11 +58,11 @@ class MovieBoxProvider : MainAPI() {
             return "$ts,${md5(revTs)}"
         }
 
-        private fun encodeParam(str: String?): String {
+        private fun enc(str: String?): String {
             return if (str.isNullOrBlank()) "" else URLEncoder.encode(str, "UTF-8")
         }
 
-        private fun decodeParam(str: String?): String {
+        private fun dec(str: String?): String {
             return if (str.isNullOrBlank()) "" else URLDecoder.decode(str, "UTF-8")
         }
     }
@@ -91,7 +91,7 @@ class MovieBoxProvider : MainAPI() {
         return tokenMatch?.groupValues?.get(1)
     }
 
-    // 1. GET MAIN PAGE (HOMEPAGE & CATEGORIES)
+    // 1. MAIN PAGE (HOMEPAGE & CATEGORIES)
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -124,9 +124,11 @@ class MovieBoxProvider : MainAPI() {
             val title = item.title ?: "Unknown"
             val posterUrl = item.cover?.url ?: ""
             val subjectType = item.subjectType ?: 1
+            val description = item.description ?: ""
+            val year = item.releaseYear ?: item.releaseDate?.take(4)?.toIntOrNull()
+            val rating = item.imdbRatingValue ?: item.imdbRate
 
-            // Format URL terstruktur membawa metadata
-            val detailUrl = "$mainUrl/detail?id=$subjectId&title=${encodeParam(title)}&poster=${encodeParam(posterUrl)}&type=$subjectType"
+            val detailUrl = "$mainUrl/detail?id=$subjectId&title=${enc(title)}&poster=${enc(posterUrl)}&type=$subjectType&desc=${enc(description)}&year=${year ?: ""}&rate=${enc(rating)}"
 
             if (subjectType == 2) {
                 newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
@@ -142,12 +144,12 @@ class MovieBoxProvider : MainAPI() {
         return newHomePageResponse(request.name, homeItems)
     }
 
-    // 2. SEARCH (PENSETAN & PENCARIAN)
+    // 2. SEARCH
     override suspend fun search(query: String): List<SearchResponse>? {
         val bearerToken = getBearerToken() ?: return null
         val ts = System.currentTimeMillis().toString()
         val path = "/wefeed-mobile-bff/search/search-list"
-        val queryStr = "keyword=${encodeParam(query)}&page=1&perPage=20"
+        val queryStr = "keyword=${enc(query)}&page=1&perPage=20"
         val fullUrl = "$mainUrl$path?$queryStr"
 
         val response = app.get(
@@ -172,8 +174,11 @@ class MovieBoxProvider : MainAPI() {
             val title = item.title ?: "Unknown"
             val posterUrl = item.cover?.url ?: ""
             val subjectType = item.subjectType ?: 1
+            val description = item.description ?: ""
+            val year = item.releaseYear ?: item.releaseDate?.take(4)?.toIntOrNull()
+            val rating = item.imdbRatingValue ?: item.imdbRate
 
-            val detailUrl = "$mainUrl/detail?id=$subjectId&title=${encodeParam(title)}&poster=${encodeParam(posterUrl)}&type=$subjectType"
+            val detailUrl = "$mainUrl/detail?id=$subjectId&title=${enc(title)}&poster=${enc(posterUrl)}&type=$subjectType&desc=${enc(description)}&year=${year ?: ""}&rate=${enc(rating)}"
 
             if (subjectType == 2) {
                 newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
@@ -190,12 +195,12 @@ class MovieBoxProvider : MainAPI() {
     data class EpData(
         val subjectId: String,
         val se: Int,
-        val ep: Int
+        val ep: Int,
+        val subjectType: Int = 1
     )
 
-    // 3. LOAD (DETAIL & HALAMAN ITEM)
+    // 3. LOAD (HALAMAN DETAIL & EPISODE)
     override suspend fun load(url: String): LoadResponse? {
-        // Pembersihan ID dari String URL mentah
         val cleanId = when {
             url.contains("id=") -> url.substringAfter("id=").substringBefore("&")
             url.contains("/") -> url.substringAfterLast("/").substringBefore("?")
@@ -206,7 +211,7 @@ class MovieBoxProvider : MainAPI() {
             if (url.contains("?")) {
                 url.substringAfter("?").split("&").associate {
                     val pair = it.split("=")
-                    if (pair.size == 2) pair[0] to decodeParam(pair[1]) else "" to ""
+                    if (pair.size == 2) pair[0] to dec(pair[1]) else "" to ""
                 }
             } else emptyMap()
         } catch (_: Exception) { emptyMap() }
@@ -214,6 +219,9 @@ class MovieBoxProvider : MainAPI() {
         val rawTitle = params["title"]?.takeIf { it.isNotBlank() }
         val poster = params["poster"]?.takeIf { it.isNotBlank() }
         val typeInt = params["type"]?.toIntOrNull() ?: 1
+        val descStr = params["desc"]?.takeIf { it.isNotBlank() }
+        val yearInt = params["year"]?.toIntOrNull()
+        val ratingStr = params["rate"]?.takeIf { it.isNotBlank() }
 
         val bearerToken = getBearerToken()
 
@@ -251,7 +259,7 @@ class MovieBoxProvider : MainAPI() {
 
             for (epNum in 1..maxEp) {
                 episodesList.add(
-                    newEpisode(EpData(cleanId, seNum, epNum)) {
+                    newEpisode(EpData(cleanId, seNum, epNum, typeInt)) {
                         this.name = "Episode $epNum"
                         this.season = seNum
                         this.episode = epNum
@@ -265,7 +273,7 @@ class MovieBoxProvider : MainAPI() {
         return if (isSeries) {
             if (episodesList.isEmpty()) {
                 episodesList.add(
-                    newEpisode(EpData(cleanId, 1, 1)) {
+                    newEpisode(EpData(cleanId, 1, 1, 2)) {
                         this.name = "Episode 1"
                         this.season = 1
                         this.episode = 1
@@ -274,12 +282,16 @@ class MovieBoxProvider : MainAPI() {
             }
             newTvSeriesLoadResponse(displayTitle, url, TvType.TvSeries, episodesList) {
                 this.posterUrl = poster
-                this.plot = "Saksikan $displayTitle di MovieBox."
+                this.plot = descStr ?: "Saksikan $displayTitle di MovieBox."
+                this.year = yearInt
+                addScore(ratingStr, 10)
             }
         } else {
-            newMovieLoadResponse(displayTitle, url, TvType.Movie, EpData(cleanId, 1, 1)) {
+            newMovieLoadResponse(displayTitle, url, TvType.Movie, EpData(cleanId, 0, 0, 1)) {
                 this.posterUrl = poster
-                this.plot = "Saksikan $displayTitle di MovieBox."
+                this.plot = descStr ?: "Saksikan $displayTitle di MovieBox."
+                this.year = yearInt
+                addScore(ratingStr, 10)
             }
         }
     }
@@ -301,7 +313,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 5. LOAD LINKS (PEMUTARAN)
+    // 5. LOAD LINKS (PLAYBACK WITH RETRY FALLBACK FOR MOVIES & SERIES)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -311,30 +323,47 @@ class MovieBoxProvider : MainAPI() {
         val epData = AppUtils.tryParseJson<EpData>(data) ?: return false
         val bearerToken = getBearerToken() ?: return false
 
-        val ts = System.currentTimeMillis().toString()
-        val path = "/wefeed-mobile-bff/subject-api/play-info"
-        val query = "ep=${epData.ep}&se=${epData.se}&subjectId=${epData.subjectId}"
-        val fullUrl = "$mainUrl$path?$query"
+        // Variasi parameter fallback untuk menjamin keterpenuhan Movie dan Series
+        val candidatePairs = if (epData.subjectType == 1 || (epData.se == 0 && epData.ep == 0)) {
+            listOf(0 to 0, 1 to 0, 1 to 1, 0 to 1)
+        } else {
+            listOf(epData.se to epData.ep, 1 to 1, 0 to 0)
+        }
 
-        val response = app.get(
-            fullUrl,
-            headers = mapOf(
-                "authorization" to "Bearer $bearerToken",
-                "user-agent" to CS_USER_AGENT,
-                "accept" to "application/json",
-                "content-type" to "application/json",
-                "x-client-token" to generateGuestToken(ts),
-                "x-tr-signature" to generateSignature("$path?$query", ts),
-                "x-client-info" to CLIENT_INFO,
-                "x-client-status" to "0"
+        var foundStream: StreamItem? = null
+
+        for ((se, ep) in candidatePairs) {
+            val ts = System.currentTimeMillis().toString()
+            val path = "/wefeed-mobile-bff/subject-api/play-info"
+            val query = "ep=$ep&se=$se&subjectId=${epData.subjectId}"
+            val fullUrl = "$mainUrl$path?$query"
+
+            val response = app.get(
+                fullUrl,
+                headers = mapOf(
+                    "authorization" to "Bearer $bearerToken",
+                    "user-agent" to CS_USER_AGENT,
+                    "accept" to "application/json",
+                    "content-type" to "application/json",
+                    "x-client-token" to generateGuestToken(ts),
+                    "x-tr-signature" to generateSignature("$path?$query", ts),
+                    "x-client-info" to CLIENT_INFO,
+                    "x-client-status" to "0"
+                )
             )
-        )
 
-        val playData = response.parsedSafe<PlayInfoResponse>() ?: return false
-        val stream = playData.data?.streams?.firstOrNull() ?: return false
+            val playData = response.parsedSafe<PlayInfoResponse>()
+            val stream = playData?.data?.streams?.firstOrNull()
 
-        val mpdUrl = stream.url ?: return false
-        val rawCookie = stream.signCookie ?: return false
+            if (stream?.url != null && !stream.signCookie.isNullOrBlank()) {
+                foundStream = stream
+                break
+            }
+        }
+
+        val targetStream = foundStream ?: return false
+        val mpdUrl = targetStream.url ?: return false
+        val rawCookie = targetStream.signCookie ?: return false
         val cleanCookie = rawCookie.trimEnd(';')
 
         callback(
@@ -356,7 +385,7 @@ class MovieBoxProvider : MainAPI() {
         return true
     }
 
-    // DATA MODELS
+    // MODELS
     data class RankingResponse(val code: Int?, val data: RankingData?)
     data class RankingData(
         val categoryList: List<CategoryItem>?,
@@ -367,7 +396,12 @@ class MovieBoxProvider : MainAPI() {
         val subjectId: String?,
         val title: String?,
         val cover: CoverItem?,
-        val subjectType: Int?
+        val subjectType: Int?,
+        val description: String?,
+        val releaseDate: String?,
+        val releaseYear: Int?,
+        val imdbRatingValue: String?,
+        val imdbRate: String?
     )
     data class CoverItem(val url: String?)
 
