@@ -1,399 +1,159 @@
-package com.Moviebox
+package com.moviebox
 
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
-import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
-import com.lagradost.nicehttp.RequestBodyTypes
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
+import com.lagradost.cloudstream3.app
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
+import java.security.MessageDigest
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+import android.util.Base64
 
-class MovieboxProvider : MainAPI() {
-    override var name = "Moviebox"
-
-    // Domain Utama (Digunakan untuk Origin dan Referer)
-    override var mainUrl = "https://moviebox.ph"
-
-    // Domain Khusus API (Terpusat)
-    private val apiBaseUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff"
-
-    override var lang = "en"
-    override val hasMainPage = true
+class MovieBoxProvider : MainAPI() {
+    override var mainUrl = "https://api3.aoneroom.com"
+    override var name = "MovieBox"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override var hasMainPage = true
 
-    /*
-     * ===================================================================
-     * TOKEN BERHASIL DIPERBARUI — 2026-08-09
-     * ===================================================================
-     */
-    private val bearerToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjU4MDg2MzQwNDAzOTY3OTQ5MjgsImF0cCI6MywiZXh0IjoiMTc4NjIxNzM1NSIsImV4cCI6MTc5Mzk5MzM1NSwiaWF0IjoxNzg2MjE3MDU1fQ.MumftTE0k8I-DbOaQtfPYiuubVJa_IXQJnN_JuXPadI"
-
-    /** Header untuk home / search / detail / rec — DENGAN token. */
-    private fun getApiHeaders(customReferer: String = "$mainUrl/"): Map<String, String> {
-        return mapOf(
-            "Accept" to "application/json",
-            "x-client-info" to """{"timezone":"Asia/Jakarta"}""",
-            "x-request-lang" to "en",
-            "Origin" to mainUrl,
-            "Referer" to customReferer,
-            "Authorization" to "Bearer $bearerToken"
-        )
-    }
-
-    /** Header khusus playback — TANPA token, kalau tidak streams akan kosong. */
-    private fun getPlayHeaders(customReferer: String): Map<String, String> {
-        return mapOf(
-            "Accept" to "application/json",
-            "x-client-info" to """{"timezone":"Asia/Jakarta"}""",
-            "x-request-lang" to "en",
-            "Origin" to mainUrl,
-            "Referer" to customReferer
-        )
-    }
-
-    // --- DATA CLASSES ---
-    data class HomeResponse(@param:JsonProperty("data") val data: HomeData?)
-    data class HomeData(@param:JsonProperty("operatingList") val operatingList: List<OperatingList>?)
-    data class OperatingList(@param:JsonProperty("title") val title: String?, @param:JsonProperty("subjects") val subjects: List<Subject>?, @param:JsonProperty("banner") val banner: Banner?)
-    data class Banner(@param:JsonProperty("items") val items: List<BannerItem>?)
-    data class BannerItem(@param:JsonProperty("subject") val subject: Subject?)
-
-    data class SearchApiResponse(@param:JsonProperty("data") val data: SearchData?)
-    data class SearchData(
-        @param:JsonProperty("subjectList") val subjectList: List<Subject>?, 
-        @param:JsonProperty("items") val items: List<Subject>?, 
-        @param:JsonProperty("list") val list: List<Subject>?
-    )
-    data class Subject(@param:JsonProperty("title") val title: String?, @param:JsonProperty("subjectId") val subjectId: String?, @param:JsonProperty("subjectType") val subjectType: Int?, @param:JsonProperty("detailPath") val detailPath: String?, @param:JsonProperty("releaseDate") val releaseDate: String?, @param:JsonProperty("cover") val cover: ImageInfo?)
-    data class ImageInfo(@param:JsonProperty("url") val url: String?)
-
-    data class DetailResponse(@param:JsonProperty("data") val data: DetailDataWrapper?)
-    data class DetailDataWrapper(@param:JsonProperty("subject") val subject: DetailData?, @param:JsonProperty("stars") val stars: List<Star>?, @param:JsonProperty("resource") val resource: ResourceData?)
-    data class DetailData(@param:JsonProperty("subjectId") val subjectId: String?, @param:JsonProperty("title") val title: String?, @param:JsonProperty("description") val description: String?, @param:JsonProperty("releaseDate") val releaseDate: String?, @param:JsonProperty("cover") val cover: ImageInfo?, @param:JsonProperty("imdbRatingValue") val imdbRatingValue: String?, @param:JsonProperty("subjectType") val subjectType: Int?, @param:JsonProperty("episodes") val episodes: List<EpisodeInfo>?)
-    data class Star(@param:JsonProperty("name") val name: String?, @param:JsonProperty("avatarUrl") val avatarUrl: String?, @param:JsonProperty("character") val character: String?)
-    data class ResourceData(@param:JsonProperty("seasons") val seasons: List<SeasonDataApi>?)
-    
-    // Menambahkan minEp & startEp untuk menangani series yang episode terawalnya bukan episode 1
-    data class SeasonDataApi(
-        @param:JsonProperty("se") val se: Int?, 
-        @param:JsonProperty("maxEp") val maxEp: Int?,
-        @param:JsonProperty("minEp") val minEp: Int? = null,
-        @param:JsonProperty("startEp") val startEp: Int? = null
-    )
-    data class EpisodeInfo(@param:JsonProperty("episodeId") val episodeId: String?, @param:JsonProperty("title") val title: String?, @param:JsonProperty("episodeNum") val episodeNum: Int?, @param:JsonProperty("seasonNum") val seasonNum: Int?)
-
-    data class RecResponse(@param:JsonProperty("data") val data: RecData?)
-    data class RecData(@param:JsonProperty("items") val items: List<Subject>?)
-
-    data class LinkData(
-        @param:JsonProperty("subjectId") val subjectId: String,
-        @param:JsonProperty("detailPath") val detailPath: String,
-        @param:JsonProperty("season") val season: Int = 0,
-        @param:JsonProperty("episode") val episode: Int = 0,
-        @param:JsonProperty("isTv") val isTv: Boolean = false
-    )
-
-    data class PlayResponse(
-        @param:JsonProperty("code") val code: Int?,
-        @param:JsonProperty("message") val message: String?,
-        @param:JsonProperty("data") val data: PlayData?
-    )
-
-    data class PlayData(
-        @param:JsonProperty("streams") val streams: List<StreamItem>?,
-        @param:JsonProperty("dash") val dash: List<StreamItem>?,
-        @param:JsonProperty("hls") val hls: List<StreamItem>?,
-        @param:JsonProperty("limited") val limited: Boolean?,
-        @param:JsonProperty("freeNum") val freeNum: Int?,
-        @param:JsonProperty("hasResource") val hasResource: Boolean?,
-        @param:JsonProperty("vipLocked") val vipLocked: Boolean?
-    )
-
-    data class StreamItem(
-        @param:JsonProperty("id") val id: String?,
-        @param:JsonProperty("url") val url: String?,
-        @param:JsonProperty("resolutions") val resolutions: String?,
-        @param:JsonProperty("format") val format: String?,
-        @param:JsonProperty("codecName") val codecName: String?,
-        @param:JsonProperty("size") val size: String?,
-        @param:JsonProperty("duration") val duration: Long?,
-        @param:JsonProperty("signCookie") val signCookie: String?,
-        @param:JsonProperty("signHeaderKey") val signHeaderKey: String?,
-        @param:JsonProperty("vipLocked") val vipLocked: Boolean?
-    )
-
-    data class CaptionResponse(@param:JsonProperty("data") val data: CaptionData?)
-    data class CaptionData(@param:JsonProperty("captions") val captions: List<CaptionItem>?)
-    data class CaptionItem(@param:JsonProperty("lanName") val lanName: String?, @param:JsonProperty("url") val url: String?)
-
-    // --- FUNGSI UTAMA ---
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        val apiUrl = "$apiBaseUrl/home?host=moviebox.ph"
-        val response = app.get(apiUrl, headers = getApiHeaders()).parsedSafe<HomeResponse>()
-
-        val homeItems = mutableListOf<HomePageList>()
-        response?.data?.operatingList?.forEach { section ->
-            val searchResponses = mutableListOf<SearchResponse>()
-            section.subjects?.forEach { it.toSearchResponse()?.let { res -> searchResponses.add(res) } }
-            section.banner?.items?.forEach { it.subject?.toSearchResponse()?.let { res -> searchResponses.add(res) } }
-            if (searchResponses.isNotEmpty()) homeItems.add(HomePageList(section.title ?: "", searchResponses))
-        }
-        return newHomePageResponse(homeItems)
-    }
-
-    override suspend fun search(query: String): List<SearchResponse> {
-        val apiUrl = "$apiBaseUrl/subject/search"
-        val payload = mapOf(
-            "keyword" to query,
-            "page" to 1,
-            "perPage" to 28,
-            "subjectType" to 0
-        ).toJson().toRequestBody(RequestBodyTypes.JSON.toMediaTypeOrNull())
-
-        var response = app.post(
-            apiUrl,
-            headers = getApiHeaders(),
-            requestBody = payload
-        ).parsedSafe<SearchApiResponse>()
-
-        if (response?.data == null) {
-            response = app.post(
-                apiUrl,
-                headers = getPlayHeaders("$mainUrl/"),
-                requestBody = payload
-            ).parsedSafe<SearchApiResponse>()
+    companion object {
+        private const val USER_AGENT = "com.community.oneroom/50020088 (Linux; U; Android 13; en_US; Samsung; Build/TQ3A.230901.001)"
+        private const val CLIENT_INFO = """{"package_name":"com.community.oneroom","version_name":"3.0.13.0325.03","version_code":50020088,"os":"android","os_version":"13","device_id":"71e0f7746936dc98","install_store":"ps","system_language":"en","net":"NETWORK_WIFI","region":"US","timezone":"Asia/Calcutta","sp_code":""}"""
+        
+        // Key Secret HMAC (Double Base64 Decoded Key: 76iRl07s0xSN9jqmEWAt79EBJZulIQIsV64FZr2O)
+        private val SECRET_BYTES: ByteArray by lazy {
+            val step1 = String(Base64.decode("NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw==", Base64.DEFAULT), Charsets.UTF_8)
+            Base64.decode(step1, Base64.DEFAULT)
         }
 
-        val list = response?.data?.items 
-            ?: response?.data?.subjectList 
-            ?: response?.data?.list 
-            ?: emptyList()
-
-        return list.mapNotNull { it.toSearchResponse() }
-    }
-
-    override suspend fun load(url: String): LoadResponse? {
-        val slug = url.substringAfterLast("/")
-        val detailUrl = "$apiBaseUrl/detail?detailPath=$slug"
-
-        val wrapper = app.get(detailUrl, headers = getApiHeaders()).parsedSafe<DetailResponse>()?.data ?: return null
-        val res = wrapper.subject ?: return null
-
-        val recUrl = "$apiBaseUrl/subject/detail-rec?subjectId=${res.subjectId}&page=1&perPage=12"
-        val recs = app.get(recUrl, headers = getApiHeaders()).parsedSafe<RecResponse>()?.data?.items?.mapNotNull { it.toSearchResponse() }
-
-        val castList = wrapper.stars?.mapNotNull { star ->
-            if (star.name != null) ActorData(actor = Actor(star.name, star.avatarUrl), roleString = star.character) else null
+        private fun md5(input: String): String {
+            val md = MessageDigest.getInstance("MD5")
+            return md.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         }
 
-        val seasonsData = wrapper.resource?.seasons.orEmpty()
-        val legacyEpisodes = res.episodes.orEmpty()
-
-        val isSingleItem = seasonsData.size == 1 &&
-                (seasonsData[0].se ?: 0) == 0 &&
-                (seasonsData[0].maxEp ?: 0) == 0
-
-        val episodesList = mutableListOf<Episode>()
-
-        if (legacyEpisodes.isNotEmpty()) {
-            val fallbackSeason = seasonsData.firstOrNull()?.se?.takeIf { it > 0 } ?: 1
-
-            legacyEpisodes.forEach { ep ->
-                val epNum = ep.episodeNum ?: 1
-                val sNum = ep.seasonNum?.takeIf { it > 0 } ?: fallbackSeason
-
-                episodesList.add(
-                    newEpisode(LinkData(res.subjectId ?: "", slug, sNum, epNum, true).toJson()) {
-                        this.name = ep.title?.takeIf { it.isNotBlank() } ?: "Episode $epNum"
-                        this.season = sNum
-                        this.episode = epNum
-                    }
-                )
-            }
-        } else if (seasonsData.isNotEmpty()) {
-            if (!isSingleItem) {
-                seasonsData.forEach { season ->
-                    val sNum = season.se ?: 0
-                    val maxEpisode = season.maxEp ?: 0
-                    // Gunakan minEp dari API jika ada, default ke 1 jika tidak ada/null
-                    val minEpisode = season.minEp?.takeIf { it > 0 } 
-                        ?: season.startEp?.takeIf { it > 0 } 
-                        ?: 1
-
-                    if (maxEpisode >= minEpisode) {
-                        for (eNum in minEpisode..maxEpisode) {
-                            episodesList.add(
-                                newEpisode(LinkData(res.subjectId ?: "", slug, sNum, eNum, true).toJson()) {
-                                    this.name = "Episode $eNum"
-                                    this.season = if (sNum > 0) sNum else 1
-                                    this.episode = eNum
-                                }
-                            )
-                        }
-                    }
-                }
-            }
+        private fun generateSignature(pathWithQuery: String, ts: String): String {
+            val canonical = "GET\napplication/json\napplication/json\n\n$ts\n\n$pathWithQuery"
+            val mac = Mac.getInstance("HmacMD5")
+            mac.init(SecretKeySpec(SECRET_BYTES, "HmacMD5"))
+            val hmacBytes = mac.doFinal(canonical.toByteArray(Charsets.UTF_8))
+            val sigB64 = Base64.encodeToString(hmacBytes, Base64.NO_WRAP)
+            return "$ts|2|$sigB64"
         }
 
-        return if (episodesList.isEmpty()) {
-            newMovieLoadResponse(res.title ?: "", url, TvType.Movie, LinkData(res.subjectId ?: "", slug, 0, 0, false).toJson()) {
-                this.posterUrl = res.cover?.url
-                this.plot = res.description
-                this.year = res.releaseDate?.take(4)?.toIntOrNull()
-                this.recommendations = recs
-                this.actors = castList
-                this.score = Score.from10(res.imdbRatingValue)
-            }
-        } else {
-            newTvSeriesLoadResponse(res.title ?: "", url, TvType.TvSeries, episodesList) {
-                this.posterUrl = res.cover?.url
-                this.plot = res.description
-                this.year = res.releaseDate?.take(4)?.toIntOrNull()
-                this.recommendations = recs
-                this.actors = castList
-                this.score = Score.from10(res.imdbRatingValue)
-            }
+        private fun generateGuestToken(ts: String): String {
+            val revTs = ts.reversed()
+            return "$ts,${md5(revTs)}"
         }
     }
 
-    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val linkData = tryParseJson<LinkData>(data) ?: return false
+    // Helper Bootstrap Session untuk mendapatkan Bearer JWT Token
+    private suspend fun getBearerToken(): String? {
+        val ts = System.currentTimeMillis().toString()
+        val path = "/wefeed-mobile-bff/tab/ranking-list"
+        val query = "categoryType=4516404531735022304&page=1&perPage=1&tabId=0"
+        val fullUrl = "$mainUrl$path?$query"
 
-        val playUrl = "$apiBaseUrl/subject/play" +
-                "?subjectId=${linkData.subjectId}" +
-                "&se=${linkData.season}" +
-                "&ep=${linkData.episode}" +
-                "&detailPath=${linkData.detailPath}" +
-                "&streamSignType=1"
+        val guestToken = generateGuestToken(ts)
+        val signature = generateSignature("$path?$query", ts)
 
-        val specificReferer = if (linkData.isTv || linkData.season > 0) {
-            "$mainUrl/spa/videoPlayPage/tv/${linkData.detailPath}" +
-                    "?id=${linkData.subjectId}&type=/tv/detail" +
-                    "&detailSe=${linkData.season}&detailEp=${linkData.episode}&lang=en"
-        } else {
-            "$mainUrl/spa/videoPlayPage/movies/${linkData.detailPath}" +
-                    "?id=${linkData.subjectId}&type=/movie/detail" +
-                    "&detailSe=&detailEp=&lang=en"
-        }
-        val playHeaders = getPlayHeaders(specificReferer)
-
-        val response = app.get(playUrl, headers = playHeaders)
-        val playRes = tryParseJson<PlayResponse>(response.text)
-        val playData = playRes?.data
-
-        val allStreams = buildList {
-            playData?.streams?.let { addAll(it) }
-            playData?.dash?.let { addAll(it) }
-            playData?.hls?.let { addAll(it) }
-        }.filter { !it.url.isNullOrBlank() }
-
-        if (allStreams.isEmpty()) {
-            val reason = when {
-                playData?.limited == true ->
-                    "Kuota tonton gratis habis (freeNum=${playData.freeNum}). Server menolak memberikan stream untuk sesi ini."
-                playData?.hasResource == false ->
-                    "Server melaporkan hasResource=false. Referer kemungkinan tidak diterima."
-                playData?.vipLocked == true ->
-                    "Konten terkunci VIP."
-                playRes?.code != null && playRes.code != 0 ->
-                    "API menolak: code=${playRes.code} message=${playRes.message}"
-                else ->
-                    "Tidak ada stream. code=${playRes?.code} message=${playRes?.message}"
-            }
-            throw ErrorLoadingException("Moviebox: $reason")
-        }
-
-        allStreams.forEach { stream ->
-            if (stream.vipLocked == true) return@forEach
-
-            val streamUrl = stream.url ?: return@forEach
-            val isHls = stream.format?.contains("M3U8", true) == true ||
-                    streamUrl.contains(".m3u8", true)
-
-            val cdnHeaders = mutableMapOf("Referer" to "$mainUrl/")
-            if (!stream.signCookie.isNullOrBlank()) {
-                cdnHeaders["Cookie"] = stream.signCookie
-            }
-            if (!stream.signHeaderKey.isNullOrBlank()) {
-                cdnHeaders["X-Sign-Key"] = stream.signHeaderKey
-            }
-
-            val label = buildString {
-                append(this@MovieboxProvider.name)
-                append(" ")
-                append(stream.resolutions ?: "?")
-                append("p")
-                stream.codecName?.let { append(" ").append(it) }
-            }
-
-            callback(
-                newExtractorLink(
-                    source = this.name,
-                    name = label,
-                    url = streamUrl,
-                    type = if (isHls) ExtractorLinkType.M3U8 else INFER_TYPE
-                ) {
-                    this.quality = getQuality(stream.resolutions)
-                    this.referer = "$mainUrl/"
-                    this.headers = cdnHeaders
-                }
+        val response = app.get(
+            fullUrl,
+            headers = mapOf(
+                "user-agent" to USER_AGENT,
+                "accept" to "application/json",
+                "content-type" to "application/json",
+                "x-client-token" to guestToken,
+                "x-tr-signature" to signature,
+                "x-client-info" to CLIENT_INFO,
+                "x-client-status" to "0"
             )
-        }
+        )
 
-        allStreams.firstOrNull { !it.id.isNullOrBlank() }?.let { first ->
-            val captionUrl = "$apiBaseUrl/subject/caption" +
-                    "?format=${first.format}" +
-                    "&id=${first.id}" +
-                    "&subjectId=${linkData.subjectId}" +
-                    "&detailPath=${linkData.detailPath}"
+        val xUserHeader = response.headers["x-user"] ?: return null
+        val json = app.baseClient.newBuilder().build()
+        // Extract JWT dari JSON String {"token":"eyJ...", "userId":"..."}
+        val tokenMatch = """"token"\s*:\s*"([^"]+)"""".toRegex().find(xUserHeader)
+        return tokenMatch?.groupValues?.get(1)
+    }
 
-            val captions = app.get(captionUrl, headers = playHeaders)
-                .parsedSafe<CaptionResponse>()?.data?.captions
-                ?.takeIf { it.isNotEmpty() }
-                ?: app.get(captionUrl, headers = getApiHeaders(specificReferer))
-                    .parsedSafe<CaptionResponse>()?.data?.captions
+    override suspend fun loadLinks(
+        data: String, // subjectId, misal: "74738785354956752"
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val subjectId = data.trim()
+        val bearerToken = getBearerToken() ?: return false
 
-            captions?.forEach { cap ->
-                if (!cap.url.isNullOrBlank()) {
-                    subtitleCallback.invoke(
-                        newSubtitleFile(cap.lanName ?: "Unknown", cap.url)
-                    )
-                }
-            }
-        }
+        val ts = System.currentTimeMillis().toString()
+        val path = "/wefeed-mobile-bff/subject-api/play-info"
+        // Query Wajib Terurut Alfabetis
+        val query = "ep=0&se=0&subjectId=$subjectId"
+        val fullUrl = "$mainUrl$path?$query"
+
+        val guestToken = generateGuestToken(ts)
+        val signature = generateSignature("$path?$query", ts)
+
+        val response = app.get(
+            fullUrl,
+            headers = mapOf(
+                "authorization" to "Bearer $bearerToken",
+                "user-agent" to USER_AGENT,
+                "accept" to "application/json",
+                "content-type" to "application/json",
+                "x-client-token" to guestToken,
+                "x-tr-signature" to signature,
+                "x-client-info" to CLIENT_INFO,
+                "x-client-status" to "0"
+            )
+        )
+
+        val playData = response.parsedSafe<PlayInfoResponse>() ?: return false
+        val stream = playData.data?.streams?.firstOrNull() ?: return false
+
+        val mpdUrl = stream.url ?: return false
+        val rawCookie = stream.signCookie ?: return false
+        val cleanCookie = rawCookie.trimEnd(';')
+
+        // Rakit ExtractorLink khusus DASH
+        callback(
+            ExtractorLink(
+                source = name,
+                name = "MovieBox (DASH 1080p HEVC)",
+                url = mpdUrl,
+                referer = mainUrl,
+                quality = Qualities.P1080.value,
+                type = ExtractorLinkType.DASH,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Cookie" to cleanCookie,
+                    "Referer" to mainUrl
+                )
+            )
+        )
 
         return true
     }
 
-    private fun Subject.toSearchResponse(): SearchResponse? {
-        val titleStr = title ?: return null
-        val pathStr = detailPath ?: return null
-        val yearInt = releaseDate?.take(4)?.toIntOrNull()
-        val poster = cover?.url
+    // Data Classes untuk Response Parsing
+    data class PlayInfoResponse(
+        val code: Int?,
+        val message: String?,
+        val data: PlayData?
+    )
 
-        return if (subjectType == 1) {
-            newMovieSearchResponse(titleStr, pathStr) {
-                this.posterUrl = poster
-                this.year = yearInt
-            }
-        } else {
-            newTvSeriesSearchResponse(titleStr, pathStr) {
-                this.posterUrl = poster
-                this.year = yearInt
-            }
-        }
-    }
+    data class PlayData(
+        val streams: List<StreamItem>?
+    )
 
-    private fun getQuality(res: String?): Int {
-        return when {
-            res?.contains("2160") == true -> Qualities.P2160.value
-            res?.contains("1440") == true -> Qualities.P1440.value
-            res?.contains("1080") == true -> Qualities.P1080.value
-            res?.contains("720") == true -> Qualities.P720.value
-            res?.contains("480") == true -> Qualities.P480.value
-            res?.contains("360") == true -> Qualities.P360.value
-            else -> Qualities.Unknown.value
-        }
-    }
+    data class StreamItem(
+        val format: String?,
+        val id: String?,
+        val url: String?,
+        val resolutions: String?,
+        val size: String?,
+        val duration: Long?,
+        val codecName: String?,
+        val signCookie: String?
+    )
 }
