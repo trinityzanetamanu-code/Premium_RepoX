@@ -91,7 +91,7 @@ class MovieBoxProvider : MainAPI() {
         return tokenMatch?.groupValues?.get(1)
     }
 
-    // 1. MAIN PAGE (HOMEPAGE & CATEGORIES)
+    // 1. MAIN PAGE
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -124,11 +124,8 @@ class MovieBoxProvider : MainAPI() {
             val title = item.title ?: "Unknown"
             val posterUrl = item.cover?.url ?: ""
             val subjectType = item.subjectType ?: 1
-            val description = item.description ?: ""
-            val year = item.releaseYear ?: item.releaseDate?.take(4)?.toIntOrNull()
-            val rating = item.imdbRatingValue ?: item.imdbRate
 
-            val detailUrl = "$mainUrl/detail?id=$subjectId&title=${enc(title)}&poster=${enc(posterUrl)}&type=$subjectType&desc=${enc(description)}&year=${year ?: ""}&rate=${enc(rating)}"
+            val detailUrl = "$mainUrl/detail?id=$subjectId"
 
             if (subjectType == 2) {
                 newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
@@ -148,8 +145,8 @@ class MovieBoxProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         val bearerToken = getBearerToken() ?: return null
         val ts = System.currentTimeMillis().toString()
-        val path = "/wefeed-mobile-bff/search/search-list"
-        val queryStr = "keyword=${enc(query)}&page=1&perPage=20"
+        val path = "/wefeed-mobile-bff/tab/ranking-list"
+        val queryStr = "page=1&perPage=20&tabId=0"
         val fullUrl = "$mainUrl$path?$queryStr"
 
         val response = app.get(
@@ -166,19 +163,18 @@ class MovieBoxProvider : MainAPI() {
             )
         )
 
-        val searchRes = response.parsedSafe<SearchResponseData>()
-        val items = searchRes?.data?.list ?: searchRes?.data?.subjects
+        val searchRes = response.parsedSafe<RankingResponse>()
+        val items = searchRes?.data?.subjects
 
-        return items?.mapNotNull { item ->
+        return items?.filter { 
+            it.title?.contains(query, ignoreCase = true) == true 
+        }?.mapNotNull { item ->
             val subjectId = item.subjectId ?: return@mapNotNull null
             val title = item.title ?: "Unknown"
             val posterUrl = item.cover?.url ?: ""
             val subjectType = item.subjectType ?: 1
-            val description = item.description ?: ""
-            val year = item.releaseYear ?: item.releaseDate?.take(4)?.toIntOrNull()
-            val rating = item.imdbRatingValue ?: item.imdbRate
 
-            val detailUrl = "$mainUrl/detail?id=$subjectId&title=${enc(title)}&poster=${enc(posterUrl)}&type=$subjectType&desc=${enc(description)}&year=${year ?: ""}&rate=${enc(rating)}"
+            val detailUrl = "$mainUrl/detail?id=$subjectId"
 
             if (subjectType == 2) {
                 newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
@@ -199,7 +195,7 @@ class MovieBoxProvider : MainAPI() {
         val subjectType: Int = 1
     )
 
-    // 3. LOAD (HALAMAN DETAIL & EPISODE)
+    // 3. LOAD (DETAIL RESMI: SINOPSIS, AKTOR, TRAILER, EPISODE)
     override suspend fun load(url: String): LoadResponse? {
         val cleanId = when {
             url.contains("id=") -> url.substringAfter("id=").substringBefore("&")
@@ -207,50 +203,68 @@ class MovieBoxProvider : MainAPI() {
             else -> url.trim()
         }
 
-        val params = try {
-            if (url.contains("?")) {
-                url.substringAfter("?").split("&").associate {
-                    val pair = it.split("=")
-                    if (pair.size == 2) pair[0] to dec(pair[1]) else "" to ""
-                }
-            } else emptyMap()
-        } catch (_: Exception) { emptyMap() }
+        val bearerToken = getBearerToken() ?: return null
 
-        val rawTitle = params["title"]?.takeIf { it.isNotBlank() }
-        val poster = params["poster"]?.takeIf { it.isNotBlank() }
-        val typeInt = params["type"]?.toIntOrNull() ?: 1
-        val descStr = params["desc"]?.takeIf { it.isNotBlank() }
-        val yearInt = params["year"]?.toIntOrNull()
-        val ratingStr = params["rate"]?.takeIf { it.isNotBlank() }
+        // A. Ambil Detail Lengkap (Subject) dari /subject-api/get
+        val ts = System.currentTimeMillis().toString()
+        val pathGet = "/wefeed-mobile-bff/subject-api/get"
+        val queryGet = "subjectId=$cleanId"
+        val fullUrlGet = "$mainUrl$pathGet?$queryGet"
 
-        val bearerToken = getBearerToken()
-
-        var seasons: List<SeasonItem>? = null
-        if (bearerToken != null) {
-            val ts = System.currentTimeMillis().toString()
-            val path = "/wefeed-mobile-bff/subject-api/season-info"
-            val query = "subjectId=$cleanId"
-            val fullUrl = "$mainUrl$path?$query"
-
-            val response = app.get(
-                fullUrl,
-                headers = mapOf(
-                    "authorization" to "Bearer $bearerToken",
-                    "user-agent" to CS_USER_AGENT,
-                    "accept" to "application/json",
-                    "content-type" to "application/json",
-                    "x-client-token" to generateGuestToken(ts),
-                    "x-tr-signature" to generateSignature("$path?$query", ts),
-                    "x-client-info" to CLIENT_INFO,
-                    "x-client-status" to "0"
-                )
+        val responseGet = app.get(
+            fullUrlGet,
+            headers = mapOf(
+                "authorization" to "Bearer $bearerToken",
+                "user-agent" to CS_USER_AGENT,
+                "accept" to "application/json",
+                "content-type" to "application/json",
+                "x-client-token" to generateGuestToken(ts),
+                "x-tr-signature" to generateSignature("$pathGet?$queryGet", ts),
+                "x-client-info" to CLIENT_INFO,
+                "x-client-status" to "0"
             )
+        )
 
-            val seasonRes = response.parsedSafe<SeasonInfoResponse>()
-            seasons = seasonRes?.data?.seasons
-        }
+        val detailRes = responseGet.parsedSafe<SubjectDetailResponse>()
+        val subject = detailRes?.data ?: return null
 
-        val displayTitle = if (!rawTitle.isNullOrBlank()) rawTitle else "MovieBox Content"
+        val displayTitle = subject.title ?: "MovieBox Content"
+        val poster = subject.cover?.url
+        val typeInt = subject.subjectType ?: 1
+        val description = subject.description
+        val yearInt = subject.releaseDate?.take(4)?.toIntOrNull()
+        val ratingStr = subject.imdbRatingValue ?: subject.imdbRate
+        val trailerUrl = subject.trailer?.videoAddress?.url
+        val genreTags = subject.genre?.split(",")?.map { it.trim() } ?: emptyList()
+
+        val castActors = subject.staffList?.mapNotNull { staff ->
+            val staffName = staff.name ?: return@mapNotNull null
+            Actor(staffName, staff.avatarUrl, role = staff.character)
+        } ?: emptyList()
+
+        // B. Ambil Struktur Season & Episode dari /subject-api/season-info
+        val tsSeason = System.currentTimeMillis().toString()
+        val pathSeason = "/wefeed-mobile-bff/subject-api/season-info"
+        val querySeason = "subjectId=$cleanId"
+        val fullUrlSeason = "$mainUrl$pathSeason?$querySeason"
+
+        val responseSeason = app.get(
+            fullUrlSeason,
+            headers = mapOf(
+                "authorization" to "Bearer $bearerToken",
+                "user-agent" to CS_USER_AGENT,
+                "accept" to "application/json",
+                "content-type" to "application/json",
+                "x-client-token" to generateGuestToken(tsSeason),
+                "x-tr-signature" to generateSignature("$pathSeason?$querySeason", tsSeason),
+                "x-client-info" to CLIENT_INFO,
+                "x-client-status" to "0"
+            )
+        )
+
+        val seasonRes = responseSeason.parsedSafe<SeasonInfoResponse>()
+        val seasons = seasonRes?.data?.seasons
+
         val episodesList = mutableListOf<Episode>()
 
         seasons?.forEach { seasonItem ->
@@ -282,16 +296,26 @@ class MovieBoxProvider : MainAPI() {
             }
             newTvSeriesLoadResponse(displayTitle, url, TvType.TvSeries, episodesList) {
                 this.posterUrl = poster
-                this.plot = descStr ?: "Saksikan $displayTitle di MovieBox."
+                this.plot = description
                 this.year = yearInt
                 this.score = Score.from(ratingStr, 10)
+                this.actors = castActors
+                this.tags = genreTags
+                if (!trailerUrl.isNullOrBlank()) {
+                    this.addTrailer(trailerUrl)
+                }
             }
         } else {
             newMovieLoadResponse(displayTitle, url, TvType.Movie, EpData(cleanId, 0, 0, 1)) {
                 this.posterUrl = poster
-                this.plot = descStr ?: "Saksikan $displayTitle di MovieBox."
+                this.plot = description
                 this.year = yearInt
                 this.score = Score.from(ratingStr, 10)
+                this.actors = castActors
+                this.tags = genreTags
+                if (!trailerUrl.isNullOrBlank()) {
+                    this.addTrailer(trailerUrl)
+                }
             }
         }
     }
@@ -313,7 +337,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 5. LOAD LINKS
+    // 5. LOAD LINKS (PEMUTARAN)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -384,30 +408,49 @@ class MovieBoxProvider : MainAPI() {
         return true
     }
 
-    // MODELS
+    // MODELS RESMI
     data class RankingResponse(val code: Int?, val data: RankingData?)
     data class RankingData(
         val categoryList: List<CategoryItem>?,
         val subjects: List<SubjectItem>?
     )
     data class CategoryItem(val name: String?, val type: String?)
-    data class SubjectItem(
+
+    data class SubjectDetailResponse(val code: Int?, val data: SubjectDetailItem?)
+    data class SubjectDetailItem(
         val subjectId: String?,
         val title: String?,
         val cover: CoverItem?,
         val subjectType: Int?,
         val description: String?,
         val releaseDate: String?,
-        val releaseYear: Int?,
         val imdbRatingValue: String?,
-        val imdbRate: String?
+        val imdbRate: String?,
+        val genre: String?,
+        val staffList: List<StaffItem>?,
+        val trailer: TrailerItem?
+    )
+
+    data class SubjectItem(
+        val subjectId: String?,
+        val title: String?,
+        val cover: CoverItem?,
+        val subjectType: Int?
     )
     data class CoverItem(val url: String?)
 
-    data class SearchResponseData(val code: Int?, val data: SearchInnerData?)
-    data class SearchInnerData(
-        val list: List<SubjectItem>?,
-        val subjects: List<SubjectItem>?
+    data class StaffItem(
+        val staffId: String?,
+        val name: String?,
+        val character: String?,
+        val avatarUrl: String?
+    )
+
+    data class TrailerItem(
+        val videoAddress: VideoAddressItem?
+    )
+    data class VideoAddressItem(
+        val url: String?
     )
 
     data class SeasonInfoResponse(val code: Int?, val data: SeasonInfoData?)
