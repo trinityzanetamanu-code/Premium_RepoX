@@ -49,38 +49,45 @@ class MovieBoxProvider : MainAPI() {
             return md.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         }
 
-        private fun md5Base64(input: String): String {
-            val md = MessageDigest.getInstance("MD5")
-            return Base64.encodeToString(md.digest(input.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
+        /**
+         * Canonical string mengikuti GatewaySignManager.doSign pada APK resmi.
+         *
+         * Tujuh baris dipisah "\n":
+         *   1. HTTP method (huruf besar)
+         *   2. accept
+         *   3. content-type
+         *   4. panjang body      -> kosong bila tanpa body
+         *   5. timestamp
+         *   6. md5 hex body      -> kosong bila tanpa body
+         *   7. path (+query)
+         *
+         * Tanpa body, baris 4 dan 6 kosong sehingga hasilnya IDENTIK dengan
+         * canonical GET yang selama ini bekerja. Karena itu satu fungsi ini
+         * aman dipakai untuk GET maupun POST.
+         *
+         * Kegagalan search sebelumnya terjadi karena percobaan hanya mengisi
+         * SALAH SATU dari baris 4 atau 6, tidak pernah keduanya sekaligus.
+         */
+        private fun buildCanonical(method: String, pathWithQuery: String, ts: String, body: String): String {
+            val length = if (body.isEmpty()) "" else body.length.toString()
+            val digest = if (body.isEmpty()) "" else md5(body)
+            return listOf(
+                method.uppercase(),
+                "application/json",
+                "application/json",
+                length,
+                ts,
+                digest,
+                pathWithQuery
+            ).joinToString("\n")
         }
 
-        private fun signCanonical(canonical: String, ts: String): String {
+        private fun generateSignature(method: String, pathWithQuery: String, ts: String, body: String = ""): String {
             val mac = Mac.getInstance("HmacMD5")
             mac.init(SecretKeySpec(SECRET_BYTES, "HmacMD5"))
-            val hmacBytes = mac.doFinal(canonical.toByteArray(Charsets.UTF_8))
+            val hmacBytes = mac.doFinal(buildCanonical(method, pathWithQuery, ts, body).toByteArray(Charsets.UTF_8))
             return "$ts|2|${Base64.encodeToString(hmacBytes, Base64.NO_WRAP)}"
         }
-
-        // GET: bentuk ini TERBUKTI bekerja (main page, detail, season, play-info).
-        // JANGAN diubah.
-        private fun generateSignature(pathWithQuery: String, ts: String): String =
-            signCanonical("GET\napplication/json\napplication/json\n\n$ts\n\n$pathWithQuery", ts)
-
-        // POST: bentuk canonical-nya belum terbukti dari DEX. Kandidat dicoba
-        // berurutan saat runtime; yang diterima server di-cache supaya
-        // request berikutnya langsung memakai yang benar.
-        private fun postCanonical(variant: Int, path: String, ts: String, body: String): String =
-            when (variant) {
-                0 -> "POST\napplication/json\napplication/json\n${md5Base64(body)}\n$ts\n\n$path"
-                1 -> "POST\napplication/json\napplication/json\n\n$ts\n\n$path"
-                2 -> "POST\napplication/json\napplication/json\n${md5(body)}\n$ts\n\n$path"
-                3 -> "GET\napplication/json\napplication/json\n\n$ts\n\n$path"
-                4 -> "POST\napplication/json\napplication/json\n\n$ts\n\n$path\n$body"
-                else -> "POST\napplication/json\napplication/json\n\n$ts\n${md5Base64(body)}\n$path"
-            }
-
-        private const val POST_VARIANT_COUNT = 6
-        @Volatile private var knownPostVariant: Int? = null
 
         private fun generateGuestToken(ts: String): String = "$ts,${md5(ts.reversed())}"
 
@@ -91,7 +98,7 @@ class MovieBoxProvider : MainAPI() {
             if (str.isNullOrBlank()) "" else URLDecoder.decode(str, "UTF-8")
     }
 
-    private fun baseHeaders(ts: String, signature: String, bearer: String?): Map<String, String> {
+    private fun headersFor(ts: String, signature: String, bearer: String?): Map<String, String> {
         val h = mutableMapOf(
             "user-agent" to CS_USER_AGENT,
             "accept" to "application/json",
@@ -105,34 +112,33 @@ class MovieBoxProvider : MainAPI() {
         return h
     }
 
-    /**
-     * POST ber-signature. Mengembalikan body response mentah, atau null.
-     * Mencoba tiap varian canonical sampai server menjawab code 0, lalu
-     * mengingat varian tersebut.
-     */
-    private suspend fun postSigned(path: String, body: String, bearer: String?): String? {
-        val order = knownPostVariant?.let { listOf(it) } ?: (0 until POST_VARIANT_COUNT).toList()
-        val mediaType = "application/json".toMediaTypeOrNull()
-
-        for (variant in order) {
-            val ts = System.currentTimeMillis().toString()
-            val sig = signCanonical(postCanonical(variant, path, ts, body), ts)
-            val res = try {
-                app.post(
-                    "$mainUrl$path",
-                    headers = baseHeaders(ts, sig, bearer),
-                    requestBody = body.toRequestBody(mediaType)
-                )
-            } catch (e: Exception) {
-                continue
-            }
-            val text = res.text
-            if (res.code == 200 && text.contains("\"code\":0")) {
-                knownPostVariant = variant
-                return text
-            }
+    private suspend fun getSigned(path: String, query: String, bearer: String?): String? {
+        val ts = System.currentTimeMillis().toString()
+        val pathWithQuery = if (query.isBlank()) path else "$path?$query"
+        return try {
+            app.get(
+                "$mainUrl$pathWithQuery",
+                headers = headersFor(ts, generateSignature("GET", pathWithQuery, ts), bearer)
+            ).text
+        } catch (e: Exception) {
+            null
         }
-        return null
+    }
+
+    /** POST ber-signature. Satu implementasi, bukan percobaan beberapa varian. */
+    private suspend fun postSigned(path: String, body: String, bearer: String?): String? {
+        val ts = System.currentTimeMillis().toString()
+        val sig = generateSignature("POST", path, ts, body)
+        return try {
+            val res = app.post(
+                "$mainUrl$path",
+                headers = headersFor(ts, sig, bearer),
+                requestBody = body.toRequestBody("application/json".toMediaTypeOrNull())
+            )
+            if (res.code == 200) res.text else null
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private suspend fun getBearerToken(): String? {
@@ -142,21 +148,16 @@ class MovieBoxProvider : MainAPI() {
 
         val response = app.get(
             "$mainUrl$path?$query",
-            headers = baseHeaders(ts, generateSignature("$path?$query", ts), null)
+            headers = headersFor(ts, generateSignature("GET", "$path?$query", ts), null)
         )
 
         val xUserHeader = response.headers["x-user"] ?: return null
         return """"token"\s*:\s*"([^"]+)"""".toRegex().find(xUserHeader)?.groupValues?.get(1)
     }
 
-    // ---------------------------------------------------------------
-    // Pemungut hasil yang tahan perubahan bentuk response.
-    // Nama field yang dipakai (subjectId / title / cover.url / subjectType)
-    // semuanya TERBUKTI dari dump JSON server dan dari DTO di APK
-    // (SearchSubject mewarisi Subject). Yang TIDAK diasumsikan adalah
-    // di kedalaman mana objek itu berada, karena bentuk pembungkusnya
-    // (results/pager/tabs) belum dibuktikan field demi field.
-    // ---------------------------------------------------------------
+    // Nama field (subjectId / title / cover.url / subjectType) terbukti dari
+    // dump JSON server dan dari DTO APK (SearchSubject mewarisi Subject).
+    // Yang tidak diasumsikan hanya kedalaman sarangnya.
     private fun collectSubjects(node: Any?, out: MutableList<SearchResponse>, seen: MutableSet<String>) {
         when (node) {
             is JSONObject -> {
@@ -180,24 +181,22 @@ class MovieBoxProvider : MainAPI() {
                 }
                 for (key in node.keys()) collectSubjects(node.opt(key), out, seen)
             }
-            is JSONArray -> {
-                for (i in 0 until node.length()) collectSubjects(node.opt(i), out, seen)
-            }
+            is JSONArray -> for (i in 0 until node.length()) collectSubjects(node.opt(i), out, seen)
         }
     }
 
     private fun parseSubjects(rawJson: String?): List<SearchResponse> {
         if (rawJson.isNullOrBlank()) return emptyList()
         val out = mutableListOf<SearchResponse>()
-        try {
+        return try {
             collectSubjects(JSONObject(rawJson), out, mutableSetOf())
+            out
         } catch (e: Exception) {
-            return emptyList()
+            emptyList()
         }
-        return out
     }
 
-    // 1. MAIN PAGE  (tidak diubah - sudah bekerja)
+    // 1. MAIN PAGE
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -209,7 +208,7 @@ class MovieBoxProvider : MainAPI() {
 
         val response = app.get(
             "$mainUrl$path?$query",
-            headers = baseHeaders(ts, generateSignature("$path?$query", ts), bearerToken)
+            headers = headersFor(ts, generateSignature("GET", "$path?$query", ts), bearerToken)
         )
 
         val jsonRes = response.parsedSafe<RankingResponse>() ?: return null
@@ -235,10 +234,7 @@ class MovieBoxProvider : MainAPI() {
         return newHomePageResponse(request.name, homeItems)
     }
 
-    // 2. SEARCH  -- endpoint resmi
-    //    POST /wefeed-mobile-bff/subject-api/search/v2
-    //    body {"page":1,"perPage":10,"keyword":<q>,"tabId":""}
-    //    page=1 dan perPage=10 keduanya terbukti dari bytecode aplikasi.
+    // 2. SEARCH
     override suspend fun search(query: String): List<SearchResponse> {
         val bearerToken = getBearerToken() ?: return emptyList()
         val body = JSONObject()
@@ -248,9 +244,9 @@ class MovieBoxProvider : MainAPI() {
             .put("tabId", "")
             .toString()
 
-        val text = postSigned("/wefeed-mobile-bff/subject-api/search/v2", body, bearerToken)
-            ?: return emptyList()
-        return parseSubjects(text)
+        return parseSubjects(
+            postSigned("/wefeed-mobile-bff/subject-api/search/v2", body, bearerToken)
+        )
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
@@ -262,18 +258,14 @@ class MovieBoxProvider : MainAPI() {
         val subjectType: Int = 1
     )
 
-    // Rekomendasi: POST /wefeed-mobile-bff/subject-api/detail-rec
-    // body {"subjectId":<id>,"page":1,"perPage":6}
     private suspend fun fetchRecommendations(subjectId: String, bearer: String?): List<SearchResponse> {
         val body = JSONObject()
             .put("subjectId", subjectId)
             .put("page", 1)
             .put("perPage", 6)
             .toString()
-        val text = postSigned("/wefeed-mobile-bff/subject-api/detail-rec", body, bearer)
-        return parseSubjects(text).filterNot {
-            it.url.substringAfter("id=").substringBefore("&") == subjectId
-        }
+        return parseSubjects(postSigned("/wefeed-mobile-bff/subject-api/detail-rec", body, bearer))
+            .filterNot { it.url.substringAfter("id=").substringBefore("&") == subjectId }
     }
 
     // 3. LOAD
@@ -292,7 +284,7 @@ class MovieBoxProvider : MainAPI() {
 
         val responseGet = app.get(
             "$mainUrl$pathGet?$queryGet",
-            headers = baseHeaders(ts, generateSignature("$pathGet?$queryGet", ts), bearerToken)
+            headers = headersFor(ts, generateSignature("GET", "$pathGet?$queryGet", ts), bearerToken)
         )
 
         val detailRes = responseGet.parsedSafe<SubjectDetailResponse>()
@@ -305,9 +297,7 @@ class MovieBoxProvider : MainAPI() {
         val yearInt = subject.releaseDate?.take(4)?.toIntOrNull()
         val ratingStr = subject.imdbRatingValue ?: subject.imdbRate
 
-        // Server mengirim "VideoAddress" (huruf besar). DTO lama memetakan
-        // "videoAddress" sehingga parsedSafe mengisi null tanpa error dan
-        // trailer tidak pernah muncul. Sekarang kedua ejaan diterima.
+        // TRAILER - sudah berfungsi, tidak diubah.
         val trailerUrl = subject.trailer?.let { it.videoAddressUpper ?: it.videoAddressLower }?.url
 
         val genreTags = subject.genre?.split(",")?.map { it.trim() } ?: emptyList()
@@ -320,11 +310,7 @@ class MovieBoxProvider : MainAPI() {
             )
         } ?: emptyList()
 
-        val recs = try {
-            fetchRecommendations(cleanId, bearerToken)
-        } catch (e: Exception) {
-            emptyList()
-        }
+        val recs = fetchRecommendations(cleanId, bearerToken)
 
         val tsSeason = System.currentTimeMillis().toString()
         val pathSeason = "/wefeed-mobile-bff/subject-api/season-info"
@@ -332,7 +318,7 @@ class MovieBoxProvider : MainAPI() {
 
         val responseSeason = app.get(
             "$mainUrl$pathSeason?$querySeason",
-            headers = baseHeaders(tsSeason, generateSignature("$pathSeason?$querySeason", tsSeason), bearerToken)
+            headers = headersFor(tsSeason, generateSignature("GET", "$pathSeason?$querySeason", tsSeason), bearerToken)
         )
 
         val seasonRes = responseSeason.parsedSafe<SeasonInfoResponse>()
@@ -395,7 +381,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 4. INTERCEPTOR COOKIE EXOPLAYER  (tidak diubah)
+    // 4. INTERCEPTOR COOKIE EXOPLAYER
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
         return Interceptor { chain ->
             val request = chain.request()
@@ -412,7 +398,64 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 5. LOAD LINKS  (tidak diubah)
+    // SUBTITLE
+    // Endpoint GET yang ada di APK:
+    //   /wefeed-mobile-bff/subject-api/get-stream-captions
+    //     @Query(subjectId) @Query(streamId)
+    // Bentuk response belum dibongkar field demi field, jadi pemungutnya
+    // mencari objek dengan url berkas subtitle lalu mengambil label bahasa
+    // dari kunci yang tersedia.
+    private fun looksLikeSubtitle(url: String): Boolean {
+        val u = url.lowercase().substringBefore("?")
+        return u.startsWith("http") &&
+            (u.endsWith(".srt") || u.endsWith(".vtt") || u.endsWith(".ass") ||
+                u.endsWith(".ssa") || u.endsWith(".sub"))
+    }
+
+    private fun collectSubtitles(node: Any?, out: MutableList<SubtitleFile>, seen: MutableSet<String>) {
+        when (node) {
+            is JSONObject -> {
+                val url = node.optString("url", "")
+                if (url.isNotBlank() && looksLikeSubtitle(url) && seen.add(url)) {
+                    var label = "Unknown"
+                    for (k in listOf("lanName", "lan", "language", "languageName", "name")) {
+                        val v = node.optString(k, "")
+                        if (v.isNotBlank()) {
+                            label = v
+                            break
+                        }
+                    }
+                    out.add(SubtitleFile(label, url))
+                }
+                for (key in node.keys()) collectSubtitles(node.opt(key), out, seen)
+            }
+            is JSONArray -> for (i in 0 until node.length()) collectSubtitles(node.opt(i), out, seen)
+        }
+    }
+
+    private suspend fun loadSubtitles(
+        subjectId: String,
+        streamId: String?,
+        bearer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
+        if (streamId.isNullOrBlank()) return
+        // parameter diurutkan alfabetis, sama seperti endpoint lain yang bekerja
+        val raw = getSigned(
+            "/wefeed-mobile-bff/subject-api/get-stream-captions",
+            "streamId=$streamId&subjectId=$subjectId",
+            bearer
+        ) ?: return
+        val out = mutableListOf<SubtitleFile>()
+        try {
+            collectSubtitles(JSONObject(raw), out, mutableSetOf())
+        } catch (e: Exception) {
+            return
+        }
+        out.forEach(subtitleCallback)
+    }
+
+    // 5. LOAD LINKS
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -437,7 +480,7 @@ class MovieBoxProvider : MainAPI() {
 
             val response = app.get(
                 "$mainUrl$path?$query",
-                headers = baseHeaders(ts, generateSignature("$path?$query", ts), bearerToken)
+                headers = headersFor(ts, generateSignature("GET", "$path?$query", ts), bearerToken)
             )
 
             val playData = response.parsedSafe<PlayInfoResponse>()
@@ -452,6 +495,8 @@ class MovieBoxProvider : MainAPI() {
         val targetStream = foundStream ?: return false
         val mpdUrl = targetStream.url ?: return false
         val cleanCookie = (targetStream.signCookie ?: return false).trimEnd(';')
+
+        loadSubtitles(epData.subjectId, targetStream.id, bearerToken, subtitleCallback)
 
         callback(
             newExtractorLink(
@@ -511,8 +556,6 @@ class MovieBoxProvider : MainAPI() {
         val avatarUrl: String?
     )
 
-    // Server mengirim "VideoAddress"; DTO resmi APK menulis "videoAddress".
-    // Kedua-duanya diterima supaya tidak bergantung pada versi respons.
     data class TrailerItem(
         @JsonProperty("VideoAddress") val videoAddressUpper: VideoAddressItem? = null,
         @JsonProperty("videoAddress") val videoAddressLower: VideoAddressItem? = null
