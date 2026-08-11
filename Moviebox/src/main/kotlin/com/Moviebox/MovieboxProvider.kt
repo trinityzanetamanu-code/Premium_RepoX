@@ -3,7 +3,12 @@ package com.Moviebox
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.app
+import com.fasterxml.jackson.annotation.JsonProperty
 import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -33,7 +38,7 @@ class MovieBoxProvider : MainAPI() {
     companion object {
         private const val CS_USER_AGENT = "com.community.oneroom/50020088 (Linux; U; Android 13; en_US; Samsung; Build/TQ3A.230901.001)"
         private const val CLIENT_INFO = """{"package_name":"com.community.oneroom","version_name":"3.0.13.0325.03","version_code":50020088,"os":"android","os_version":"13","device_id":"71e0f7746936dc98","install_store":"ps","system_language":"en","net":"NETWORK_WIFI","region":"US","timezone":"Asia/Calcutta","sp_code":""}"""
-        
+
         private val SECRET_BYTES: ByteArray by lazy {
             val step1 = String(Base64.decode("NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw==", Base64.DEFAULT), Charsets.UTF_8)
             Base64.decode(step1, Base64.DEFAULT)
@@ -44,54 +49,155 @@ class MovieBoxProvider : MainAPI() {
             return md.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         }
 
-        private fun generateSignature(pathWithQuery: String, ts: String): String {
-            val canonical = "GET\napplication/json\napplication/json\n\n$ts\n\n$pathWithQuery"
+        private fun md5Base64(input: String): String {
+            val md = MessageDigest.getInstance("MD5")
+            return Base64.encodeToString(md.digest(input.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
+        }
+
+        private fun signCanonical(canonical: String, ts: String): String {
             val mac = Mac.getInstance("HmacMD5")
             mac.init(SecretKeySpec(SECRET_BYTES, "HmacMD5"))
             val hmacBytes = mac.doFinal(canonical.toByteArray(Charsets.UTF_8))
-            val sigB64 = Base64.encodeToString(hmacBytes, Base64.NO_WRAP)
-            return "$ts|2|$sigB64"
+            return "$ts|2|${Base64.encodeToString(hmacBytes, Base64.NO_WRAP)}"
         }
 
-        private fun generateGuestToken(ts: String): String {
-            val revTs = ts.reversed()
-            return "$ts,${md5(revTs)}"
-        }
+        // GET: bentuk ini TERBUKTI bekerja (main page, detail, season, play-info).
+        // JANGAN diubah.
+        private fun generateSignature(pathWithQuery: String, ts: String): String =
+            signCanonical("GET\napplication/json\napplication/json\n\n$ts\n\n$pathWithQuery", ts)
 
-        private fun enc(str: String?): String {
-            return if (str.isNullOrBlank()) "" else URLEncoder.encode(str, "UTF-8")
-        }
+        // POST: bentuk canonical-nya belum terbukti dari DEX. Kandidat dicoba
+        // berurutan saat runtime; yang diterima server di-cache supaya
+        // request berikutnya langsung memakai yang benar.
+        private fun postCanonical(variant: Int, path: String, ts: String, body: String): String =
+            when (variant) {
+                0 -> "POST\napplication/json\napplication/json\n${md5Base64(body)}\n$ts\n\n$path"
+                1 -> "POST\napplication/json\napplication/json\n\n$ts\n\n$path"
+                2 -> "POST\napplication/json\napplication/json\n${md5(body)}\n$ts\n\n$path"
+                3 -> "GET\napplication/json\napplication/json\n\n$ts\n\n$path"
+                4 -> "POST\napplication/json\napplication/json\n\n$ts\n\n$path\n$body"
+                else -> "POST\napplication/json\napplication/json\n\n$ts\n${md5Base64(body)}\n$path"
+            }
 
-        private fun dec(str: String?): String {
-            return if (str.isNullOrBlank()) "" else URLDecoder.decode(str, "UTF-8")
+        private const val POST_VARIANT_COUNT = 6
+        @Volatile private var knownPostVariant: Int? = null
+
+        private fun generateGuestToken(ts: String): String = "$ts,${md5(ts.reversed())}"
+
+        private fun enc(str: String?): String =
+            if (str.isNullOrBlank()) "" else URLEncoder.encode(str, "UTF-8")
+
+        private fun dec(str: String?): String =
+            if (str.isNullOrBlank()) "" else URLDecoder.decode(str, "UTF-8")
+    }
+
+    private fun baseHeaders(ts: String, signature: String, bearer: String?): Map<String, String> {
+        val h = mutableMapOf(
+            "user-agent" to CS_USER_AGENT,
+            "accept" to "application/json",
+            "content-type" to "application/json",
+            "x-client-token" to generateGuestToken(ts),
+            "x-tr-signature" to signature,
+            "x-client-info" to CLIENT_INFO,
+            "x-client-status" to "0"
+        )
+        if (!bearer.isNullOrBlank()) h["authorization"] = "Bearer $bearer"
+        return h
+    }
+
+    /**
+     * POST ber-signature. Mengembalikan body response mentah, atau null.
+     * Mencoba tiap varian canonical sampai server menjawab code 0, lalu
+     * mengingat varian tersebut.
+     */
+    private suspend fun postSigned(path: String, body: String, bearer: String?): String? {
+        val order = knownPostVariant?.let { listOf(it) } ?: (0 until POST_VARIANT_COUNT).toList()
+        val mediaType = "application/json".toMediaTypeOrNull()
+
+        for (variant in order) {
+            val ts = System.currentTimeMillis().toString()
+            val sig = signCanonical(postCanonical(variant, path, ts, body), ts)
+            val res = try {
+                app.post(
+                    "$mainUrl$path",
+                    headers = baseHeaders(ts, sig, bearer),
+                    requestBody = body.toRequestBody(mediaType)
+                )
+            } catch (e: Exception) {
+                continue
+            }
+            val text = res.text
+            if (res.code == 200 && text.contains("\"code\":0")) {
+                knownPostVariant = variant
+                return text
+            }
         }
+        return null
     }
 
     private suspend fun getBearerToken(): String? {
         val ts = System.currentTimeMillis().toString()
         val path = "/wefeed-mobile-bff/tab/ranking-list"
         val query = "page=1&perPage=1&tabId=0"
-        val fullUrl = "$mainUrl$path?$query"
 
         val response = app.get(
-            fullUrl,
-            headers = mapOf(
-                "user-agent" to CS_USER_AGENT,
-                "accept" to "application/json",
-                "content-type" to "application/json",
-                "x-client-token" to generateGuestToken(ts),
-                "x-tr-signature" to generateSignature("$path?$query", ts),
-                "x-client-info" to CLIENT_INFO,
-                "x-client-status" to "0"
-            )
+            "$mainUrl$path?$query",
+            headers = baseHeaders(ts, generateSignature("$path?$query", ts), null)
         )
 
         val xUserHeader = response.headers["x-user"] ?: return null
-        val tokenMatch = """"token"\s*:\s*"([^"]+)"""".toRegex().find(xUserHeader)
-        return tokenMatch?.groupValues?.get(1)
+        return """"token"\s*:\s*"([^"]+)"""".toRegex().find(xUserHeader)?.groupValues?.get(1)
     }
 
-    // 1. MAIN PAGE
+    // ---------------------------------------------------------------
+    // Pemungut hasil yang tahan perubahan bentuk response.
+    // Nama field yang dipakai (subjectId / title / cover.url / subjectType)
+    // semuanya TERBUKTI dari dump JSON server dan dari DTO di APK
+    // (SearchSubject mewarisi Subject). Yang TIDAK diasumsikan adalah
+    // di kedalaman mana objek itu berada, karena bentuk pembungkusnya
+    // (results/pager/tabs) belum dibuktikan field demi field.
+    // ---------------------------------------------------------------
+    private fun collectSubjects(node: Any?, out: MutableList<SearchResponse>, seen: MutableSet<String>) {
+        when (node) {
+            is JSONObject -> {
+                val subjectId = node.optString("subjectId", "")
+                val title = node.optString("title", "")
+                if (subjectId.isNotBlank() && title.isNotBlank() && seen.add(subjectId)) {
+                    val poster = node.optJSONObject("cover")?.optString("url").orEmpty()
+                    val isSeries = node.optInt("subjectType", 1) == 2
+                    val detailUrl = "$mainUrl/detail?id=$subjectId"
+                    out.add(
+                        if (isSeries) {
+                            newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
+                                this.posterUrl = poster
+                            }
+                        } else {
+                            newMovieSearchResponse(title, detailUrl, TvType.Movie) {
+                                this.posterUrl = poster
+                            }
+                        }
+                    )
+                }
+                for (key in node.keys()) collectSubjects(node.opt(key), out, seen)
+            }
+            is JSONArray -> {
+                for (i in 0 until node.length()) collectSubjects(node.opt(i), out, seen)
+            }
+        }
+    }
+
+    private fun parseSubjects(rawJson: String?): List<SearchResponse> {
+        if (rawJson.isNullOrBlank()) return emptyList()
+        val out = mutableListOf<SearchResponse>()
+        try {
+            collectSubjects(JSONObject(rawJson), out, mutableSetOf())
+        } catch (e: Exception) {
+            return emptyList()
+        }
+        return out
+    }
+
+    // 1. MAIN PAGE  (tidak diubah - sudah bekerja)
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -100,20 +206,10 @@ class MovieBoxProvider : MainAPI() {
         val ts = System.currentTimeMillis().toString()
         val path = "/wefeed-mobile-bff/tab/ranking-list"
         val query = "categoryType=${request.data}&page=$page&perPage=10&tabId=0"
-        val fullUrl = "$mainUrl$path?$query"
 
         val response = app.get(
-            fullUrl,
-            headers = mapOf(
-                "authorization" to "Bearer $bearerToken",
-                "user-agent" to CS_USER_AGENT,
-                "accept" to "application/json",
-                "content-type" to "application/json",
-                "x-client-token" to generateGuestToken(ts),
-                "x-tr-signature" to generateSignature("$path?$query", ts),
-                "x-client-info" to CLIENT_INFO,
-                "x-client-status" to "0"
-            )
+            "$mainUrl$path?$query",
+            headers = baseHeaders(ts, generateSignature("$path?$query", ts), bearerToken)
         )
 
         val jsonRes = response.parsedSafe<RankingResponse>() ?: return null
@@ -123,11 +219,9 @@ class MovieBoxProvider : MainAPI() {
             val subjectId = item.subjectId ?: return@mapNotNull null
             val title = item.title ?: "Unknown"
             val posterUrl = item.cover?.url ?: ""
-            val subjectType = item.subjectType ?: 1
-
             val detailUrl = "$mainUrl/detail?id=$subjectId"
 
-            if (subjectType == 2) {
+            if ((item.subjectType ?: 1) == 2) {
                 newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
                     this.posterUrl = posterUrl
                 }
@@ -141,52 +235,25 @@ class MovieBoxProvider : MainAPI() {
         return newHomePageResponse(request.name, homeItems)
     }
 
-    // 2. SEARCH
-    override suspend fun search(query: String): List<SearchResponse>? {
-        val bearerToken = getBearerToken() ?: return null
-        val ts = System.currentTimeMillis().toString()
-        val path = "/wefeed-mobile-bff/tab/ranking-list"
-        val queryStr = "page=1&perPage=20&tabId=0"
-        val fullUrl = "$mainUrl$path?$queryStr"
+    // 2. SEARCH  -- endpoint resmi
+    //    POST /wefeed-mobile-bff/subject-api/search/v2
+    //    body {"page":1,"perPage":10,"keyword":<q>,"tabId":""}
+    //    page=1 dan perPage=10 keduanya terbukti dari bytecode aplikasi.
+    override suspend fun search(query: String): List<SearchResponse> {
+        val bearerToken = getBearerToken() ?: return emptyList()
+        val body = JSONObject()
+            .put("page", 1)
+            .put("perPage", 10)
+            .put("keyword", query)
+            .put("tabId", "")
+            .toString()
 
-        val response = app.get(
-            fullUrl,
-            headers = mapOf(
-                "authorization" to "Bearer $bearerToken",
-                "user-agent" to CS_USER_AGENT,
-                "accept" to "application/json",
-                "content-type" to "application/json",
-                "x-client-token" to generateGuestToken(ts),
-                "x-tr-signature" to generateSignature("$path?$queryStr", ts),
-                "x-client-info" to CLIENT_INFO,
-                "x-client-status" to "0"
-            )
-        )
-
-        val searchRes = response.parsedSafe<RankingResponse>()
-        val items = searchRes?.data?.subjects
-
-        return items?.filter { 
-            it.title?.contains(query, ignoreCase = true) == true 
-        }?.mapNotNull { item ->
-            val subjectId = item.subjectId ?: return@mapNotNull null
-            val title = item.title ?: "Unknown"
-            val posterUrl = item.cover?.url ?: ""
-            val subjectType = item.subjectType ?: 1
-
-            val detailUrl = "$mainUrl/detail?id=$subjectId"
-
-            if (subjectType == 2) {
-                newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
-                    this.posterUrl = posterUrl
-                }
-            } else {
-                newMovieSearchResponse(title, detailUrl, TvType.Movie) {
-                    this.posterUrl = posterUrl
-                }
-            }
-        }
+        val text = postSigned("/wefeed-mobile-bff/subject-api/search/v2", body, bearerToken)
+            ?: return emptyList()
+        return parseSubjects(text)
     }
+
+    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     data class EpData(
         val subjectId: String,
@@ -195,7 +262,21 @@ class MovieBoxProvider : MainAPI() {
         val subjectType: Int = 1
     )
 
-    // 3. LOAD (DETAIL RESMI: SINOPSIS, AKTOR, TRAILER, EPISODE)
+    // Rekomendasi: POST /wefeed-mobile-bff/subject-api/detail-rec
+    // body {"subjectId":<id>,"page":1,"perPage":6}
+    private suspend fun fetchRecommendations(subjectId: String, bearer: String?): List<SearchResponse> {
+        val body = JSONObject()
+            .put("subjectId", subjectId)
+            .put("page", 1)
+            .put("perPage", 6)
+            .toString()
+        val text = postSigned("/wefeed-mobile-bff/subject-api/detail-rec", body, bearer)
+        return parseSubjects(text).filterNot {
+            it.url.substringAfter("id=").substringBefore("&") == subjectId
+        }
+    }
+
+    // 3. LOAD
     override suspend fun load(url: String): LoadResponse? {
         val cleanId = when {
             url.contains("id=") -> url.substringAfter("id=").substringBefore("&")
@@ -208,20 +289,10 @@ class MovieBoxProvider : MainAPI() {
         val ts = System.currentTimeMillis().toString()
         val pathGet = "/wefeed-mobile-bff/subject-api/get"
         val queryGet = "subjectId=$cleanId"
-        val fullUrlGet = "$mainUrl$pathGet?$queryGet"
 
         val responseGet = app.get(
-            fullUrlGet,
-            headers = mapOf(
-                "authorization" to "Bearer $bearerToken",
-                "user-agent" to CS_USER_AGENT,
-                "accept" to "application/json",
-                "content-type" to "application/json",
-                "x-client-token" to generateGuestToken(ts),
-                "x-tr-signature" to generateSignature("$pathGet?$queryGet", ts),
-                "x-client-info" to CLIENT_INFO,
-                "x-client-status" to "0"
-            )
+            "$mainUrl$pathGet?$queryGet",
+            headers = baseHeaders(ts, generateSignature("$pathGet?$queryGet", ts), bearerToken)
         )
 
         val detailRes = responseGet.parsedSafe<SubjectDetailResponse>()
@@ -233,7 +304,12 @@ class MovieBoxProvider : MainAPI() {
         val description = subject.description
         val yearInt = subject.releaseDate?.take(4)?.toIntOrNull()
         val ratingStr = subject.imdbRatingValue ?: subject.imdbRate
-        val trailerUrl = subject.trailer?.videoAddress?.url
+
+        // Server mengirim "VideoAddress" (huruf besar). DTO lama memetakan
+        // "videoAddress" sehingga parsedSafe mengisi null tanpa error dan
+        // trailer tidak pernah muncul. Sekarang kedua ejaan diterima.
+        val trailerUrl = subject.trailer?.let { it.videoAddressUpper ?: it.videoAddressLower }?.url
+
         val genreTags = subject.genre?.split(",")?.map { it.trim() } ?: emptyList()
 
         val castActors = subject.staffList?.mapNotNull { staff ->
@@ -244,23 +320,19 @@ class MovieBoxProvider : MainAPI() {
             )
         } ?: emptyList()
 
+        val recs = try {
+            fetchRecommendations(cleanId, bearerToken)
+        } catch (e: Exception) {
+            emptyList()
+        }
+
         val tsSeason = System.currentTimeMillis().toString()
         val pathSeason = "/wefeed-mobile-bff/subject-api/season-info"
         val querySeason = "subjectId=$cleanId"
-        val fullUrlSeason = "$mainUrl$pathSeason?$querySeason"
 
         val responseSeason = app.get(
-            fullUrlSeason,
-            headers = mapOf(
-                "authorization" to "Bearer $bearerToken",
-                "user-agent" to CS_USER_AGENT,
-                "accept" to "application/json",
-                "content-type" to "application/json",
-                "x-client-token" to generateGuestToken(tsSeason),
-                "x-tr-signature" to generateSignature("$pathSeason?$querySeason", tsSeason),
-                "x-client-info" to CLIENT_INFO,
-                "x-client-status" to "0"
-            )
+            "$mainUrl$pathSeason?$querySeason",
+            headers = baseHeaders(tsSeason, generateSignature("$pathSeason?$querySeason", tsSeason), bearerToken)
         )
 
         val seasonRes = responseSeason.parsedSafe<SeasonInfoResponse>()
@@ -302,6 +374,7 @@ class MovieBoxProvider : MainAPI() {
                 this.score = Score.from(ratingStr, 10)
                 this.actors = castActors
                 this.tags = genreTags
+                this.recommendations = recs
                 if (!trailerUrl.isNullOrBlank()) {
                     this.trailers.add(TrailerData(trailerUrl, mainUrl, true))
                 }
@@ -314,6 +387,7 @@ class MovieBoxProvider : MainAPI() {
                 this.score = Score.from(ratingStr, 10)
                 this.actors = castActors
                 this.tags = genreTags
+                this.recommendations = recs
                 if (!trailerUrl.isNullOrBlank()) {
                     this.trailers.add(TrailerData(trailerUrl, mainUrl, true))
                 }
@@ -321,7 +395,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 4. INTERCEPTOR COOKIE EXOPLAYER
+    // 4. INTERCEPTOR COOKIE EXOPLAYER  (tidak diubah)
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
         return Interceptor { chain ->
             val request = chain.request()
@@ -338,7 +412,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 5. LOAD LINKS
+    // 5. LOAD LINKS  (tidak diubah)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -360,20 +434,10 @@ class MovieBoxProvider : MainAPI() {
             val ts = System.currentTimeMillis().toString()
             val path = "/wefeed-mobile-bff/subject-api/play-info"
             val query = "ep=$ep&se=$se&subjectId=${epData.subjectId}"
-            val fullUrl = "$mainUrl$path?$query"
 
             val response = app.get(
-                fullUrl,
-                headers = mapOf(
-                    "authorization" to "Bearer $bearerToken",
-                    "user-agent" to CS_USER_AGENT,
-                    "accept" to "application/json",
-                    "content-type" to "application/json",
-                    "x-client-token" to generateGuestToken(ts),
-                    "x-tr-signature" to generateSignature("$path?$query", ts),
-                    "x-client-info" to CLIENT_INFO,
-                    "x-client-status" to "0"
-                )
+                "$mainUrl$path?$query",
+                headers = baseHeaders(ts, generateSignature("$path?$query", ts), bearerToken)
             )
 
             val playData = response.parsedSafe<PlayInfoResponse>()
@@ -387,8 +451,7 @@ class MovieBoxProvider : MainAPI() {
 
         val targetStream = foundStream ?: return false
         val mpdUrl = targetStream.url ?: return false
-        val rawCookie = targetStream.signCookie ?: return false
-        val cleanCookie = rawCookie.trimEnd(';')
+        val cleanCookie = (targetStream.signCookie ?: return false).trimEnd(';')
 
         callback(
             newExtractorLink(
@@ -410,7 +473,7 @@ class MovieBoxProvider : MainAPI() {
         return true
     }
 
-    // MODELS RESMI
+    // MODELS
     data class RankingResponse(val code: Int?, val data: RankingData?)
     data class RankingData(
         val categoryList: List<CategoryItem>?,
@@ -448,11 +511,16 @@ class MovieBoxProvider : MainAPI() {
         val avatarUrl: String?
     )
 
+    // Server mengirim "VideoAddress"; DTO resmi APK menulis "videoAddress".
+    // Kedua-duanya diterima supaya tidak bergantung pada versi respons.
     data class TrailerItem(
-        val videoAddress: VideoAddressItem?
+        @JsonProperty("VideoAddress") val videoAddressUpper: VideoAddressItem? = null,
+        @JsonProperty("videoAddress") val videoAddressLower: VideoAddressItem? = null
     )
     data class VideoAddressItem(
-        val url: String?
+        val url: String?,
+        val definition: String? = null,
+        val duration: Int? = null
     )
 
     data class SeasonInfoResponse(val code: Int?, val data: SeasonInfoData?)
