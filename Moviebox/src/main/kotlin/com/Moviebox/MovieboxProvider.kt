@@ -7,12 +7,12 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import android.util.Base64
+import android.util.Log
 import java.net.URLEncoder
 import java.net.URLDecoder
 
@@ -36,6 +36,7 @@ class MovieBoxProvider : MainAPI() {
     )
 
     companion object {
+        private const val TAG = "MovieBox"
         private const val CS_USER_AGENT = "com.community.oneroom/50020088 (Linux; U; Android 13; en_US; Samsung; Build/TQ3A.230901.001)"
         private const val CLIENT_INFO = """{"package_name":"com.community.oneroom","version_name":"3.0.13.0325.03","version_code":50020088,"os":"android","os_version":"13","device_id":"71e0f7746936dc98","install_store":"ps","system_language":"en","net":"NETWORK_WIFI","region":"US","timezone":"Asia/Calcutta","sp_code":""}"""
 
@@ -125,7 +126,16 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    /** POST ber-signature. Satu implementasi, bukan percobaan beberapa varian. */
+    /**
+     * POST ber-signature.
+     *
+     * PENTING: RequestBody dibuat dari ByteArray, bukan String.
+     * Overload String pada OkHttp menambahkan "; charset=utf-8" ke media type
+     * kalau belum ada, lalu BridgeInterceptor menimpa header Content-Type dari
+     * body tersebut. Akibatnya yang DIKIRIM "application/json; charset=utf-8"
+     * sedangkan yang DITANDATANGANI "application/json" -> server menolak 407.
+     * Overload ByteArray memakai media type apa adanya.
+     */
     private suspend fun postSigned(path: String, body: String, bearer: String?): String? {
         val ts = System.currentTimeMillis().toString()
         val sig = generateSignature("POST", path, ts, body)
@@ -133,10 +143,13 @@ class MovieBoxProvider : MainAPI() {
             val res = app.post(
                 "$mainUrl$path",
                 headers = headersFor(ts, sig, bearer),
-                requestBody = body.toRequestBody("application/json".toMediaTypeOrNull())
+                requestBody = body.toByteArray(Charsets.UTF_8)
+                    .toRequestBody("application/json".toMediaTypeOrNull())
             )
+            Log.d(TAG, "POST $path HTTP=${res.code} bytes=${res.text.length}")
             if (res.code == 200) res.text else null
         } catch (e: Exception) {
+            Log.e(TAG, "POST $path gagal: ${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }
@@ -155,43 +168,81 @@ class MovieBoxProvider : MainAPI() {
         return """"token"\s*:\s*"([^"]+)"""".toRegex().find(xUserHeader)?.groupValues?.get(1)
     }
 
-    // Nama field (subjectId / title / cover.url / subjectType) terbukti dari
-    // dump JSON server dan dari DTO APK (SearchSubject mewarisi Subject).
-    // Yang tidak diasumsikan hanya kedalaman sarangnya.
-    private fun collectSubjects(node: Any?, out: MutableList<SearchResponse>, seen: MutableSet<String>) {
-        when (node) {
-            is JSONObject -> {
-                val subjectId = node.optString("subjectId", "")
-                val title = node.optString("title", "")
-                if (subjectId.isNotBlank() && title.isNotBlank() && seen.add(subjectId)) {
-                    val poster = node.optJSONObject("cover")?.optString("url").orEmpty()
-                    val isSeries = node.optInt("subjectType", 1) == 2
-                    val detailUrl = "$mainUrl/detail?id=$subjectId"
-                    out.add(
-                        if (isSeries) {
-                            newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
-                                this.posterUrl = poster
-                            }
-                        } else {
-                            newMovieSearchResponse(title, detailUrl, TvType.Movie) {
-                                this.posterUrl = poster
-                            }
-                        }
-                    )
-                }
-                for (key in node.keys()) collectSubjects(node.opt(key), out, seen)
+    // ---------------------------------------------------------------
+    // Struktur response sudah terbukti dari server, jadi parser mengikuti
+    // jalurnya secara eksplisit, bukan menelusuri seluruh pohon JSON:
+    //
+    //   search/v2   -> data.results[].subjects[]
+    //   detail-rec  -> data.items[]
+    //
+    // Keduanya berisi objek Subject yang sama bentuknya.
+    // ---------------------------------------------------------------
+    private fun subjectToSearchResponse(o: JSONObject): SearchResponse? {
+        val subjectId = o.optString("subjectId", "")
+        val title = o.optString("title", "")
+        if (subjectId.isBlank() || title.isBlank()) return null
+
+        // subjectType 1 = Movie, 2 = TV. Nilai lain (mis. 9 = UGC) dibuang
+        // karena tidak bisa diputar lewat play-info.
+        val type = o.optInt("subjectType", 1)
+        if (type != 1 && type != 2) return null
+
+        val poster = o.optJSONObject("cover")?.optString("url").orEmpty()
+        val detailUrl = "$mainUrl/detail?id=$subjectId"
+
+        return if (type == 2) {
+            newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
+                this.posterUrl = poster
             }
-            is JSONArray -> for (i in 0 until node.length()) collectSubjects(node.opt(i), out, seen)
+        } else {
+            newMovieSearchResponse(title, detailUrl, TvType.Movie) {
+                this.posterUrl = poster
+            }
         }
     }
 
-    private fun parseSubjects(rawJson: String?): List<SearchResponse> {
+    /** search/v2 : data.results[].subjects[] */
+    private fun parseSearchResults(rawJson: String?): List<SearchResponse> {
         if (rawJson.isNullOrBlank()) return emptyList()
-        val out = mutableListOf<SearchResponse>()
         return try {
-            collectSubjects(JSONObject(rawJson), out, mutableSetOf())
+            val root = JSONObject(rawJson)
+            val code = root.optInt("code", -1)
+            val data = root.optJSONObject("data")
+            val results = data?.optJSONArray("results")
+            val out = mutableListOf<SearchResponse>()
+            val seen = mutableSetOf<String>()
+            for (i in 0 until (results?.length() ?: 0)) {
+                val subjects = results!!.optJSONObject(i)?.optJSONArray("subjects") ?: continue
+                for (j in 0 until subjects.length()) {
+                    val obj = subjects.optJSONObject(j) ?: continue
+                    if (!seen.add(obj.optString("subjectId", ""))) continue
+                    subjectToSearchResponse(obj)?.let { out.add(it) }
+                }
+            }
+            Log.d(TAG, "[SEARCH] code=$code groups=${results?.length() ?: 0} mapped=${out.size}")
             out
         } catch (e: Exception) {
+            Log.e(TAG, "[SEARCH] parse gagal: ${e.javaClass.simpleName}: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** detail-rec : data.items[] */
+    private fun parseRecommendations(rawJson: String?): List<SearchResponse> {
+        if (rawJson.isNullOrBlank()) return emptyList()
+        return try {
+            val root = JSONObject(rawJson)
+            val code = root.optInt("code", -1)
+            val items = root.optJSONObject("data")?.optJSONArray("items")
+            val out = mutableListOf<SearchResponse>()
+            for (i in 0 until (items?.length() ?: 0)) {
+                val obj = items!!.optJSONObject(i) ?: continue
+                subjectToSearchResponse(obj)?.let { out.add(it) }
+            }
+            Log.d(TAG, "[RECOMMEND] code=$code items=${items?.length() ?: 0} mapped=${out.size}")
+            out
+        } catch (e: Exception) {
+            Log.e(TAG, "[RECOMMEND] parse gagal: ${e.javaClass.simpleName}: ${e.message}")
             emptyList()
         }
     }
@@ -236,7 +287,12 @@ class MovieBoxProvider : MainAPI() {
 
     // 2. SEARCH
     override suspend fun search(query: String): List<SearchResponse> {
-        val bearerToken = getBearerToken() ?: return emptyList()
+        Log.d(TAG, "[SEARCH] keyword=$query")
+        val bearerToken = getBearerToken()
+        if (bearerToken == null) {
+            Log.e(TAG, "[SEARCH] bearer token null")
+            return emptyList()
+        }
         val body = JSONObject()
             .put("page", 1)
             .put("perPage", 10)
@@ -244,9 +300,10 @@ class MovieBoxProvider : MainAPI() {
             .put("tabId", "")
             .toString()
 
-        return parseSubjects(
-            postSigned("/wefeed-mobile-bff/subject-api/search/v2", body, bearerToken)
-        )
+        val raw = postSigned("/wefeed-mobile-bff/subject-api/search/v2", body, bearerToken)
+        val out = parseSearchResults(raw)
+        Log.d(TAG, "[SEARCH] returning=${out.size}")
+        return out
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
@@ -259,13 +316,17 @@ class MovieBoxProvider : MainAPI() {
     )
 
     private suspend fun fetchRecommendations(subjectId: String, bearer: String?): List<SearchResponse> {
+        Log.d(TAG, "[RECOMMEND] subjectId=$subjectId")
         val body = JSONObject()
             .put("subjectId", subjectId)
             .put("page", 1)
             .put("perPage", 6)
             .toString()
-        return parseSubjects(postSigned("/wefeed-mobile-bff/subject-api/detail-rec", body, bearer))
+        val raw = postSigned("/wefeed-mobile-bff/subject-api/detail-rec", body, bearer)
+        val out = parseRecommendations(raw)
             .filterNot { it.url.substringAfter("id=").substringBefore("&") == subjectId }
+        Log.d(TAG, "[RECOMMEND] returning=${out.size}")
+        return out
     }
 
     // 3. LOAD
@@ -399,40 +460,9 @@ class MovieBoxProvider : MainAPI() {
     }
 
     // SUBTITLE
-    // Endpoint GET yang ada di APK:
-    //   /wefeed-mobile-bff/subject-api/get-stream-captions
-    //     @Query(subjectId) @Query(streamId)
-    // Bentuk response belum dibongkar field demi field, jadi pemungutnya
-    // mencari objek dengan url berkas subtitle lalu mengambil label bahasa
-    // dari kunci yang tersedia.
-    private fun looksLikeSubtitle(url: String): Boolean {
-        val u = url.lowercase().substringBefore("?")
-        return u.startsWith("http") &&
-            (u.endsWith(".srt") || u.endsWith(".vtt") || u.endsWith(".ass") ||
-                u.endsWith(".ssa") || u.endsWith(".sub"))
-    }
-
-    private fun collectSubtitles(node: Any?, out: MutableList<SubtitleFile>, seen: MutableSet<String>) {
-        when (node) {
-            is JSONObject -> {
-                val url = node.optString("url", "")
-                if (url.isNotBlank() && looksLikeSubtitle(url) && seen.add(url)) {
-                    var label = "Unknown"
-                    for (k in listOf("lanName", "lan", "language", "languageName", "name")) {
-                        val v = node.optString(k, "")
-                        if (v.isNotBlank()) {
-                            label = v
-                            break
-                        }
-                    }
-                    out.add(SubtitleFile(label, url))
-                }
-                for (key in node.keys()) collectSubtitles(node.opt(key), out, seen)
-            }
-            is JSONArray -> for (i in 0 until node.length()) collectSubtitles(node.opt(i), out, seen)
-        }
-    }
-
+    // Struktur terbukti dari server:
+    //   data.extCaptions[] { id, lan, lanName, url, size, delay }
+    // URL berakhiran .srt dengan query Policy/Signature -> dipakai apa adanya.
     private suspend fun loadSubtitles(
         subjectId: String,
         streamId: String?,
@@ -446,13 +476,23 @@ class MovieBoxProvider : MainAPI() {
             "streamId=$streamId&subjectId=$subjectId",
             bearer
         ) ?: return
-        val out = mutableListOf<SubtitleFile>()
         try {
-            collectSubtitles(JSONObject(raw), out, mutableSetOf())
+            val caps = JSONObject(raw).optJSONObject("data")?.optJSONArray("extCaptions")
+            var sent = 0
+            for (i in 0 until (caps?.length() ?: 0)) {
+                val c = caps!!.optJSONObject(i) ?: continue
+                val url = c.optString("url", "")
+                if (url.isBlank()) continue
+                val label = c.optString("lanName", "").ifBlank {
+                    c.optString("lan", "").ifBlank { "Unknown" }
+                }
+                subtitleCallback(SubtitleFile(label, url))
+                sent++
+            }
+            Log.d(TAG, "[SUBTITLE] extCaptions=${caps?.length() ?: 0} sent=$sent")
         } catch (e: Exception) {
-            return
+            Log.e(TAG, "[SUBTITLE] parse gagal: ${e.javaClass.simpleName}: ${e.message}")
         }
-        out.forEach(subtitleCallback)
     }
 
     // 5. LOAD LINKS
