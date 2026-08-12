@@ -86,12 +86,78 @@ object Adicinemax21Extractor : Adicinemax21() {
 
     // ================== VIDLINK SOURCE ==================
     suspend fun invokeVidlink(
-        tmdbId: Int?, season: Int?, episode: Int?, callback: (ExtractorLink) -> Unit,
+        tmdbId: Int?,
+        season: Int?,
+        episode: Int?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
     ) {
         val type = if (season == null) "movie" else "tv"
-        val url = if (season == null) "${Adicinemax21.vidlinkAPI}/$type/$tmdbId" else "${Adicinemax21.vidlinkAPI}/$type/$tmdbId/$season/$episode"
-        val videoLink = app.get(url, interceptor = WebViewResolver(Regex("""${Adicinemax21.vidlinkAPI}/api/b/$type/A{32}"""), timeout = 15_000L)).parsedSafe<VidlinkSources>()?.stream?.playlist
-        callback.invoke(newExtractorLink("Vidlink", "Vidlink", videoLink ?: return, ExtractorLinkType.M3U8) { this.referer = "${Adicinemax21.vidlinkAPI}/" })
+        val referer = "${Adicinemax21.vidlinkAPI}/"
+        val page = if (season == null) "${Adicinemax21.vidlinkAPI}/$type/$tmdbId"
+        else "${Adicinemax21.vidlinkAPI}/$type/$tmdbId/$season/$episode"
+
+        // Regex dilonggarkan dari A{32}. Token berbentuk base64url(24 byte nol +
+        // ciphertext), sehingga 32 karakter "A" di depan hanyalah akibat nonce
+        // nol dan bisa berubah sewaktu-waktu tanpa peringatan.
+        val stream = app.get(
+            page,
+            interceptor = WebViewResolver(
+                Regex("""${Adicinemax21.vidlinkAPI}/api/b/$type/[A-Za-z0-9_-]{40,}"""),
+                timeout = 15_000L
+            )
+        ).parsedSafe<VidlinkSources>()?.stream ?: return
+
+        // Header yang diberikan Vidlink untuk playlist. Untuk jalur dash berisi
+        // Cookie CloudFront, dan tanpa ini CDN membalas 403. Adicinemax21
+        // .getVideoInterceptor() otomatis meneruskannya ke ExoPlayer begitu
+        // header "Cookie" ada.
+        val playlistHeaders = buildMap {
+            stream.playlistHeaders?.forEach { (k, v) -> if (v.isNotBlank()) put(k, v) }
+            put("Referer", referer)
+        }
+
+        // ---------- jalur playlist: dash / hls ----------
+        // Catatan sengaja: response membawa requiresProxy=true, dan klien web
+        // Vidlink mengganti playlist dengan URL proxy. Proxy itu hanya untuk
+        // menembus CORS browser. ExoPlayer tidak terikat CORS, jadi kita pakai
+        // URL CDN asli dan cukup mengirimkan credential-nya sendiri.
+        stream.playlist?.takeIf { it.isNotBlank() }?.let { playlist ->
+            val linkType = when {
+                stream.deliveryType.equals("dash", true) -> ExtractorLinkType.DASH
+                stream.deliveryType.equals("hls", true) -> ExtractorLinkType.M3U8
+                playlist.contains(".mpd") -> ExtractorLinkType.DASH
+                playlist.contains(".m3u8") -> ExtractorLinkType.M3U8
+                else -> ExtractorLinkType.VIDEO
+            }
+            callback.invoke(
+                newExtractorLink("Vidlink", "Vidlink", playlist, linkType) {
+                    this.referer = referer
+                    this.quality = Qualities.P1080.value
+                    this.headers = playlistHeaders
+                }
+            )
+        }
+
+        // ---------- jalur file: mp4 per kualitas ----------
+        // Dilewatkan sepenuhnya oleh implementasi lama, padahal seluruh judul
+        // dengan deliveryType "file" hanya menyediakan stream di sini.
+        stream.qualities?.forEach { (label, item) ->
+            val mp4 = item.url?.takeIf { it.isNotBlank() } ?: return@forEach
+            callback.invoke(
+                newExtractorLink("Vidlink", "Vidlink ${label}p", mp4, ExtractorLinkType.VIDEO) {
+                    this.referer = referer
+                    this.quality = getQualityFromName(label)
+                    this.headers = mapOf("Referer" to referer)
+                }
+            )
+        }
+
+        // ---------- subtitle ----------
+        stream.captions?.forEach { cap ->
+            val sub = cap.url?.takeIf { it.isNotBlank() } ?: return@forEach
+            subtitleCallback.invoke(newSubtitleFile(cap.language ?: "Unknown", sub))
+        }
     }
 
     // ================== MOVIEBOX SOURCE ==================
