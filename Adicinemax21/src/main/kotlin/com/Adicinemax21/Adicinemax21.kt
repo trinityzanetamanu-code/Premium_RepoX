@@ -300,7 +300,7 @@ open class Adicinemax21 : TmdbProvider() {
         runAllAsync(
             { invokeMoviebox(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.airedYear, res.season, res.episode, subtitleCallback, callback) },
             { invokeKisskh(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.season, res.episode, subtitleCallback, callback) },
-            { invokeVidlink(res.id, res.season, res.episode, subtitleCallback, callback) }
+            { invokeVidlink(res.id, res.season, res.episode, callback) }
         )
         return true
     }
