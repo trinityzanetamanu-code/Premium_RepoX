@@ -101,10 +101,36 @@ data class KisskhSubtitle(
 )
 
 // ================== VIDLINK DATA CLASSES ==================
+// Bentuk response /api/b/ yang sudah terverifikasi dari runtime:
+//   deliveryType "dash" -> stream.playlist (.mpd) + stream.playlistHeaders.Cookie
+//   deliveryType "file" -> stream.qualities{"360","480","1080"} berisi mp4
+// Sebelumnya hanya "playlist" yang dideklarasikan, sehingga playlistHeaders,
+// qualities, dan captions ikut terbuang saat parsing.
 data class VidlinkSources(
+    @param:JsonProperty("sourceId") val sourceId: String? = null,
     @param:JsonProperty("stream") val stream: Stream? = null,
 ) {
     data class Stream(
+        @param:JsonProperty("id") val id: String? = null,
+        @param:JsonProperty("type") val type: String? = null,
+        @param:JsonProperty("deliveryType") val deliveryType: String? = null,
         @param:JsonProperty("playlist") val playlist: String? = null,
+        // Wadah credential. Untuk jalur dash berisi key "Cookie".
+        @param:JsonProperty("playlistHeaders") val playlistHeaders: Map<String, String>? = null,
+        @param:JsonProperty("requiresProxy") val requiresProxy: Boolean? = null,
+        @param:JsonProperty("qualities") val qualities: Map<String, Quality>? = null,
+        @param:JsonProperty("captions") val captions: List<Caption>? = null,
+    )
+
+    data class Quality(
+        @param:JsonProperty("type") val type: String? = null,
+        @param:JsonProperty("url") val url: String? = null,
+        @param:JsonProperty("requiresProxy") val requiresProxy: Boolean? = null,
+    )
+
+    data class Caption(
+        @param:JsonProperty("url") val url: String? = null,
+        @param:JsonProperty("language") val language: String? = null,
+        @param:JsonProperty("type") val type: String? = null,
     )
 }
