@@ -3,6 +3,7 @@ package com.Adicinemax21
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.Adicinemax21.Adicinemax21Extractor.invokeKisskh 
 import com.Adicinemax21.Adicinemax21Extractor.invokeMoviebox
+import com.Adicinemax21.Adicinemax21Extractor.invokeVidlink
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.metaproviders.TmdbProvider
@@ -36,6 +37,9 @@ open class Adicinemax21 : TmdbProvider() {
         const val jikanAPI = "https://api.jikan.moe/v4"
 
         private const val apiKey = "b030404650f279792a8d3287232358e3"
+
+        /** HANYA SUMBER YANG AKTIF */
+        const val vidlinkAPI = "https://vidlink.pro"
 
         fun getType(t: String?): TvType = when (t) {
             "movie" -> TvType.Movie
@@ -295,7 +299,8 @@ open class Adicinemax21 : TmdbProvider() {
         val res = parseJson<LinkData>(data)
         runAllAsync(
             { invokeMoviebox(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.airedYear, res.season, res.episode, subtitleCallback, callback) },
-            { invokeKisskh(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.season, res.episode, subtitleCallback, callback) }
+            { invokeKisskh(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.season, res.episode, subtitleCallback, callback) },
+            { invokeVidlink(res.id, res.season, res.episode, callback) }
         )
         return true
     }

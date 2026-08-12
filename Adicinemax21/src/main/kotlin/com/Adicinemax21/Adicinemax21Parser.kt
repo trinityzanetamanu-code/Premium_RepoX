@@ -99,3 +99,12 @@ data class KisskhSubtitle(
     @param:JsonProperty("src") val src: String?,
     @param:JsonProperty("label") val label: String?
 )
+
+// ================== VIDLINK DATA CLASSES ==================
+data class VidlinkSources(
+    @param:JsonProperty("stream") val stream: Stream? = null,
+) {
+    data class Stream(
+        @param:JsonProperty("playlist") val playlist: String? = null,
+    )
+}

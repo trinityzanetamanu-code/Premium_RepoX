@@ -3,6 +3,7 @@ package com.Adicinemax21
 import android.util.Base64
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -82,6 +83,16 @@ object Adicinemax21Extractor : Adicinemax21() {
     private data class KisskhKey(@JsonProperty("key") val key: String?)
     private data class KisskhSources(@JsonProperty("Video") val video: String?, @JsonProperty("ThirdParty") val thirdParty: String?)
     private data class KisskhSubtitle(@JsonProperty("src") val src: String?, @JsonProperty("label") val label: String?)
+
+    // ================== VIDLINK SOURCE ==================
+    suspend fun invokeVidlink(
+        tmdbId: Int?, season: Int?, episode: Int?, callback: (ExtractorLink) -> Unit,
+    ) {
+        val type = if (season == null) "movie" else "tv"
+        val url = if (season == null) "${Adicinemax21.vidlinkAPI}/$type/$tmdbId" else "${Adicinemax21.vidlinkAPI}/$type/$tmdbId/$season/$episode"
+        val videoLink = app.get(url, interceptor = WebViewResolver(Regex("""${Adicinemax21.vidlinkAPI}/api/b/$type/A{32}"""), timeout = 15_000L)).parsedSafe<VidlinkSources>()?.stream?.playlist
+        callback.invoke(newExtractorLink("Vidlink", "Vidlink", videoLink ?: return, ExtractorLinkType.M3U8) { this.referer = "${Adicinemax21.vidlinkAPI}/" })
+    }
 
     // ================== MOVIEBOX SOURCE ==================
     // Menggantikan invokeAdimoviebox() dan invokeAdimoviebox2().
