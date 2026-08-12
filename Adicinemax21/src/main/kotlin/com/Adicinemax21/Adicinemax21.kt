@@ -2,8 +2,7 @@ package com.Adicinemax21
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.Adicinemax21.Adicinemax21Extractor.invokeKisskh 
-import com.Adicinemax21.Adicinemax21Extractor.invokeAdimoviebox
-import com.Adicinemax21.Adicinemax21Extractor.invokeAdimoviebox2 
+import com.Adicinemax21.Adicinemax21Extractor.invokeMoviebox
 import com.Adicinemax21.Adicinemax21Extractor.invokeVidlink
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
@@ -14,6 +13,7 @@ import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import okhttp3.Interceptor
 
 open class Adicinemax21 : TmdbProvider() {
     override var name = "Adicinemax21"
@@ -298,12 +298,33 @@ open class Adicinemax21 : TmdbProvider() {
     ): Boolean {
         val res = parseJson<LinkData>(data)
         runAllAsync(
-            { invokeAdimoviebox2(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.season, res.episode, subtitleCallback, callback) },
+            { invokeMoviebox(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.airedYear, res.season, res.episode, subtitleCallback, callback) },
             { invokeKisskh(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.season, res.episode, subtitleCallback, callback) },
-            { invokeAdimoviebox(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.season, res.episode, subtitleCallback, callback) },
             { invokeVidlink(res.id, res.season, res.episode, callback) }
         )
         return true
+    }
+
+    /**
+     * Dipindahkan dari MovieBoxProvider.
+     *
+     * Stream MovieBox memakai signed cookie; tanpa interceptor ini ExoPlayer
+     * tidak mengirim header Cookie ke CDN dan semua request balas 403.
+     *
+     * Return null bila link tidak punya header Cookie, sehingga Kisskh dan
+     * Vidlink sama sekali tidak terpengaruh.
+     */
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        val cookie = extractorLink.headers["Cookie"]
+        if (cookie.isNullOrBlank()) return null
+        val userAgent = extractorLink.headers["User-Agent"]
+
+        return Interceptor { chain ->
+            val request = chain.request()
+            val builder = request.newBuilder().header("Cookie", cookie)
+            if (!userAgent.isNullOrBlank()) builder.header("User-Agent", userAgent)
+            chain.proceed(builder.build())
+        }
     }
 
     data class LinkData(

@@ -1,22 +1,18 @@
 package com.Adicinemax21
 
+import android.util.Base64
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
-import com.lagradost.nicehttp.RequestBodyTypes
-import kotlinx.coroutines.coroutineScope
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject 
-import android.net.Uri
+import org.json.JSONObject
 import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
-import android.annotation.SuppressLint
+import kotlin.math.abs
 
 object Adicinemax21Extractor : Adicinemax21() {
 
@@ -36,15 +32,15 @@ object Adicinemax21Extractor : Adicinemax21() {
             try {
                 val searchRes = app.get("$mainUrl/api/DramaList/Search?q=$query&type=0").text
                 val searchList = tryParseJson<ArrayList<KisskhMedia>>(searchRes) ?: return null
-                
+
                 val cleanQuery = query.replace(Regex("[^A-Za-z0-9]"), "").lowercase()
-                
-                return searchList.find { 
+
+                return searchList.find {
                     val cleanItemTitle = it.title?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase() ?: ""
-                    cleanItemTitle.contains(cleanQuery) 
-                } ?: searchList.firstOrNull { 
+                    cleanItemTitle.contains(cleanQuery)
+                } ?: searchList.firstOrNull {
                     val cleanItemTitle = it.title?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase() ?: ""
-                    cleanItemTitle.contains(cleanQuery) 
+                    cleanItemTitle.contains(cleanQuery)
                 }
             } catch (e: Exception) {
                 return null
@@ -65,7 +61,7 @@ object Adicinemax21Extractor : Adicinemax21() {
         val episodes = detailRes.episodes ?: return
         val targetEp = if (season == null) episodes.lastOrNull() else episodes.find { it.number?.toInt() == episode }
         val epsId = targetEp?.id ?: return
- 
+
         val kkeyVideo = app.get("$KISSKH_API$epsId&version=2.8.10").parsedSafe<KisskhKey>()?.key ?: ""
         val videoUrl = "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=null&time=null&kkey=$kkeyVideo"
         val sources = app.get(videoUrl).parsedSafe<KisskhSources>()
@@ -80,89 +76,13 @@ object Adicinemax21Extractor : Adicinemax21() {
             subtitleCallback.invoke(newSubtitleFile(sub.label ?: "Unknown", sub.src ?: return@forEach))
         }
     }
-    
+
     private data class KisskhMedia(@JsonProperty("id") val id: Int?, @JsonProperty("title") val title: String?)
     private data class KisskhDetail(@JsonProperty("episodes") val episodes: ArrayList<KisskhEpisode>?)
     private data class KisskhEpisode(@JsonProperty("id") val id: Int?, @JsonProperty("number") val number: Double?)
     private data class KisskhKey(@JsonProperty("key") val key: String?)
     private data class KisskhSources(@JsonProperty("Video") val video: String?, @JsonProperty("ThirdParty") val thirdParty: String?)
     private data class KisskhSubtitle(@JsonProperty("src") val src: String?, @JsonProperty("label") val label: String?)
-
-    // ================== ADIMOVIEBOX (OLD) SOURCE ==================
-    suspend fun invokeAdimoviebox(
-        title: String,
-        orgTitle: String? = null,
-        altTitle: String? = null,
-        year: Int?, season: Int?, episode: Int?,
-        subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
-    ) {
-        val mainUrl = "https://moviebox.ph"
-        val apiBaseUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff"
-        val bearerToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjY1NDQ3MzA2NDM5NjQ1MTYyMzIsImF0cCI6MywiZXh0IjoiMTc4MjUzNTQwMiIsImV4cCI6MTc5MDMxMTQwMiwiaWF0IjoxNzgyNTM1MTAyfQ.d2WpLFeF0erMdSlaaM1RMgnpyB4j1R1s2xVcY6a2Ut8"
-
-        val commonHeaders = mapOf(
-            "origin" to mainUrl,
-            "referer" to "$mainUrl/",
-            "x-client-info" to """{"timezone":"Asia/Jakarta"}""",
-            "accept-language" to "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-            "authorization" to "Bearer $bearerToken"
-        )
-
-        suspend fun search(query: String): AdimovieboxItem? {
-            val searchUrl = "$apiBaseUrl/subject/search"
-            val searchBody = mapOf("keyword" to query, "page" to 1, "perPage" to 10, "subjectType" to 0).toJson().toRequestBody(RequestBodyTypes.JSON.toMediaTypeOrNull())
-            val searchRes = app.post(searchUrl, headers = commonHeaders, requestBody = searchBody).text
-            val items = tryParseJson<AdimovieboxResponse>(searchRes)?.data?.items ?: return null
-            
-            val cleanQuery = query.replace(Regex("[^A-Za-z0-9]"), "").lowercase()
-            
-            return items.find { item ->
-                val itemYear = item.releaseDate?.split("-")?.firstOrNull()?.toIntOrNull()
-                val cleanItemTitle = item.title?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase() ?: ""
-                
-                cleanItemTitle.isNotEmpty() && cleanQuery.isNotEmpty() && 
-                (cleanItemTitle == cleanQuery || (cleanItemTitle.contains(cleanQuery) && (year == null || itemYear == null || Math.abs(itemYear - year) <= 1)))
-            }
-        }
-        
-        var matchedMedia = search(title.substringBefore(":").trim())
-        if (matchedMedia == null && orgTitle != null) {
-            matchedMedia = search(orgTitle.substringBefore(":").trim())
-        }
-        if (matchedMedia == null && altTitle != null) {
-            matchedMedia = search(altTitle.substringBefore(":").trim())
-        }
-        if (matchedMedia == null) return
-
-        val subjectId = matchedMedia.subjectId ?: return
-        val detailPath = matchedMedia.detailPath ?: subjectId
-        val se = season ?: 0
-        val ep = episode ?: 0
-        
-        val playUrl = "$apiBaseUrl/subject/play?subjectId=$subjectId&se=$se&ep=$ep&detailPath=$detailPath"
-        val validReferer = "$mainUrl/spa/videoPlayPage/movies/$detailPath?id=$subjectId&type=/movie/detail&lang=en"
-        val reqHeaders = commonHeaders + mapOf("referer" to validReferer)
-
-        val playRes = app.get(playUrl, headers = reqHeaders).text
-        val streams = tryParseJson<AdimovieboxResponse>(playRes)?.data?.streams ?: return
-        
-        streams.reversed().distinctBy { it.url }.forEach { source ->
-             callback.invoke(newExtractorLink("Adimoviebox", "Adimoviebox ${source.resolutions ?: "?"}p", source.url ?: return@forEach, INFER_TYPE) {
-                    this.referer = mainUrl
-                    this.quality = getQualityFromName(source.resolutions)
-             })
-        }
-     
-        val firstStream = streams.firstOrNull()
-        val id = firstStream?.id
-        val format = firstStream?.format
-        if (id != null) {
-            val subUrl = "$apiBaseUrl/subject/caption?format=$format&id=$id&subjectId=$subjectId&detailPath=$detailPath"
-            app.get(subUrl, headers = reqHeaders).parsedSafe<AdimovieboxResponse>()?.data?.captions?.forEach { sub ->
-                subtitleCallback.invoke(newSubtitleFile(sub.lanName ?: "Unknown", sub.url ?: return@forEach))
-            }
-        }
-    }
 
     // ================== VIDLINK SOURCE ==================
     suspend fun invokeVidlink(
@@ -174,169 +94,288 @@ object Adicinemax21Extractor : Adicinemax21() {
         callback.invoke(newExtractorLink("Vidlink", "Vidlink", videoLink ?: return, ExtractorLinkType.M3U8) { this.referer = "${Adicinemax21.vidlinkAPI}/" })
     }
 
-    // ================== ADIMOVIEBOX 2 SOURCE ==================
-    suspend fun invokeAdimoviebox2(
+    // ================== MOVIEBOX SOURCE ==================
+    // Menggantikan invokeAdimoviebox() dan invokeAdimoviebox2().
+    // Engine diambil dari MovieBoxProvider, TANPA membawa mainPage/search/
+    // quickSearch/load/detail/recommendation miliknya, karena semua itu sudah
+    // ditangani TMDB di Adicinemax21.
+    //
+    // Alur: TMDB load() -> LinkData -> loadLinks() -> invokeMoviebox()
+    //       -> search/v2 -> play-info -> ExtractorLink (+ Cookie) -> Player
+    suspend fun invokeMoviebox(
         title: String,
         orgTitle: String? = null,
         altTitle: String? = null,
-        year: Int?, season: Int?, episode: Int?,
-        subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
+        year: Int?,
+        airedYear: Int? = null,
+        season: Int?,
+        episode: Int?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
     ) {
-        val apiUrl = "https://api3.aoneroom.com"
-        val (brand, model) = Adimoviebox2Helper.randomBrandModel()
+        val bearer = MovieboxHelper.getBearerToken() ?: return
 
-        suspend fun searchSubject(query: String): Adimoviebox2Subject? {
-            val searchUrl = "$apiUrl/wefeed-mobile-bff/subject-api/search/v2"
-            
-            // MODIFIKASI: Membangun JSON dengan Map agar karakter escape terproses otomatis
-            val jsonBody = mapOf("page" to 1, "perPage" to 10, "keyword" to query).toJson()
-            val headersSearch = Adimoviebox2Helper.getHeaders(searchUrl, jsonBody, "POST", brand, model)
-            val searchRes = app.post(searchUrl, headers = headersSearch, requestBody = jsonBody.toRequestBody("application/json".toMediaTypeOrNull())).parsedSafe<Adimoviebox2SearchResponse>()
-            
-            // MODIFIKASI: Sanitasi judul untuk membuang karakter spesial
+        // LinkData.year untuk TV = tahun SEASON, sedangkan releaseDate Moviebox
+        // = tahun SERIES. Pakai airedYear (tahun rilis series) supaya season >= 2
+        // tidak gagal match.
+        val matchYear = if (season != null) (airedYear ?: year) else year
+        val wantedType = if (season != null) 2 else 1
+
+        suspend fun searchSubject(query: String): MovieboxSubject? {
             val cleanQuery = query.replace(Regex("[^A-Za-z0-9]"), "").lowercase()
-            
-            return searchRes?.data?.results?.flatMap { it.subjects ?: arrayListOf() }?.find { subject ->
+            if (cleanQuery.isEmpty()) return null
+
+            val body = JSONObject()
+                .put("page", 1)
+                .put("perPage", 10)
+                .put("keyword", query)
+                .put("tabId", "")
+                .toString()
+
+            val raw = MovieboxHelper.postSigned(
+                "/wefeed-mobile-bff/subject-api/search/v2",
+                body,
+                bearer
+            ) ?: return null
+
+            val subjects = tryParseJson<MovieboxSearchResponse>(raw)?.data?.results
+                ?.flatMap { it.subjects ?: emptyList() }
+                ?.filter { !it.subjectId.isNullOrBlank() }
+                ?: return null
+
+            fun matches(subject: MovieboxSubject, exact: Boolean): Boolean {
+                if (subject.subjectType != wantedType) return false
+                val cleanTitle = subject.title?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase().orEmpty()
+                if (cleanTitle.isEmpty()) return false
+
+                val titleOk = if (exact) {
+                    cleanTitle == cleanQuery
+                } else {
+                    cleanTitle.contains(cleanQuery) || cleanQuery.contains(cleanTitle)
+                }
+                if (!titleOk) return false
+
                 val subjectYear = subject.releaseDate?.split("-")?.firstOrNull()?.toIntOrNull()
-                val cleanSubjectTitle = subject.title?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase() ?: ""
-                
-                val isTitleMatch = cleanSubjectTitle.isNotEmpty() && cleanQuery.isNotEmpty() && cleanSubjectTitle.contains(cleanQuery)
-                val isYearMatch = year == null || subjectYear == year
-                val isTypeMatch = if (season != null) subject.subjectType == 2 else (subject.subjectType == 1 || subject.subjectType == 3)
-                
-                isTitleMatch && isYearMatch && isTypeMatch
+                return matchYear == null || subjectYear == null || abs(subjectYear - matchYear) <= 1
+            }
+
+            return subjects.firstOrNull { matches(it, true) } ?: subjects.firstOrNull { matches(it, false) }
+        }
+
+        val matched = searchSubject(title.substringBefore(":").trim())
+            ?: orgTitle?.let { searchSubject(it.substringBefore(":").trim()) }
+            ?: altTitle?.let { searchSubject(it.substringBefore(":").trim()) }
+            ?: return
+
+        val subjectId = matched.subjectId ?: return
+
+        // Movie mengikuti candidatePairs asli MovieBoxProvider.
+        // Untuk TV, fallback "1 to 1 / 0 to 0" milik source asli SENGAJA dibuang:
+        // di konteks TMDB itu akan memutar episode yang salah (S03E07 -> S01E01).
+        // Nomor episode selalu dipertahankan, hanya indexing season yang dicoba.
+        val candidatePairs = if (season == null) {
+            listOf(0 to 0, 1 to 0, 1 to 1, 0 to 1)
+        } else {
+            val ep = episode ?: 1
+            if (season == 1) listOf(1 to ep, 0 to ep) else listOf(season to ep)
+        }
+
+        var foundStreams: List<MovieboxStreamItem>? = null
+        for ((se, ep) in candidatePairs) {
+            // URUTAN QUERY WAJIB ALFABETIS (ep, se, subjectId) - ikut ditandatangani.
+            val raw = MovieboxHelper.getSigned(
+                "/wefeed-mobile-bff/subject-api/play-info",
+                "ep=$ep&se=$se&subjectId=$subjectId",
+                bearer
+            ) ?: continue
+
+            val streams = tryParseJson<MovieboxPlayInfoResponse>(raw)?.data?.streams
+                ?.filter { !it.url.isNullOrBlank() && !it.signCookie.isNullOrBlank() }
+                ?.distinctBy { it.url }
+
+            if (!streams.isNullOrEmpty()) {
+                foundStreams = streams
+                break
             }
         }
 
-        var matchedSubject = searchSubject(title)
-        if (matchedSubject == null && orgTitle != null) {
-            matchedSubject = searchSubject(orgTitle)
-        }
-        if (matchedSubject == null && altTitle != null) {
-            matchedSubject = searchSubject(altTitle)
-        }
-        if (matchedSubject == null) return
+        val streams = foundStreams ?: return
 
-        val mainSubjectId = matchedSubject.subjectId ?: return
-        
-        val detailUrl = "$apiUrl/wefeed-mobile-bff/subject-api/get?subjectId=$mainSubjectId"
-        val detailHeaders = Adimoviebox2Helper.getHeaders(detailUrl, null, "GET", brand, model)
-        val detailRes = app.get(detailUrl, headers = detailHeaders).text
-        
-        val subjectList = mutableListOf<Pair<String, String>>()
-        try {
-            val json = JSONObject(detailRes)
-            val data = json.optJSONObject("data")
-            subjectList.add(mainSubjectId to "Original Audio")
-            val dubs = data?.optJSONArray("dubs")
-            if (dubs != null) {
-                for (i in 0 until dubs.length()) {
-                    val dub = dubs.optJSONObject(i)
-                    val dubId = dub?.optString("subjectId")
-                    val dubName = dub?.optString("lanName") ?: "Dub"
-                    if (!dubId.isNullOrEmpty() && dubId != mainSubjectId) {
-                        subjectList.add(dubId to dubName)
-                    }
+        // ---------- SUBTITLE ----------
+        val streamId = streams.firstOrNull()?.id
+        if (!streamId.isNullOrBlank()) {
+            // URUTAN QUERY WAJIB ALFABETIS (streamId, subjectId).
+            MovieboxHelper.getSigned(
+                "/wefeed-mobile-bff/subject-api/get-stream-captions",
+                "streamId=$streamId&subjectId=$subjectId",
+                bearer
+            )?.let { rawSub ->
+                tryParseJson<MovieboxCaptionResponse>(rawSub)?.data?.extCaptions?.forEach { cap ->
+                    val subUrl = cap.url ?: return@forEach
+                    val label = cap.lanName ?: cap.lan ?: cap.language ?: "Unknown"
+                    subtitleCallback.invoke(newSubtitleFile(label, subUrl))
                 }
             }
-        } catch (e: Exception) {
-            subjectList.add(mainSubjectId to "Original Audio")
         }
 
-        val s = season ?: 0
-        val e = episode ?: 0
+        // ---------- STREAM ----------
+        streams.forEach { stream ->
+            val streamUrl = stream.url ?: return@forEach
+            val cleanCookie = (stream.signCookie ?: return@forEach).trimEnd(';')
 
-        subjectList.forEach { (currentSubjectId, languageName) ->
-            val playUrl = "$apiUrl/wefeed-mobile-bff/subject-api/play-info?subjectId=$currentSubjectId&se=$s&ep=$e"
-            val headersPlay = Adimoviebox2Helper.getHeaders(playUrl, null, "GET", brand, model)
-            val playRes = app.get(playUrl, headers = headersPlay).parsedSafe<Adimoviebox2PlayResponse>()
-            val streams = playRes?.data?.streams ?: return@forEach
+            val linkType = if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.DASH
+            val quality = getQualityFromName(stream.resolutions)
+                .takeIf { it != Qualities.Unknown.value } ?: Qualities.P1080.value
+            val label = stream.resolutions?.let { "MovieBox ${it}p" } ?: "MovieBox (DASH)"
 
-            streams.forEach { stream ->
-                val streamUrl = stream.url ?: return@forEach
-                val quality = getQualityFromName(stream.resolutions)
-                val signCookie = stream.signCookie
-
-                val videoHeaders = mutableMapOf<String, String>()
-                if (!signCookie.isNullOrEmpty()) {
-                    videoHeaders["Cookie"] = signCookie
+            callback.invoke(
+                newExtractorLink("MovieBox", label, streamUrl, linkType) {
+                    this.referer = MovieboxHelper.API_URL
+                    this.quality = quality
+                    // Cookie di sini dibaca lagi oleh Adicinemax21.getVideoInterceptor()
+                    // supaya ExoPlayer ikut mengirimnya ke CDN.
+                    this.headers = mapOf(
+                        "User-Agent" to MovieboxHelper.USER_AGENT,
+                        "Cookie" to cleanCookie,
+                        "Referer" to MovieboxHelper.API_URL
+                    )
                 }
-                videoHeaders["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
-
-                val sourceName = "Adimoviebox2 ($languageName)"
-                callback.invoke(
-                    newExtractorLink(
-                        sourceName,
-                        sourceName,
-                        streamUrl,
-                        if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else INFER_TYPE
-                    ) {
-                        this.quality = quality
-                        this.headers = videoHeaders
-                    }
-                )
-
-                if (stream.id != null) {
-                    val subUrlInternal = "$apiUrl/wefeed-mobile-bff/subject-api/get-stream-captions?subjectId=$currentSubjectId&streamId=${stream.id}"
-                    val headersSubInternal = Adimoviebox2Helper.getHeaders(subUrlInternal, null, "GET", brand, model)
-                    app.get(subUrlInternal, headers = headersSubInternal).parsedSafe<Adimoviebox2SubtitleResponse>()?.data?.extCaptions?.forEach { cap ->
-                        val lang = cap.language ?: cap.lanName ?: cap.lan ?: "Unknown"
-                        subtitleCallback.invoke(newSubtitleFile("$lang ($languageName)", cap.url ?: return@forEach))
-                    }
-                    
-                    val subUrlExternal = "$apiUrl/wefeed-mobile-bff/subject-api/get-ext-captions?subjectId=$currentSubjectId&resourceId=${stream.id}&episode=0"
-                    val subHeaders = Adimoviebox2Helper.getHeaders(subUrlExternal, null, "GET", brand, model)
-                    app.get(subUrlExternal, headers = subHeaders).parsedSafe<Adimoviebox2SubtitleResponse>()?.data?.extCaptions?.forEach { cap ->
-                        val lang = cap.lan ?: cap.lanName ?: cap.language ?: "Unknown"
-                        subtitleCallback.invoke(newSubtitleFile("$lang ($languageName) [Ext]", cap.url ?: return@forEach))
-                    }
-                }
-            }
+            )
         }
     }
 
-    private object Adimoviebox2Helper {
-        private val secretKeyDefault = base64Decode("NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw==")
-        private val deviceId = (1..16).map { "0123456789abcdef".random() }.joinToString("") 
+    // ================== MOVIEBOX ENGINE (AUTH + SIGNED REQUEST) ==================
+    // Dipindahkan apa adanya dari MovieBoxProvider. JANGAN mengubah apa pun di
+    // dalam buildCanonical/generateSignature/headersFor: server memvalidasi
+    // signature byte per byte.
+    private object MovieboxHelper {
 
-        fun randomBrandModel(): Pair<String, String> {
-            val brandModels = mapOf(
-                "Samsung" to listOf("SM-S918B", "SM-A528B", "SM-M336B"),
-                "Xiaomi" to listOf("2201117TI", "M2012K11AI", "Redmi Note 11"),
-                "Google" to listOf("Pixel 7", "Pixel 8")
+        const val API_URL = "https://api3.aoneroom.com"
+        const val USER_AGENT = "com.community.oneroom/50020088 (Linux; U; Android 13; en_US; Samsung; Build/TQ3A.230901.001)"
+
+        private const val CLIENT_INFO = """{"package_name":"com.community.oneroom","version_name":"3.0.13.0325.03","version_code":50020088,"os":"android","os_version":"13","device_id":"71e0f7746936dc98","install_store":"ps","system_language":"en","net":"NETWORK_WIFI","region":"US","timezone":"Asia/Calcutta","sp_code":""}"""
+
+        // Double base64 decode, persis MovieBoxProvider.
+        private val SECRET_BYTES: ByteArray by lazy {
+            val step1 = String(
+                Base64.decode("NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw==", Base64.DEFAULT),
+                Charsets.UTF_8
             )
-            val brand = brandModels.keys.random()
-            val model = brandModels[brand]!!.random()
-            return brand to model
+            Base64.decode(step1, Base64.DEFAULT)
         }
 
-        fun getHeaders(url: String, body: String? = null, method: String = "POST", brand: String, model: String): Map<String, String> {
-            val timestamp = System.currentTimeMillis()
-            val xClientToken = generateXClientToken(timestamp)
-            val xTrSignature = generateXTrSignature(method, "application/json", if(method=="POST") "application/json; charset=utf-8" else "application/json", url, body, timestamp)
-            return mapOf(
-                "user-agent" to "com.community.mbox.in/50020042 (Linux; U; Android 16; en_IN; $model; Build/BP22.250325.006; Cronet/133.0.6876.3)",
-                "accept" to "application/json", "content-type" to "application/json", "x-client-token" to xClientToken, "x-tr-signature" to xTrSignature,
-                "x-client-info" to """{"package_name":"com.community.mbox.in","version_name":"3.0.03.0529.03","version_code":50020042,"os":"android","os_version":"16","device_id":"$deviceId","install_store":"ps","gaid":"d7578036d13336cc","brand":"$brand","model":"$model","system_language":"en","net":"NETWORK_WIFI","region":"IN","timezone":"Asia/Calcutta","sp_code":""}""",
+        private fun md5(input: String): String {
+            val md = MessageDigest.getInstance("MD5")
+            return md.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        }
+
+        /**
+         * Canonical string mengikuti GatewaySignManager.doSign pada APK resmi.
+         * Tujuh baris dipisah "\n":
+         *   1. HTTP method (huruf besar)
+         *   2. accept
+         *   3. content-type
+         *   4. panjang body   -> kosong bila tanpa body
+         *   5. timestamp
+         *   6. md5 hex body   -> kosong bila tanpa body
+         *   7. path (+query)
+         *
+         * Tanpa body baris 4 dan 6 kosong, sehingga fungsi ini aman untuk GET
+         * maupun POST. Baris 4 dan 6 HARUS diisi bersamaan atau kosong bersamaan.
+         */
+        private fun buildCanonical(method: String, pathWithQuery: String, ts: String, body: String): String {
+            val length = if (body.isEmpty()) "" else body.length.toString()
+            val digest = if (body.isEmpty()) "" else md5(body)
+            return listOf(
+                method.uppercase(),
+                "application/json",
+                "application/json",
+                length,
+                ts,
+                digest,
+                pathWithQuery
+            ).joinToString("\n")
+        }
+
+        // NO_WRAP wajib. Base64.DEFAULT menambahkan newline dan merusak header.
+        private fun generateSignature(method: String, pathWithQuery: String, ts: String, body: String = ""): String {
+            val mac = Mac.getInstance("HmacMD5")
+            mac.init(SecretKeySpec(SECRET_BYTES, "HmacMD5"))
+            val hmacBytes = mac.doFinal(buildCanonical(method, pathWithQuery, ts, body).toByteArray(Charsets.UTF_8))
+            return "$ts|2|${Base64.encodeToString(hmacBytes, Base64.NO_WRAP)}"
+        }
+
+        private fun generateGuestToken(ts: String): String = "$ts,${md5(ts.reversed())}"
+
+        private fun headersFor(ts: String, signature: String, bearer: String?): Map<String, String> {
+            val h = mutableMapOf(
+                "user-agent" to USER_AGENT,
+                "accept" to "application/json",
+                "content-type" to "application/json",
+                "x-client-token" to generateGuestToken(ts),
+                "x-tr-signature" to signature,
+                "x-client-info" to CLIENT_INFO,
                 "x-client-status" to "0"
             )
+            if (!bearer.isNullOrBlank()) h["authorization"] = "Bearer $bearer"
+            return h
         }
-        
-        private fun md5(input: ByteArray): String { return MessageDigest.getInstance("MD5").digest(input).joinToString("") { "%02x".format(it) } }
-        
-        private fun generateXClientToken(timestamp: Long): String { val reversed = timestamp.toString().reversed(); val hash = md5(reversed.toByteArray()); return "$timestamp,$hash" }
-        
-        @SuppressLint("UseKtx")
-        private fun generateXTrSignature(method: String, accept: String?, contentType: String?, url: String, body: String?, timestamp: Long): String {
-            val parsed = Uri.parse(url); val path = parsed.path ?: ""; 
-            val query = if (parsed.queryParameterNames.isNotEmpty()) { parsed.queryParameterNames.sorted().joinToString("&") { key -> parsed.getQueryParameters(key).joinToString("&") { "$key=$it" } } } else ""
-            val canonicalUrl = if (query.isNotEmpty()) "$path?$query" else path; val bodyBytes = body?.toByteArray(Charsets.UTF_8); 
-            val bodyHash = if (bodyBytes != null) md5(if (bodyBytes.size > 102400) bodyBytes.copyOfRange(0, 102400) else bodyBytes) else ""; val bodyLength = bodyBytes?.size?.toString() ?: ""
-            val canonical = "${method.uppercase()}\n${accept ?: ""}\n${contentType ?: ""}\n$bodyLength\n$timestamp\n$bodyHash\n$canonicalUrl"
-            val secretBytes = base64DecodeArray(secretKeyDefault); val mac = Mac.getInstance("HmacMD5"); mac.init(SecretKeySpec(secretBytes, "HmacMD5")); 
-            val signature = base64Encode(mac.doFinal(canonical.toByteArray(Charsets.UTF_8)))
-            return "$timestamp|2|$signature"
+
+        suspend fun getSigned(path: String, query: String, bearer: String?): String? {
+            val ts = System.currentTimeMillis().toString()
+            val pathWithQuery = if (query.isBlank()) path else "$path?$query"
+            return try {
+                app.get(
+                    "$API_URL$pathWithQuery",
+                    headers = headersFor(ts, generateSignature("GET", pathWithQuery, ts), bearer)
+                ).text
+            } catch (e: Exception) {
+                null
+            }
         }
-        private fun base64DecodeArray(str: String): ByteArray { return android.util.Base64.decode(str, android.util.Base64.DEFAULT) }
+
+        /**
+         * POST ber-signature.
+         *
+         * PENTING: RequestBody dibuat dari ByteArray, BUKAN String. Overload
+         * String pada OkHttp menambahkan "; charset=utf-8" ke media type, lalu
+         * BridgeInterceptor menimpa header Content-Type. Akibatnya yang dikirim
+         * "application/json; charset=utf-8" sedangkan yang ditandatangani
+         * "application/json" -> server menolak dengan 407.
+         */
+        suspend fun postSigned(path: String, body: String, bearer: String?): String? {
+            val ts = System.currentTimeMillis().toString()
+            val sig = generateSignature("POST", path, ts, body)
+            return try {
+                val res = app.post(
+                    "$API_URL$path",
+                    headers = headersFor(ts, sig, bearer),
+                    requestBody = body.toByteArray(Charsets.UTF_8)
+                        .toRequestBody("application/json".toMediaTypeOrNull())
+                )
+                if (res.code == 200) res.text else null
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        // Token guest diambil dari header response "x-user" pada endpoint ranking-list.
+        suspend fun getBearerToken(): String? {
+            return try {
+                val ts = System.currentTimeMillis().toString()
+                val path = "/wefeed-mobile-bff/tab/ranking-list"
+                val query = "page=1&perPage=1&tabId=0"
+
+                val response = app.get(
+                    "$API_URL$path?$query",
+                    headers = headersFor(ts, generateSignature("GET", "$path?$query", ts), null)
+                )
+
+                val xUserHeader = response.headers["x-user"] ?: return null
+                Regex("\"token\"\\s*:\\s*\"([^\"]+)\"").find(xUserHeader)?.groupValues?.get(1)
+            } catch (e: Exception) {
+                null
+            }
+        }
     }
 }
