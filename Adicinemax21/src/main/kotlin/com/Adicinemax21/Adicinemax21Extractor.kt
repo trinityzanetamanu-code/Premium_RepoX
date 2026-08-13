@@ -23,6 +23,13 @@ object Adicinemax21Extractor : Adicinemax21() {
     // mendapat "The White Lotus - Season 3").
     private const val KK_TAG = "Adicinemax21KK"
 
+    // [FIX-10] Endpoint kkey memakai Google Apps Script dan sangat lambat/tidak stabil.
+    // Bukti logcat 2026-08-13 12:23: dari 5 judul yang berhasil cocok, hanya SATU yang
+    // sampai membuat link (12,33 detik); empat sisanya menggantung >90 detik tanpa
+    // exception sampai coroutine dibatalkan. Default nicehttp ~120 detik terlalu lama,
+    // jadi diberi batas eksplisit supaya gagal cepat dan terlihat di log.
+    private const val KK_TIMEOUT = 30L
+
     // Pola penanda season pada judul Kisskh. Sengaja ketat supaya judul seperti
     // "Seasons of Blossom", "S.W.A.T.", "MASH 4077", "The Boys 2" dan
     // "Greenland 2: Migration" TIDAK salah dianggap punya nomor season.
@@ -120,16 +127,26 @@ object Adicinemax21Extractor : Adicinemax21() {
                 // [FIX-8] Sebelumnya: find { contains } ?: firstOrNull { contains } -- dua
                 // cabang yang IDENTIK (find memang firstOrNull berpredikat), jadi fallback-nya
                 // dead code. Dan season sama sekali tidak dipakai untuk memilih drama.
+                // [FIX-13] Kisskh mengembalikan sampai 50 hasil fuzzy per query. Mencatat
+                // semuanya membanjiri buffer logcat (50 baris x jumlah keyword) dan bisa
+                // membuat baris penting terbuang. Hanya kandidat yang LOLOS yang dicatat,
+                // sisanya diringkas jadi satu angka.
                 var best: KisskhMedia? = null
                 var bestRank = Int.MAX_VALUE
+                var ditolak = 0
                 searchList.forEach { item ->
                     val r = kkRank(item.title, cleanQuery, season)
-                    Log.d(KK_TAG, "[02-CAND] id=${item.id} rank=$r seasonDiJudul=${kkSeasonInTitle(item.title)} title='${item.title}'")
-                    if (r in 0 until bestRank) {
-                        bestRank = r
-                        best = item
+                    if (r < 0) {
+                        ditolak++
+                    } else {
+                        Log.d(KK_TAG, "[02-CAND] id=${item.id} rank=$r seasonDiJudul=${kkSeasonInTitle(item.title)} title='${item.title}'")
+                        if (r < bestRank) {
+                            bestRank = r
+                            best = item
+                        }
                     }
                 }
+                if (ditolak > 0) Log.d(KK_TAG, "[02-CAND] ditolak=$ditolak (judul/season tidak cocok)")
 
                 if (best == null) {
                     Log.w(KK_TAG, "[03-MATCH] tidak ada drama cocok untuk '$query' (season=$season)")
@@ -143,11 +160,20 @@ object Adicinemax21Extractor : Adicinemax21() {
             }
         }
 
-        var matched = searchAndMatch(title)
-        if (matched == null && orgTitle != null) matched = searchAndMatch(orgTitle)
-        if (matched == null && altTitle != null) matched = searchAndMatch(altTitle)
+        // [FIX-12] Untuk judul berbahasa Inggris title == orgTitle, sehingga rantai lama
+        // mengirim permintaan HTTP yang SAMA PERSIS dua kali (terlihat di logcat pada
+        // 'Ghost in the Cell', 'Alas Roban', 'Spider-Man: Brand New Day').
+        val queries = listOfNotNull(title, orgTitle, altTitle)
+            .map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        Log.d(KK_TAG, "[01-SEARCH] daftar keyword = $queries")
+
+        var matched: KisskhMedia? = null
+        for (q in queries) {
+            matched = searchAndMatch(q)
+            if (matched != null) break
+        }
         if (matched == null) {
-            Log.e(KK_TAG, "[03-MATCH] STOP: tidak ada drama untuk judul mana pun")
+            Log.e(KK_TAG, "[03-MATCH] STOP: tidak ada drama untuk ${queries.size} keyword: $queries")
             return
         }
 
@@ -172,34 +198,75 @@ object Adicinemax21Extractor : Adicinemax21() {
         val epsId = targetEp.id ?: return
         Log.d(KK_TAG, "[05-EP] drama='${matched.title}' epNumber=${targetEp.number} epsId=$epsId")
 
-        val kkeyVideo = app.get("$KISSKH_API$epsId&version=2.8.10").parsedSafe<KisskhKey>()?.key ?: ""
-        val videoUrl = "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=null&time=null&kkey=$kkeyVideo"
-        val sources = app.get(videoUrl).parsedSafe<KisskhSources>()
-
-        var emitted = 0
-        listOfNotNull(sources?.video, sources?.thirdParty).forEach { rawLink ->
-            // [FIX-6] BUG LAMA: Kisskh kadang mengembalikan URL protocol-relative "//hls1...".
-            // M3u8Helper melempar IllegalArgumentException "Expected URL scheme 'http' or
-            // 'https'" untuk URL tanpa scheme, dan exception itu membatalkan seluruh
-            // invokeKisskh sehingga subtitle pun tidak sempat dikirim.
-            val link = if (rawLink.startsWith("//")) "https:$rawLink" else rawLink
-            if (link.contains(".m3u8")) {
-                M3u8Helper.generateM3u8("Kisskh", link, referer = "$mainUrl/", headers = mapOf("Origin" to mainUrl))
-                    .forEach { callback.invoke(it); emitted++ }
-            } else if (link.contains(".mp4")) {
-                callback.invoke(newExtractorLink("Kisskh", "Kisskh", link, INFER_TYPE) { this.referer = mainUrl })
-                emitted++
+        /** kkey Google Apps Script: lambat, jadi selalu diberi timeout dan tidak boleh
+         *  menjatuhkan seluruh invokeKisskh kalau gagal. */
+        suspend fun fetchKkey(api: String, label: String): String {
+            val t0 = System.currentTimeMillis()
+            return try {
+                val key = app.get("$api$epsId&version=2.8.10", timeout = KK_TIMEOUT)
+                    .parsedSafe<KisskhKey>()?.key ?: ""
+                Log.d(KK_TAG, "[06-KEY/$label] ${System.currentTimeMillis() - t0}ms panjang=${key.length}")
+                key
+            } catch (e: Exception) {
+                Log.e(
+                    KK_TAG,
+                    "[06-KEY/$label] GAGAL setelah ${System.currentTimeMillis() - t0}ms: " +
+                        "${e.javaClass.simpleName}: ${e.message} -> lanjut tanpa key"
+                )
+                ""
             }
         }
-        Log.d(KK_TAG, "[06-LINK] total ExtractorLink=$emitted")
 
-        val kkeySub = app.get("$KISSKH_SUB_API$epsId&version=2.8.10").parsedSafe<KisskhKey>()?.key ?: ""
-        val subJson = app.get("$mainUrl/api/Sub/$epsId?kkey=$kkeySub").text
-        val subs = tryParseJson<List<KisskhSubtitle>>(subJson)
-        subs?.forEach { sub ->
-            subtitleCallback.invoke(newSubtitleFile(sub.label ?: "Unknown", sub.src ?: return@forEach))
-        }
-        Log.d(KK_TAG, "[07-SUB] subtitle=${subs?.size ?: 0}")
+        // [FIX-11] Jalur video dan jalur subtitle sama-sama diawali panggilan Apps Script
+        // yang lambat, dan sebelumnya dijalankan BERURUTAN. Dijalankan paralel supaya
+        // total waktu kira-kira separuhnya. Masing-masing dibungkus try/catch sendiri
+        // supaya kegagalan subtitle tidak ikut membatalkan link video, dan sebaliknya.
+        runAllAsync(
+            {
+                try {
+                    val kkeyVideo = fetchKkey(KISSKH_API, "video")
+                    val tSrc = System.currentTimeMillis()
+                    val videoUrl = "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=null&time=null&kkey=$kkeyVideo"
+                    val sources = app.get(videoUrl, timeout = KK_TIMEOUT).parsedSafe<KisskhSources>()
+                    val tM3u8 = System.currentTimeMillis()
+
+                    var emitted = 0
+                    listOfNotNull(sources?.video, sources?.thirdParty).forEach { rawLink ->
+                        // [FIX-6] Kisskh kadang mengembalikan URL protocol-relative "//hls1...".
+                        // M3u8Helper melempar IllegalArgumentException untuk URL tanpa scheme,
+                        // dan exception itu membatalkan seluruh invokeKisskh.
+                        val link = if (rawLink.startsWith("//")) "https:$rawLink" else rawLink
+                        if (link.contains(".m3u8")) {
+                            M3u8Helper.generateM3u8("Kisskh", link, referer = "$mainUrl/", headers = mapOf("Origin" to mainUrl))
+                                .forEach { callback.invoke(it); emitted++ }
+                        } else if (link.contains(".mp4")) {
+                            callback.invoke(newExtractorLink("Kisskh", "Kisskh", link, INFER_TYPE) { this.referer = mainUrl })
+                            emitted++
+                        }
+                    }
+                    Log.d(
+                        KK_TAG,
+                        "[06-LINK] total=$emitted sources=${tM3u8 - tSrc}ms " +
+                            "m3u8=${System.currentTimeMillis() - tM3u8}ms"
+                    )
+                } catch (e: Exception) {
+                    Log.e(KK_TAG, "[06-LINK] jalur video gagal: ${e.javaClass.simpleName}: ${e.message}")
+                }
+            },
+            {
+                try {
+                    val kkeySub = fetchKkey(KISSKH_SUB_API, "sub")
+                    val subJson = app.get("$mainUrl/api/Sub/$epsId?kkey=$kkeySub", timeout = KK_TIMEOUT).text
+                    val subs = tryParseJson<List<KisskhSubtitle>>(subJson)
+                    subs?.forEach { sub ->
+                        subtitleCallback.invoke(newSubtitleFile(sub.label ?: "Unknown", sub.src ?: return@forEach))
+                    }
+                    Log.d(KK_TAG, "[07-SUB] subtitle=${subs?.size ?: 0}")
+                } catch (e: Exception) {
+                    Log.e(KK_TAG, "[07-SUB] jalur subtitle gagal: ${e.javaClass.simpleName}: ${e.message}")
+                }
+            }
+        )
     }
 
     private data class KisskhMedia(@JsonProperty("id") val id: Int?, @JsonProperty("title") val title: String?)
