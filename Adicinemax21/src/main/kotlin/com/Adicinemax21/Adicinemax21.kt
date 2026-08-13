@@ -306,8 +306,8 @@ open class Adicinemax21 : TmdbProvider() {
      * Stream MovieBox memakai signed cookie; tanpa interceptor ini ExoPlayer
      * tidak mengirim header Cookie ke CDN dan semua request balas 403.
      *
-     * Return null bila link tidak punya header Cookie, sehingga Kisskh dan
-     * Kisskh sama sekali tidak terpengaruh.
+     * Return null bila link tidak punya header Cookie, sehingga Kisskh sama
+     * sekali tidak terpengaruh.
      */
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
         val cookie = extractorLink.headers["Cookie"]
