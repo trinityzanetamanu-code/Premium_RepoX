@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.net.URLEncoder
 import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -17,6 +18,75 @@ import kotlin.math.abs
 object Adicinemax21Extractor : Adicinemax21() {
 
     // ================== KISSKH SOURCE ==================
+    // Logika pemilihan drama di bawah ini sudah diuji terpisah (35 kasus, termasuk
+    // kasus nyata dari logcat 2026-08-13 11:07 di mana permintaan S1E1 malah
+    // mendapat "The White Lotus - Season 3").
+    private const val KK_TAG = "Adicinemax21KK"
+
+    // Pola penanda season pada judul Kisskh. Sengaja ketat supaya judul seperti
+    // "Seasons of Blossom", "S.W.A.T.", "MASH 4077", "The Boys 2" dan
+    // "Greenland 2: Migration" TIDAK salah dianggap punya nomor season.
+    private val KK_SEASON_PATTERNS = listOf(
+        Regex("""season\s*0*(\d{1,2})""", RegexOption.IGNORE_CASE),
+        Regex("""(?:^|[^a-z0-9])s\s*0*(\d{1,2})(?![a-z0-9])""", RegexOption.IGNORE_CASE),
+        Regex("""(\d{1,2})(?:st|nd|rd|th)\s*season""", RegexOption.IGNORE_CASE)
+    )
+
+    private fun kkClean(s: String?): String =
+        s?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase().orEmpty()
+
+    /** Nomor season yang tertulis di judul Kisskh, null bila tidak ada. */
+    private fun kkSeasonInTitle(title: String?): Int? {
+        if (title == null) return null
+        for (re in KK_SEASON_PATTERNS) {
+            val v = re.find(title)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            if (v != null && v in 0..50) return v
+        }
+        return null
+    }
+
+    /** Judul tanpa embel-embel season, untuk dibandingkan dengan judul TMDB. */
+    private fun kkStripSeason(title: String): String =
+        KK_SEASON_PATTERNS.fold(title) { acc, re -> re.replace(acc, " ") }
+
+    /**
+     * Containment arah balik (judul Kisskh lebih pendek dari judul TMDB) hanya boleh
+     * untuk judul yang cukup panjang dan proporsional, supaya "The" tidak cocok
+     * dengan "The Odyssey".
+     */
+    private fun kkRevOk(cleanTitle: String, cleanQuery: String): Boolean {
+        if (cleanTitle.length < 6) return false
+        if (!cleanQuery.contains(cleanTitle)) return false
+        return cleanTitle.length * 10 >= cleanQuery.length * 6
+    }
+
+    /** rank kecil = lebih cocok; -1 = tolak. season null berarti film. */
+    private fun kkRank(title: String?, cleanQuery: String, season: Int?): Int {
+        val ct = kkClean(title)
+        if (ct.isEmpty()) return -1
+        val stripped = kkStripSeason(title ?: "")
+        val cs = kkClean(stripped)
+
+        val forward = ct.contains(cleanQuery) || cs.contains(cleanQuery)
+        val backward = kkRevOk(ct, cleanQuery) || kkRevOk(cs, cleanQuery)
+        if (!forward && !backward) return -1
+
+        val exact = ct == cleanQuery || cs == cleanQuery
+        if (season == null) return if (exact) 0 else 1
+
+        val ts = kkSeasonInTitle(title)
+        if (ts != null) {
+            // Judul menyebut season lain -> TOLAK. Inilah perbaikan utamanya:
+            // sebelumnya S1E1 bisa mendapat drama "... - Season 3".
+            if (ts != season) return -1
+            return if (exact) 0 else 1
+        }
+        // Judul tanpa penanda season = season 1 menurut konvensi Kisskh.
+        if (season == 1) return if (exact) 2 else 3
+        // S2 ke atas tanpa penanda: lebih baik tidak ada link daripada salah season.
+        return -1
+    }
+
     suspend fun invokeKisskh(
         title: String,
         orgTitle: String? = null,
@@ -28,59 +98,108 @@ object Adicinemax21Extractor : Adicinemax21() {
         val KISSKH_API = "https://script.google.com/macros/s/AKfycbzn8B31PuDxzaMa9_CQ0VGEDasFqfzI5bXvjaIZH4DM8DNq9q6xj1ALvZNz_JT3jF0suA/exec?id="
         val KISSKH_SUB_API = "https://script.google.com/macros/s/AKfycbyq6hTj0ZhlinYC6xbggtgo166tp6XaDKBCGtnYk8uOfYBUFwwxBui0sGXiu_zIFmA/exec?id="
 
+        Log.d(KK_TAG, "[00-INPUT] title='$title' orgTitle='$orgTitle' altTitle='$altTitle' season=$season episode=$episode")
+
         suspend fun searchAndMatch(query: String): KisskhMedia? {
-            try {
-                val searchRes = app.get("$mainUrl/api/DramaList/Search?q=$query&type=0").text
-                val searchList = tryParseJson<ArrayList<KisskhMedia>>(searchRes) ?: return null
-
-                val cleanQuery = query.replace(Regex("[^A-Za-z0-9]"), "").lowercase()
-
-                return searchList.find {
-                    val cleanItemTitle = it.title?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase() ?: ""
-                    cleanItemTitle.contains(cleanQuery)
-                } ?: searchList.firstOrNull {
-                    val cleanItemTitle = it.title?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase() ?: ""
-                    cleanItemTitle.contains(cleanQuery)
+            return try {
+                // [FIX-7] Query WAJIB di-encode. "Minions & Monsters" tanpa encode membuat
+                // "&" dibaca sebagai pemisah parameter sehingga q terpotong jadi "Minions ".
+                val encoded = URLEncoder.encode(query, "UTF-8").replace("+", "%20")
+                val searchRes = app.get("$mainUrl/api/DramaList/Search?q=$encoded&type=0").text
+                val searchList = tryParseJson<ArrayList<KisskhMedia>>(searchRes)
+                if (searchList == null) {
+                    Log.e(KK_TAG, "[01-SEARCH] parse gagal untuk '$query'. head=${searchRes.take(200)}")
+                    return null
                 }
+
+                val cleanQuery = kkClean(query)
+                if (cleanQuery.isEmpty()) return null
+
+                Log.d(KK_TAG, "[01-SEARCH] query='$query' hasil=${searchList.size}")
+
+                // [FIX-8] Sebelumnya: find { contains } ?: firstOrNull { contains } -- dua
+                // cabang yang IDENTIK (find memang firstOrNull berpredikat), jadi fallback-nya
+                // dead code. Dan season sama sekali tidak dipakai untuk memilih drama.
+                var best: KisskhMedia? = null
+                var bestRank = Int.MAX_VALUE
+                searchList.forEach { item ->
+                    val r = kkRank(item.title, cleanQuery, season)
+                    Log.d(KK_TAG, "[02-CAND] id=${item.id} rank=$r seasonDiJudul=${kkSeasonInTitle(item.title)} title='${item.title}'")
+                    if (r in 0 until bestRank) {
+                        bestRank = r
+                        best = item
+                    }
+                }
+
+                if (best == null) {
+                    Log.w(KK_TAG, "[03-MATCH] tidak ada drama cocok untuk '$query' (season=$season)")
+                } else {
+                    Log.d(KK_TAG, "[03-MATCH] terpilih id=${best?.id} rank=$bestRank title='${best?.title}'")
+                }
+                best
             } catch (e: Exception) {
-                return null
+                Log.e(KK_TAG, "[01-SEARCH] gagal untuk '$query': ${e.javaClass.simpleName}: ${e.message}")
+                null
             }
         }
 
         var matched = searchAndMatch(title)
-        if (matched == null && orgTitle != null) {
-            matched = searchAndMatch(orgTitle)
+        if (matched == null && orgTitle != null) matched = searchAndMatch(orgTitle)
+        if (matched == null && altTitle != null) matched = searchAndMatch(altTitle)
+        if (matched == null) {
+            Log.e(KK_TAG, "[03-MATCH] STOP: tidak ada drama untuk judul mana pun")
+            return
         }
-        if (matched == null && altTitle != null) {
-            matched = searchAndMatch(altTitle)
-        }
-        if (matched == null) return
 
         val dramaId = matched.id ?: return
-        val detailRes = app.get("$mainUrl/api/DramaList/Drama/$dramaId?isq=false").parsedSafe<KisskhDetail>() ?: return
-        val episodes = detailRes.episodes ?: return
+        val detailRes = app.get("$mainUrl/api/DramaList/Drama/$dramaId?isq=false").parsedSafe<KisskhDetail>()
+        if (detailRes == null) {
+            Log.e(KK_TAG, "[04-DETAIL] STOP: detail drama $dramaId gagal di-parse")
+            return
+        }
+        val episodes = detailRes.episodes
+        if (episodes.isNullOrEmpty()) {
+            Log.e(KK_TAG, "[04-DETAIL] STOP: drama $dramaId tidak punya episode")
+            return
+        }
+
         val targetEp = if (season == null) episodes.lastOrNull() else episodes.find { it.number?.toInt() == episode }
-        val epsId = targetEp?.id ?: return
+        if (targetEp == null) {
+            val tersedia = episodes.mapNotNull { it.number?.toInt() }.sorted()
+            Log.e(KK_TAG, "[05-EP] STOP: episode $episode tidak ada di drama '${matched.title}'. Tersedia=$tersedia")
+            return
+        }
+        val epsId = targetEp.id ?: return
+        Log.d(KK_TAG, "[05-EP] drama='${matched.title}' epNumber=${targetEp.number} epsId=$epsId")
 
         val kkeyVideo = app.get("$KISSKH_API$epsId&version=2.8.10").parsedSafe<KisskhKey>()?.key ?: ""
         val videoUrl = "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=null&time=null&kkey=$kkeyVideo"
         val sources = app.get(videoUrl).parsedSafe<KisskhSources>()
 
+        var emitted = 0
         listOfNotNull(sources?.video, sources?.thirdParty).forEach { rawLink ->
-            // [FIX-6] BUG LAMA (bukan akibat migrasi Moviebox): Kisskh kadang mengembalikan
-            // URL protocol-relative "//hls1...". M3u8Helper melemparkan
-            // IllegalArgumentException "Expected URL scheme 'http' or 'https'" untuk URL
-            // tanpa scheme, dan exception itu membatalkan seluruh invokeKisskh sehingga
-            // subtitle pun tidak sempat dikirim. Cukup dinormalisasi ke https.
+            // [FIX-6] BUG LAMA: Kisskh kadang mengembalikan URL protocol-relative "//hls1...".
+            // M3u8Helper melempar IllegalArgumentException "Expected URL scheme 'http' or
+            // 'https'" untuk URL tanpa scheme, dan exception itu membatalkan seluruh
+            // invokeKisskh sehingga subtitle pun tidak sempat dikirim.
             val link = if (rawLink.startsWith("//")) "https:$rawLink" else rawLink
-            if (link.contains(".m3u8")) M3u8Helper.generateM3u8("Kisskh", link, referer = "$mainUrl/", headers = mapOf("Origin" to mainUrl)).forEach(callback)
-            else if (link.contains(".mp4")) callback.invoke(newExtractorLink("Kisskh", "Kisskh", link, ExtractorLinkType.VIDEO) { this.referer = mainUrl })
+            if (link.contains(".m3u8")) {
+                M3u8Helper.generateM3u8("Kisskh", link, referer = "$mainUrl/", headers = mapOf("Origin" to mainUrl))
+                    .forEach { callback.invoke(it); emitted++ }
+            } else if (link.contains(".mp4")) {
+                callback.invoke(newExtractorLink("Kisskh", "Kisskh", link, INFER_TYPE) { this.referer = mainUrl })
+                emitted++
+            }
         }
+        Log.d(KK_TAG, "[06-LINK] total ExtractorLink=$emitted")
+
         val kkeySub = app.get("$KISSKH_SUB_API$epsId&version=2.8.10").parsedSafe<KisskhKey>()?.key ?: ""
         val subJson = app.get("$mainUrl/api/Sub/$epsId?kkey=$kkeySub").text
-        tryParseJson<List<KisskhSubtitle>>(subJson)?.forEach { sub ->
+        val subs = tryParseJson<List<KisskhSubtitle>>(subJson)
+        subs?.forEach { sub ->
             subtitleCallback.invoke(newSubtitleFile(sub.label ?: "Unknown", sub.src ?: return@forEach))
         }
+        Log.d(KK_TAG, "[07-SUB] subtitle=${subs?.size ?: 0}")
     }
 
     private data class KisskhMedia(@JsonProperty("id") val id: Int?, @JsonProperty("title") val title: String?)
@@ -447,13 +566,35 @@ object Adicinemax21Extractor : Adicinemax21() {
             val streamUrl = stream.url ?: return@forEach
             val cleanCookie = (stream.signCookie ?: return@forEach).trimEnd(';')
 
-            val linkType = if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.DASH
-            val quality = getQualityFromName(stream.resolutions)
-                .takeIf { it != Qualities.Unknown.value } ?: Qualities.P1080.value
-            val label = stream.resolutions?.let { "MovieBox ${it}p" } ?: "MovieBox (DASH)"
+            // [AUDIT-A5] ExtractorApi.inferTypeFromUrl() memetakan tipe dari PATH url
+            // (.m3u8 -> M3U8, .mpd -> DASH, .torrent, magnet:) dan mengabaikan query string.
+            // contains(".m3u8") salah kalau string itu hanya muncul di query, dan aturan
+            // "selain m3u8 berarti DASH" salah untuk mp4 progresif. INFER_TYPE adalah cara
+            // yang didokumentasikan framework, jadi pemetaan diserahkan ke sana.
+            //
+            // [AUDIT-A6] .mpd/.m3u8 adalah manifest MULTI-BITRATE, jadi field "resolutions"
+            // bukan resolusi tertinggi. Logcat 11:07 memberi label "MovieBox 480p" untuk
+            // .../_1080_h265_29/index_web.mpd -- pengguna melewatkan stream 1080p karena
+            // dikira 480p. Untuk manifest dipakai bobot P1080 seperti MovieBoxProvider asli;
+            // "resolutions" hanya dipercaya untuk file progresif.
+            val path = streamUrl.substringBefore('?').substringBefore('#')
+            val adaptive = path.endsWith(".mpd") || path.endsWith(".m3u8")
+            val namedQuality = getQualityFromName(stream.resolutions)
+                .takeIf { it != Qualities.Unknown.value }
+
+            val quality = if (adaptive) Qualities.P1080.value else (namedQuality ?: Qualities.P1080.value)
+            val label = when {
+                adaptive -> {
+                    val kind = if (path.endsWith(".m3u8")) "HLS" else "DASH"
+                    stream.codecName?.takeIf { it.isNotBlank() }
+                        ?.let { "MovieBox $kind ${it.uppercase()}" } ?: "MovieBox $kind"
+                }
+                namedQuality != null -> "MovieBox ${namedQuality}p"
+                else -> "MovieBox"
+            }
 
             callback.invoke(
-                newExtractorLink("MovieBox", label, streamUrl, linkType) {
+                newExtractorLink("MovieBox", label, streamUrl, INFER_TYPE) {
                     this.referer = MovieboxHelper.API_URL
                     this.quality = quality
                     // Cookie di sini dibaca lagi oleh Adicinemax21.getVideoInterceptor()
@@ -466,7 +607,7 @@ object Adicinemax21Extractor : Adicinemax21() {
                 }
             )
             emitted++
-            Log.d(MB_TAG, "[10-LINK] dibuat: $label type=$linkType q=$quality")
+            Log.d(MB_TAG, "[10-LINK] dibuat: $label q=$quality url=${streamUrl.substringBefore('?')}")
         }
         Log.d(MB_TAG, "[10-LINK] SELESAI, total ExtractorLink=$emitted")
     }
