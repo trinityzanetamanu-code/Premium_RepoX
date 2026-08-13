@@ -66,7 +66,13 @@ object Adicinemax21Extractor : Adicinemax21() {
         val videoUrl = "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=null&time=null&kkey=$kkeyVideo"
         val sources = app.get(videoUrl).parsedSafe<KisskhSources>()
 
-        listOfNotNull(sources?.video, sources?.thirdParty).forEach { link ->
+        listOfNotNull(sources?.video, sources?.thirdParty).forEach { rawLink ->
+            // [FIX-6] BUG LAMA (bukan akibat migrasi Moviebox): Kisskh kadang mengembalikan
+            // URL protocol-relative "//hls1...". M3u8Helper melemparkan
+            // IllegalArgumentException "Expected URL scheme 'http' or 'https'" untuk URL
+            // tanpa scheme, dan exception itu membatalkan seluruh invokeKisskh sehingga
+            // subtitle pun tidak sempat dikirim. Cukup dinormalisasi ke https.
+            val link = if (rawLink.startsWith("//")) "https:$rawLink" else rawLink
             if (link.contains(".m3u8")) M3u8Helper.generateM3u8("Kisskh", link, referer = "$mainUrl/", headers = mapOf("Origin" to mainUrl)).forEach(callback)
             else if (link.contains(".mp4")) callback.invoke(newExtractorLink("Kisskh", "Kisskh", link, ExtractorLinkType.VIDEO) { this.referer = mainUrl })
         }
@@ -85,7 +91,6 @@ object Adicinemax21Extractor : Adicinemax21() {
     private data class KisskhSubtitle(@JsonProperty("src") val src: String?, @JsonProperty("label") val label: String?)
 
     // ================== MOVIEBOX SOURCE ==================
-    // Menggantikan invokeAdimoviebox() dan invokeAdimoviebox2().
     // Engine diambil dari MovieBoxProvider, TANPA membawa mainPage/search/
     // quickSearch/load/detail/recommendation miliknya, karena semua itu sudah
     // ditangani TMDB di Adicinemax21.
@@ -93,10 +98,14 @@ object Adicinemax21Extractor : Adicinemax21() {
     // Alur: TMDB load() -> LinkData -> loadLinks() -> invokeMoviebox()
     //       -> search/v2 -> season-info -> play-info -> ExtractorLink (+ Cookie)
     //
-    // DIAGNOSTIK: filter logcat dengan tag "Adicinemax21MB". Setiap tahap diberi
-    // nomor urut [00]..[10] sehingga tahap tempat MovieBox berhenti langsung
-    // terbaca, termasuk ALASAN setiap kandidat search ditolak.
+    // DIAGNOSTIK: filter logcat dengan tag "Adicinemax21MB".
     private const val MB_TAG = "Adicinemax21MB"
+
+    // Berapa banyak subject MovieBox yang boleh dicoba untuk satu judul.
+    // TV murah karena season-info langsung membuang subject kosong (1 request/subject);
+    // movie mahal karena setiap subject mencoba 4 kombinasi play-info.
+    private const val MB_MAX_SUBJECTS_TV = 6
+    private const val MB_MAX_SUBJECTS_MOVIE = 3
 
     suspend fun invokeMoviebox(
         title: String,
@@ -129,11 +138,17 @@ object Adicinemax21Extractor : Adicinemax21() {
         }
         Log.d(MB_TAG, "[01-AUTH] ok (len=${bearer.length})")
 
-        suspend fun searchSubject(query: String): MovieboxSubject? {
+        /**
+         * Mengembalikan SEMUA subject yang lolos validasi, sudah diurutkan dari
+         * yang paling mirip. Sebelumnya fungsi ini hanya mengembalikan satu subject
+         * dan itulah penyebab House of the Dragon gagal: MovieBox punya 6 subject
+         * berjudul sama, yang pertama adalah entri kosong tanpa stream.
+         */
+        suspend fun searchSubjects(query: String): List<MovieboxSubject> {
             val cleanQuery = query.replace(Regex("[^A-Za-z0-9]"), "").lowercase()
             if (cleanQuery.isEmpty()) {
                 Log.w(MB_TAG, "[02-SEARCH] skip: query '$query' kosong setelah normalisasi")
-                return null
+                return emptyList()
             }
 
             val body = JSONObject()
@@ -152,104 +167,98 @@ object Adicinemax21Extractor : Adicinemax21() {
             )
             if (raw == null) {
                 Log.e(MB_TAG, "[02-SEARCH] STOP: HTTP gagal / bukan 200 untuk keyword='$query'")
-                return null
+                return emptyList()
             }
 
             val parsed = tryParseJson<MovieboxSearchResponse>(raw)
             if (parsed == null) {
                 Log.e(MB_TAG, "[02-SEARCH] STOP: JSON gagal di-parse. head=${raw.take(300)}")
-                return null
+                return emptyList()
             }
 
             val groups = parsed.data?.results.orEmpty()
             val subjects = groups
                 .flatMap { it.subjects ?: emptyList() }
                 .filter { !it.subjectId.isNullOrBlank() }
+                .distinctBy { it.subjectId }
 
-            Log.d(
-                MB_TAG,
-                "[02-SEARCH] code=${parsed.code} groups=${groups.size} subjects=${subjects.size}"
-            )
-            subjects.forEachIndexed { i, s ->
+            Log.d(MB_TAG, "[02-SEARCH] code=${parsed.code} groups=${groups.size} subjects=${subjects.size}")
+            subjects.forEachIndexed { i, sub ->
                 Log.d(
                     MB_TAG,
-                    "[03-CAND] #$i id=${s.subjectId} type=${s.subjectType} " +
-                        "releaseDate=${s.releaseDate} title='${s.title}'"
+                    "[03-CAND] #$i id=${sub.subjectId} type=${sub.subjectType} " +
+                        "releaseDate=${sub.releaseDate} title='${sub.title}'"
                 )
             }
-            if (subjects.isEmpty()) {
-                Log.w(MB_TAG, "[03-CAND] response terbaca tapi 0 subject untuk keyword='$query'")
-            }
 
-            fun matches(subject: MovieboxSubject, exact: Boolean): Boolean {
-                val pass = if (exact) "EXACT" else "PARTIAL"
-
-                // [FIX-2] MovieBoxProvider asli memakai optInt("subjectType", 1), artinya
-                // field ini BOLEH tidak ada. Versi lama menolak null secara keras sehingga
-                // seluruh kandidat bisa terbuang. Sekarang null hanya ditoleransi pada pass
-                // PARTIAL, jadi pass EXACT tetap seketat sebelumnya.
-                val st = subject.subjectType
-                if (st == null) {
-                    if (exact) {
-                        Log.d(MB_TAG, "[04-REJECT/$pass] id=${subject.subjectId} alasan=subjectType null")
-                        return false
-                    }
-                } else if (st != wantedType) {
-                    Log.d(MB_TAG, "[04-REJECT/$pass] id=${subject.subjectId} alasan=subjectType $st != $wantedType")
-                    return false
+            // rank 0 = judul identik, 1 = judul + embel-embel ("... S1-S3",
+            // "... [Indonesian]"), 2/3 = mengandung sebagian. Semakin kecil semakin mirip.
+            val ranked = ArrayList<Pair<Int, MovieboxSubject>>()
+            for (sub in subjects) {
+                val st = sub.subjectType
+                if (st != null && st != wantedType) {
+                    Log.d(MB_TAG, "[04-REJECT] id=${sub.subjectId} alasan=subjectType $st != $wantedType")
+                    continue
                 }
-
-                val cleanTitle = subject.title?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase().orEmpty()
+                val cleanTitle = sub.title?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase().orEmpty()
                 if (cleanTitle.isEmpty()) {
-                    Log.d(MB_TAG, "[04-REJECT/$pass] id=${subject.subjectId} alasan=title kosong")
-                    return false
+                    Log.d(MB_TAG, "[04-REJECT] id=${sub.subjectId} alasan=title kosong")
+                    continue
+                }
+                val rank = when {
+                    cleanTitle == cleanQuery -> 0
+                    cleanTitle.startsWith(cleanQuery) -> 1
+                    cleanTitle.contains(cleanQuery) -> 2
+                    cleanQuery.contains(cleanTitle) -> 3
+                    else -> -1
+                }
+                if (rank < 0) {
+                    Log.d(MB_TAG, "[04-REJECT] id=${sub.subjectId} alasan=title '$cleanTitle' vs '$cleanQuery'")
+                    continue
+                }
+                // subjectType tak dikenal hanya boleh lewat kalau judulnya identik.
+                if (st == null && rank != 0) {
+                    Log.d(MB_TAG, "[04-REJECT] id=${sub.subjectId} alasan=subjectType null & judul tidak identik")
+                    continue
                 }
 
-                val titleOk = if (exact) {
-                    cleanTitle == cleanQuery
-                } else {
-                    cleanTitle.contains(cleanQuery) || cleanQuery.contains(cleanTitle)
-                }
-                if (!titleOk) {
-                    Log.d(MB_TAG, "[04-REJECT/$pass] id=${subject.subjectId} alasan=title '$cleanTitle' vs '$cleanQuery'")
-                    return false
-                }
-
-                val subjectYear = subject.releaseDate?.split("-")?.firstOrNull()?.toIntOrNull()
-                // [FIX-3] MovieBox kadang memecah serial menjadi subject per-season, sehingga
-                // releaseDate subject = tahun SEASON (mis. 2024) sedangkan matchYear = tahun
-                // SERIES (mis. 2022). Toleransi +/-1 menolak subject yang justru benar.
-                // Sebuah season tidak mungkin tayang sebelum series-nya mulai, jadi untuk TV
-                // batas bawah saja yang divalidasi. Movie tetap +/-1 seperti semula.
+                val subjectYear = sub.releaseDate?.split("-")?.firstOrNull()?.toIntOrNull()
+                // [FIX-3] MovieBox kadang memecah/mengagregasi serial, sehingga releaseDate
+                // subject bisa jauh lebih baru dari tahun rilis series. Season tidak mungkin
+                // tayang sebelum series-nya mulai, jadi untuk TV hanya batas bawah yang
+                // divalidasi. Movie tetap +/-1 seperti semula.
                 val yearOk = when {
                     matchYear == null || subjectYear == null -> true
                     wantedType == 2 -> subjectYear >= matchYear - 1
                     else -> abs(subjectYear - matchYear) <= 1
                 }
                 if (!yearOk) {
-                    Log.d(MB_TAG, "[04-REJECT/$pass] id=${subject.subjectId} alasan=year $subjectYear vs $matchYear")
-                    return false
+                    Log.d(MB_TAG, "[04-REJECT] id=${sub.subjectId} alasan=year $subjectYear vs $matchYear")
+                    continue
                 }
-                return true
+                ranked.add(rank to sub)
             }
 
-            val hit = subjects.firstOrNull { matches(it, true) }
-                ?: subjects.firstOrNull { matches(it, false) }
-
-            if (hit == null) {
-                Log.w(MB_TAG, "[05-MATCH] tidak ada subject cocok untuk keyword='$query'")
-            } else {
-                Log.d(MB_TAG, "[05-MATCH] terpilih id=${hit.subjectId} type=${hit.subjectType} title='${hit.title}'")
-            }
-            return hit
+            // rank 3 = judul subject hanyalah POTONGAN dari query (mis. "The Haunted"
+            // untuk query "The Haunted Hotel"). Itu paling rawan salah judul, jadi hanya
+            // dipakai kalau benar-benar tidak ada kandidat yang lebih mirip.
+            val strong = ranked.filter { it.first <= 2 }
+            val out = (if (strong.isNotEmpty()) strong else ranked)
+                .sortedBy { it.first }
+                .map { it.second }
+            Log.d(
+                MB_TAG,
+                "[05-MATCH] lolos=${out.size} untuk '$query' => " +
+                    out.joinToString { "" + it.subjectId + "('" + it.title + "')" }.ifBlank { "(kosong)" }
+            )
+            return out
         }
 
         // [FIX-1] Rantai fallback lama (title -> orgTitle -> altTitle) semuanya memakai
-        // substringBefore(":"). Untuk judul berbahasa Inggris title == orgTitle dan altTitle
-        // sering null, sehingga "3 fallback" sebenarnya mengirim keyword yang SAMA berkali-kali
-        // (kasus House of the Dragon). Selain itu substringBefore(":") merusak judul seperti
-        // "Mission: Impossible" menjadi "Mission". Sekarang judul utuh dicoba lebih dulu, lalu
-        // varian tanpa subtitle, dan daftarnya di-distinct. Aturan matches() TIDAK dilonggarkan.
+        // substringBefore(":"), padahal untuk judul Inggris title == orgTitle sehingga
+        // keyword yang sama dikirim berulang. Selain itu substringBefore(":") merusak
+        // "Mission: Impossible" menjadi "Mission". Judul utuh dicoba lebih dulu, lalu
+        // varian tanpa subtitle, dan daftarnya di-distinct.
         val queries = listOfNotNull(
             title,
             title.substringBefore(":"),
@@ -261,133 +270,153 @@ object Adicinemax21Extractor : Adicinemax21() {
 
         Log.d(MB_TAG, "[02-SEARCH] daftar keyword yang akan dicoba = $queries")
 
-        var matched: MovieboxSubject? = null
+        var candidates: List<MovieboxSubject> = emptyList()
         for (q in queries) {
-            matched = searchSubject(q)
-            if (matched != null) break
+            candidates = searchSubjects(q)
+            if (candidates.isNotEmpty()) break
         }
-        if (matched == null) {
+        if (candidates.isEmpty()) {
             Log.e(MB_TAG, "[05-MATCH] STOP: tidak ada subject setelah ${queries.size} keyword: $queries")
             return
         }
 
-        val subjectId = matched.subjectId
-        if (subjectId.isNullOrBlank()) {
-            Log.e(MB_TAG, "[05-MATCH] STOP: subjectId kosong pada subject terpilih")
-            return
-        }
-
-        // [FIX-4] Indexing season TIDAK ditebak. Server ditanya lewat season-info
-        // (endpoint + struktur sama persis dengan MovieBoxProvider). Pergeseran
-        // season-1 hanya dilakukan bila daftar season milik server memang dimulai
-        // dari 0. Bila season-info kosong / gagal, perilaku lama dipakai apa adanya.
-        var resolvedSe: Int? = null
-        if (season != null) {
-            val rawSeason = MovieboxHelper.getSigned(
+        /** Daftar season milik satu subject menurut server (kosong = tidak diketahui). */
+        suspend fun fetchSeasons(sid: String): List<Int> {
+            val raw = MovieboxHelper.getSigned(
                 "/wefeed-mobile-bff/subject-api/season-info",
-                "subjectId=$subjectId",
+                "subjectId=$sid",
                 bearer
             )
-            val seasonList = rawSeason
+            val list = raw
                 ?.let { tryParseJson<MovieboxSeasonInfoResponse>(it) }
                 ?.data?.seasons.orEmpty()
-            val available = seasonList.mapNotNull { it.se }.sorted()
+            val dump = list.joinToString { "se=" + it.se + "/maxEp=" + it.maxEp }.ifBlank { "(kosong)" }
+            Log.d(MB_TAG, "[06-SEASON] subjectId=$sid server=$dump")
+            return list.mapNotNull { it.se }.sorted()
+        }
 
-            val seasonDump = seasonList
-                .joinToString { "se=" + it.se + "/maxEp=" + it.maxEp }
-                .ifBlank { "(kosong)" }
-            Log.d(MB_TAG, "[06-SEASON] subjectId=$subjectId server=$seasonDump")
+        /** play-info untuk satu subject; null bila tidak ada stream yang layak. */
+        suspend fun tryPlay(sid: String, pairs: List<Pair<Int, Int>>): List<MovieboxStreamItem>? {
+            for ((se, epNum) in pairs) {
+                // URUTAN QUERY WAJIB ALFABETIS (ep, se, subjectId) - ikut ditandatangani.
+                val raw = MovieboxHelper.getSigned(
+                    "/wefeed-mobile-bff/subject-api/play-info",
+                    "ep=$epNum&se=$se&subjectId=$sid",
+                    bearer
+                )
+                if (raw == null) {
+                    Log.e(MB_TAG, "[08-PLAY] id=$sid se=$se ep=$epNum HTTP gagal / exception")
+                    continue
+                }
+                val play = tryParseJson<MovieboxPlayInfoResponse>(raw)
+                if (play == null) {
+                    Log.e(MB_TAG, "[08-PLAY] id=$sid se=$se ep=$epNum JSON gagal. head=${raw.take(200)}")
+                    continue
+                }
+                val all = play.data?.streams.orEmpty()
+                val usable = all
+                    .filter { !it.url.isNullOrBlank() && !it.signCookie.isNullOrBlank() }
+                    .distinctBy { it.url }
+                val noUrl = all.count { it.url.isNullOrBlank() }
+                val noCookie = all.count { it.signCookie.isNullOrBlank() }
+                Log.d(
+                    MB_TAG,
+                    "[08-PLAY] id=$sid se=$se ep=$epNum code=${play.code} msg=${play.message} " +
+                        "streams=${all.size} usable=${usable.size} tanpaUrl=$noUrl tanpaSignCookie=$noCookie"
+                )
+                if (usable.isNotEmpty()) return usable
+            }
+            return null
+        }
 
-            if (available.isNotEmpty()) {
-                resolvedSe = when {
+        // ---------- PEMILIHAN SUBJECT ----------
+        // [FIX-5] AKAR MASALAH House of the Dragon: MovieBox mengembalikan 6 subject
+        // berjudul "House of the Dragon"; yang pertama (2195332290044216368) adalah
+        // entri kosong -- season-info kosong dan play-info balas code=0 msg=ok
+        // streams=0. Versi lama berhenti di situ. Sekarang subject dicoba berurutan
+        // sampai ada yang benar-benar punya stream.
+        //
+        // Untuk TV, season-info dipakai sebagai penyaring murah sekaligus penentu
+        // indexing: subject yang tidak memuat season yang diminta langsung dilewati,
+        // jadi tidak mungkin memutar episode dari season lain.
+        val ep = episode ?: 1
+        val pool = candidates.take(if (season == null) MB_MAX_SUBJECTS_MOVIE else MB_MAX_SUBJECTS_TV)
+        var chosenId: String? = null
+        var streams: List<MovieboxStreamItem>? = null
+
+        if (season == null) {
+            val moviePairs = listOf(0 to 0, 1 to 0, 1 to 1, 0 to 1)
+            for (sub in pool) {
+                val sid = sub.subjectId ?: continue
+                Log.d(MB_TAG, "[07-TRY] MOVIE id=$sid title='${sub.title}' pairs=$moviePairs")
+                val found = tryPlay(sid, moviePairs)
+                if (found != null) {
+                    chosenId = sid
+                    streams = found
+                    break
+                }
+            }
+        } else {
+            // Subject yang season-info-nya kosong disimpan untuk percobaan terakhir.
+            val unknown = ArrayList<MovieboxSubject>()
+            for (sub in pool) {
+                val sid = sub.subjectId ?: continue
+                val available = fetchSeasons(sid)
+                if (available.isEmpty()) {
+                    unknown.add(sub)
+                    continue
+                }
+                val se = when {
                     available.contains(season) -> season
+                    // Hanya digeser bila daftar server memang dimulai dari 0.
                     available.first() == 0 && available.contains(season - 1) -> season - 1
                     else -> null
                 }
-                Log.d(MB_TAG, "[06-SEASON] tmdbSeason=$season available=$available => resolvedSe=$resolvedSe")
-                if (resolvedSe == null) {
-                    // Indikasi kuat MovieBox memecah serial menjadi subject terpisah
-                    // per season: subject terpilih tidak memuat season yang diminta.
-                    // TIDAK di-remap paksa (bisa memutar episode dari season lain);
-                    // baris ini yang membuktikannya di logcat.
-                    Log.w(
-                        MB_TAG,
-                        "[06-SEASON] season $season TIDAK ada pada subject $subjectId " +
-                            "(server hanya punya $available) -> kemungkinan subject per-season"
-                    )
+                if (se == null) {
+                    Log.d(MB_TAG, "[07-TRY] SKIP id=$sid: season $season tidak ada (server $available)")
+                    continue
                 }
-            } else {
-                Log.d(MB_TAG, "[06-SEASON] season-info tidak tersedia, pakai candidatePairs lama")
+                Log.d(MB_TAG, "[07-TRY] TV id=$sid title='${sub.title}' se=$se ep=$ep (server $available)")
+                val found = tryPlay(sid, listOf(se to ep))
+                if (found != null) {
+                    chosenId = sid
+                    streams = found
+                    break
+                }
+            }
+
+            if (streams == null && unknown.isNotEmpty()) {
+                // season-info tidak memberi info apa pun -> pakai heuristik lama.
+                // Nomor episode TETAP dipertahankan, hanya indexing season yang dicoba,
+                // sehingga tidak mungkin memutar episode dari season lain.
+                val pairs = if (season == 1) listOf(1 to ep, 0 to ep) else listOf(season to ep)
+                for (sub in unknown) {
+                    val sid = sub.subjectId ?: continue
+                    Log.d(MB_TAG, "[07-TRY] TV-fallback id=$sid title='${sub.title}' pairs=$pairs")
+                    val found = tryPlay(sid, pairs)
+                    if (found != null) {
+                        chosenId = sid
+                        streams = found
+                        break
+                    }
+                }
             }
         }
 
-        // Movie mengikuti candidatePairs asli MovieBoxProvider.
-        // Untuk TV, fallback "1 to 1 / 0 to 0" milik source asli tetap TIDAK dipakai:
-        // di konteks TMDB itu akan memutar episode yang salah (S03E07 -> S01E01).
-        // Nomor episode SELALU dipertahankan di semua cabang di bawah ini.
-        val ep = episode ?: 1
-        val resolved = resolvedSe
-        val candidatePairs: List<Pair<Int, Int>> = if (season == null) {
-            listOf(0 to 0, 1 to 0, 1 to 1, 0 to 1)
-        } else if (resolved != null) {
-            listOf(resolved to ep)
-        } else if (season == 1) {
-            listOf(1 to ep, 0 to ep)
-        } else {
-            listOf(season to ep)
-        }
-        Log.d(MB_TAG, "[07-PAIRS] candidatePairs=$candidatePairs")
-
-        var foundStreams: List<MovieboxStreamItem>? = null
-        for ((se, epNum) in candidatePairs) {
-            // URUTAN QUERY WAJIB ALFABETIS (ep, se, subjectId) - ikut ditandatangani.
-            val raw = MovieboxHelper.getSigned(
-                "/wefeed-mobile-bff/subject-api/play-info",
-                "ep=$epNum&se=$se&subjectId=$subjectId",
-                bearer
-            )
-            if (raw == null) {
-                Log.e(MB_TAG, "[08-PLAY] se=$se ep=$epNum HTTP gagal / exception")
-                continue
-            }
-
-            val play = tryParseJson<MovieboxPlayInfoResponse>(raw)
-            if (play == null) {
-                Log.e(MB_TAG, "[08-PLAY] se=$se ep=$epNum JSON gagal di-parse. head=${raw.take(300)}")
-                continue
-            }
-
-            val all = play.data?.streams.orEmpty()
-            val usable = all
-                .filter { !it.url.isNullOrBlank() && !it.signCookie.isNullOrBlank() }
-                .distinctBy { it.url }
-
-            val noUrl = all.count { it.url.isNullOrBlank() }
-            val noCookie = all.count { it.signCookie.isNullOrBlank() }
-            Log.d(
-                MB_TAG,
-                "[08-PLAY] se=$se ep=$epNum code=${play.code} msg=${play.message} " +
-                    "streams=${all.size} usable=${usable.size} " +
-                    "tanpaUrl=$noUrl tanpaSignCookie=$noCookie"
-            )
-
-            if (usable.isNotEmpty()) {
-                foundStreams = usable
-                break
-            }
-        }
-
-        val streams = foundStreams
-        if (streams == null) {
+        val subjectId = chosenId
+        val finalStreams = streams
+        if (subjectId == null || finalStreams == null) {
             Log.e(
                 MB_TAG,
-                "[08-PLAY] STOP: tidak ada stream layak. subjectId=$subjectId pairs=$candidatePairs"
+                "[08-PLAY] STOP: tidak ada stream layak setelah mencoba ${pool.size} subject: " +
+                    pool.joinToString { "" + it.subjectId }
             )
             return
         }
+        Log.d(MB_TAG, "[08-PLAY] SUBJECT TERPAKAI id=$subjectId streams=${finalStreams.size}")
 
         // ---------- SUBTITLE ----------
-        val streamId = streams.firstOrNull()?.id
+        val streamId = finalStreams.firstOrNull()?.id
         if (!streamId.isNullOrBlank()) {
             // URUTAN QUERY WAJIB ALFABETIS (streamId, subjectId).
             val rawSub = MovieboxHelper.getSigned(
@@ -414,7 +443,7 @@ object Adicinemax21Extractor : Adicinemax21() {
 
         // ---------- STREAM ----------
         var emitted = 0
-        streams.forEach { stream ->
+        finalStreams.forEach { stream ->
             val streamUrl = stream.url ?: return@forEach
             val cleanCookie = (stream.signCookie ?: return@forEach).trimEnd(';')
 
