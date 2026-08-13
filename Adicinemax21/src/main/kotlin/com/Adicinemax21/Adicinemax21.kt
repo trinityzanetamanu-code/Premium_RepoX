@@ -18,12 +18,23 @@ open class Adicinemax21 : TmdbProvider() {
     override var name = "Adicinemax21"
     override val hasMainPage = true
     override var lang = "en"
-    override val instantLinkLoading = true
     override val useMetaLoadResponse = true
     override val hasQuickSearch = true
+
+    // [AUDIT-A1] MainAPI: "Set false if links require referer or for some reason cant be
+    // played on a chromecast". Link MovieBox wajib membawa header Cookie hasil signCookie
+    // lewat getVideoInterceptor(), dan Kisskh wajib membawa Referer. Chromecast tidak
+    // memakai interceptor provider sehingga CDN membalas 403. Kembalikan ke true hanya
+    // bila nanti ada sumber yang benar-benar bisa di-cast.
+    override val hasChromecastSupport = false
+
+    // [AUDIT-A3] load() dapat mengembalikan TvType.Anime (isAnime), sedangkan supportedTypes
+    // sebelumnya hanya Movie + TvSeries. LoadResponse yang tipenya di luar supportedTypes
+    // membuat provider tersaring dari filter tipe di UI.
     override val supportedTypes = setOf(
         TvType.Movie,
         TvType.TvSeries,
+        TvType.Anime,
     )
 
     val wpRedisInterceptor by lazy { CloudflareKiller() }
@@ -97,14 +108,25 @@ open class Adicinemax21 : TmdbProvider() {
         return newHomePageResponse(request.name, home)
     }
 
+    // [AUDIT-A4] Sebelumnya SEMUA hasil dibungkus newMovieSearchResponse + TvType.Movie,
+    // termasuk serial. MainAPI memakai tipe ini untuk ikon, filter tipe, dan sinkronisasi
+    // watch-list, jadi serial ikut terdaftar sebagai film. Payload "Data" tidak diubah,
+    // sehingga load() tetap menerima data yang sama persis.
     private fun Media.toSearchResponse(type: String? = null): SearchResponse? {
-        return newMovieSearchResponse(
-            title ?: name ?: originalTitle ?: return null,
-            Data(id = id, type = mediaType ?: type).toJson(),
-            TvType.Movie,
-        ) {
-            this.posterUrl = getImageUrl(posterPath)
-            this.score = Score.from10(voteAverage)
+        val label = title ?: name ?: originalTitle ?: return null
+        val mediaKind = mediaType ?: type
+        val payload = Data(id = id, type = mediaKind).toJson()
+
+        return if (mediaKind == "tv") {
+            newTvSeriesSearchResponse(label, payload, TvType.TvSeries) {
+                this.posterUrl = getImageUrl(posterPath)
+                this.score = Score.from10(voteAverage)
+            }
+        } else {
+            newMovieSearchResponse(label, payload, TvType.Movie) {
+                this.posterUrl = getImageUrl(posterPath)
+                this.score = Score.from10(voteAverage)
+            }
         }
     }
 
