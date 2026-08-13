@@ -7,8 +7,9 @@ import com.fasterxml.jackson.annotation.JsonProperty
 // Semua di-prefix "Moviebox" supaya tidak bentrok dengan nama generik
 // (StreamItem / PlayData / CoverItem) milik MovieBoxProvider asli.
 //
-// Hanya 3 endpoint yang dipakai sebagai source playback:
+// Endpoint yang dipakai sebagai source playback:
 //   POST /wefeed-mobile-bff/subject-api/search/v2            -> data.results[].subjects[]
+//   GET  /wefeed-mobile-bff/subject-api/season-info          -> data.seasons[]
 //   GET  /wefeed-mobile-bff/subject-api/play-info            -> data.streams[]
 //   GET  /wefeed-mobile-bff/subject-api/get-stream-captions  -> data.extCaptions[]
 
@@ -31,6 +32,22 @@ data class MovieboxSubject(
     @param:JsonProperty("releaseDate") val releaseDate: String? = null,
     // 1 = Movie, 2 = TV. Nilai lain (mis. 9 = UGC) tidak bisa diputar via play-info.
     @param:JsonProperty("subjectType") val subjectType: Int? = null,
+)
+
+// [FIX-4] season-info dipakai untuk mengetahui indexing season milik MovieBox
+// (endpoint & struktur mengikuti MovieBoxProvider: data.seasons[] { se, maxEp }).
+data class MovieboxSeasonInfoResponse(
+    @param:JsonProperty("code") val code: Int? = null,
+    @param:JsonProperty("data") val data: MovieboxSeasonInfoData? = null,
+)
+
+data class MovieboxSeasonInfoData(
+    @param:JsonProperty("seasons") val seasons: List<MovieboxSeasonItem>? = emptyList(),
+)
+
+data class MovieboxSeasonItem(
+    @param:JsonProperty("se") val se: Int? = null,
+    @param:JsonProperty("maxEp") val maxEp: Int? = null,
 )
 
 data class MovieboxPlayInfoResponse(
