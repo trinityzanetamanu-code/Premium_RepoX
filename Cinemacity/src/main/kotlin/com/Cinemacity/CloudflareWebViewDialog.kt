@@ -2,6 +2,7 @@ package com.Cinemacity
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
@@ -11,7 +12,6 @@ import android.webkit.WebViewClient
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
 
 object CloudflareWebViewDialog {
     @SuppressLint("SetJavaScriptEnabled")
@@ -38,6 +38,7 @@ object CloudflareWebViewDialog {
             )
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            // Menjamin sinkronisasi User-Agent
             settings.userAgentString = settings.userAgentString
 
             webViewClient = object : WebViewClient() {
@@ -54,6 +55,7 @@ object CloudflareWebViewDialog {
         }
         layout.addView(webView)
 
+        // Menggunakan AlertDialog bawaan Android murni
         val dialog = AlertDialog.Builder(activity)
             .setView(layout)
             .setCancelable(true)
