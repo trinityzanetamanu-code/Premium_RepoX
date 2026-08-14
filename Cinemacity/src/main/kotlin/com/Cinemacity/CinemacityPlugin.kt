@@ -1,43 +1,25 @@
 package com.Cinemacity
 
+import android.app.Activity
+import android.app.Application
 import android.content.Context
+import android.os.Bundle
+import androidx.fragment.app.FragmentActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
+
+object ActivityHelper {
+    var currentActivity: FragmentActivity? = null
+}
 
 @CloudstreamPlugin
 class CinemacityPlugin : Plugin() {
 
     companion object {
-        /**
-         * Cookie hasil tantangan Cloudflare.
-         *
-         * [PROVEN] plugin asli menyimpannya di Companion; dibaca oleh
-         * loadLinks (@02ce) dan getCfHeaders.
-         *
-         * DITUNDA di port v1: pengisian otomatis lewat CloudflareWebViewDialog.
-         */
-        @Volatile
-        var cfCookies: String = ""
+        @Volatile var cfCookies: String = ""
+        @Volatile var cfUserAgent: String = ""
+        @Volatile var cfCookieHost: String = ""
 
-        /**
-         * [PROVEN] getter/setter cfUserAgent ada di Companion asli dan dipakai
-         * getCfHeaders serta interceptor.
-         *
-         * [TENTATIVE] asalnya (dugaan WebSettings.getUserAgentString()) BELUM
-         * terbukti dari bytecode, jadi tidak diasumsikan. Bila kosong,
-         * interceptor tidak menimpa User-Agent.
-         */
-        @Volatile
-        var cfUserAgent: String = ""
-
-        /** [PROVEN] disimpan bersama cookie oleh saveCookiesAndDismiss. */
-        @Volatile
-        var cfCookieHost: String = ""
-
-        /**
-         * [PROVEN] getCfHeaders menyusun LinkedHashMap berisi User-Agent dan
-         * Cookie, masing-masing hanya bila panjangnya > 0.
-         */
         fun getCfHeaders(): Map<String, String> {
             val h = LinkedHashMap<String, String>()
             if (cfUserAgent.isNotEmpty()) h["User-Agent"] = cfUserAgent
@@ -47,6 +29,26 @@ class CinemacityPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
+        val app = context.applicationContext as Application
+        app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityResumed(activity: Activity) {
+                if (activity is FragmentActivity) {
+                    ActivityHelper.currentActivity = activity
+                }
+            }
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivityStarted(activity: Activity) {}
+            override fun onActivityDestroyed(activity: Activity) {
+                if (ActivityHelper.currentActivity == activity) {
+                    ActivityHelper.currentActivity = null
+                }
+            }
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityStopped(activity: Activity) {}
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+        })
+
         registerMainAPI(Cinemacity())
+        this.settings = CinemacitySettingsFragment::class.java
     }
 }
