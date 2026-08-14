@@ -84,10 +84,15 @@ class Cinemacity : MainAPI() {
     }
 
     private fun org.jsoup.nodes.Element.toSearchResult(): SearchResponse? {
-        // Filter URL agar tidak nyasar mengambil URL gambar .webp/.jpg
+        // FILTER KETAT: Hindari URL nyasar ke gambar (.webp, dll) atau folder uploads
         val href = this.select("a").firstOrNull { 
-            val link = it.attr("href")
-            link.isNotBlank() && !link.contains("/uploads/") && !link.endsWith(".webp", true) && !link.endsWith(".jpg", true)
+            val link = it.attr("href").lowercase()
+            link.isNotBlank() && 
+            !link.contains("/uploads/") && 
+            !link.endsWith(".webp") && 
+            !link.endsWith(".jpg") && 
+            !link.endsWith(".png") &&
+            (link.contains(mainUrl) || link.startsWith("/"))
         }?.attr("href") ?: return null
         
         val fixedHref = fixUrl(href)
@@ -102,6 +107,7 @@ class Cinemacity : MainAPI() {
             ?.takeIf { it.isNotBlank() }
             ?: this.select("img").firstOrNull()?.attr("src")
 
+        // Ambil header Cloudflare (beserta User-Agent) untuk disuntikkan ke Coil
         val cfHeaders = CinemacityPlugin.getCfHeaders()
 
         return if (fixedHref.contains("/tv-series/")) {
