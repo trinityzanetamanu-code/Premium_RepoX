@@ -7,6 +7,7 @@ import com.lagradost.api.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
+import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 
 class Cinemacity : MainAPI() {
 
@@ -17,7 +18,7 @@ class Cinemacity : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     companion object {
-        private const val loginCookie = "" // [REDACTED_SECRET] — isi manual
+        private const val loginCookie = "" 
         private val seasonRegex = Regex("""Season\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val episodeRegex = Regex("""Episode\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val imdbRegex = Regex("""tt\d+""")
@@ -27,7 +28,8 @@ class Cinemacity : MainAPI() {
             "<title>just a moment",
             "id=\"challenge-form\"",
             "cf-browser-verification",
-            "checking your browser before accessing"
+            "checking your browser before accessing",
+            "attention required"
         )
         private const val TAG = "Phisher"
     }
@@ -43,9 +45,9 @@ class Cinemacity : MainAPI() {
                 response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
             } else {
                 if (ActivityHelper.currentActivity == null) {
-                    throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa (Swipe Up/Clear Recent) aplikasi CloudStream lalu buka kembali agar Auto-Bypass berfungsi.")
+                    throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa aplikasi CloudStream (Clear Recent Apps) lalu buka kembali agar Bypass berfungsi.")
                 } else {
-                    throw ErrorLoadingException("Bypass Cloudflare dibatalkan atau gagal. Coba muat ulang.")
+                    throw ErrorLoadingException("Bypass Cloudflare dibatalkan/gagal. Coba muat ulang.")
                 }
             }
         }
@@ -84,30 +86,22 @@ class Cinemacity : MainAPI() {
     }
 
     private fun org.jsoup.nodes.Element.toSearchResult(): SearchResponse? {
-        // FILTER KETAT: Hindari URL nyasar ke gambar (.webp, dll) atau folder uploads
         val href = this.select("a").firstOrNull { 
             val link = it.attr("href").lowercase()
-            link.isNotBlank() && 
-            !link.contains("/uploads/") && 
-            !link.endsWith(".webp") && 
-            !link.endsWith(".jpg") && 
-            !link.endsWith(".png") &&
-            (link.contains(mainUrl) || link.startsWith("/"))
+            link.isNotBlank() && !link.contains("/uploads/") && !link.endsWith(".webp") && !link.endsWith(".jpg") && !link.endsWith(".png")
         }?.attr("href") ?: return null
         
         val fixedHref = fixUrl(href)
 
-        val title = this.select("div.dar-short_bg.e-cover > div > span")
-            .firstOrNull()?.text()?.trim()
-            ?: this.select("div.dar-short_bg.e-cover > div span:nth-child(2) > a")
-                .firstOrNull()?.text()?.trim()
+        // AMBIL TITLE: Prioritas alt image, fallback ke span KEDUA (bukan CAM-Rip)
+        val title = this.selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
+            ?: this.select("div.dar-short_bg.e-cover > div > span").lastOrNull()?.text()?.trim()
+            ?: this.selectFirst("a")?.text()?.trim()
             ?: return null
 
-        val poster = this.select("[data-vbg]").firstOrNull()?.attr("data-vbg")
-            ?.takeIf { it.isNotBlank() }
-            ?: this.select("img").firstOrNull()?.attr("src")
+        val poster = this.selectFirst("[data-vbg]")?.attr("data-vbg")?.takeIf { it.isNotBlank() }
+            ?: this.selectFirst("img")?.attr("src")
 
-        // Ambil header Cloudflare (beserta User-Agent) untuk disuntikkan ke Coil
         val cfHeaders = CinemacityPlugin.getCfHeaders()
 
         return if (fixedHref.contains("/tv-series/")) {
@@ -128,8 +122,7 @@ class Cinemacity : MainAPI() {
         val seed = appGet(seedUrl, siteCookieHeader())
 
         val doc = seed.document
-        val dleHash = doc.select("input[name=dle_hash]").firstOrNull()?.attr("value")
-            ?.takeIf { it.isNotBlank() }
+        val dleHash = doc.selectFirst("input[name=dle_hash]")?.attr("value")?.takeIf { it.isNotBlank() }
             ?: dleHashRegex.find(seed.text)?.groupValues?.getOrNull(1)
 
         val postHeaders = mapOf(
@@ -137,7 +130,8 @@ class Cinemacity : MainAPI() {
             "Origin" to mainUrl,
             "Referer" to seedUrl,
             "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
-            "Cookie" to buildCookieValue()
+            "Cookie" to buildCookieValue(),
+            "User-Agent" to CinemacityPlugin.cfUserAgent
         )
         val data = mutableMapOf("story" to query)
         if (!dleHash.isNullOrBlank()) data["dle_hash"] = dleHash
@@ -153,45 +147,58 @@ class Cinemacity : MainAPI() {
             throw ErrorLoadingException("CinemaCity: Cloudflare blocked. Go to Settings -> Bypass Cloudflare.")
         }
 
-        return res.document.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
+        // BUKTI ORIGINAL: ajax.php mengembalikan dle-fast_item
+        return res.document.select("div.dar-short_item, div.dle-fast_item").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val res = appGet(url, siteCookieHeader())
         val doc = res.document
 
-        val title = doc.select("meta[property=og:title]").attr("content").ifBlank { doc.title() }
-        val poster = doc.select("meta[property=og:image]").attr("content").takeIf { it.isNotBlank() }
-        val background = doc.select("div.dar-full_bg a").attr("data-vbg")
-            .ifBlank { doc.select("div.dar-full_bg.e-cover > div").attr("data-vbg") }
-            .takeIf { it.isNotBlank() }
-        val plot = doc.select("#about div.ta-full_text1").text().trim().takeIf { it.isNotBlank() }
+        val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()?.ifBlank { doc.title() } ?: ""
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
+        val background = doc.selectFirst("div.dar-full_bg a")?.attr("data-vbg")
+            ?: doc.selectFirst("div.dar-full_bg.e-cover > div")?.attr("data-vbg")
+            ?: poster
 
+        val plot = doc.select("#about div.ta-full_text1").text().trim().takeIf { it.isNotBlank() }
         val tvType = if (url.contains("/tv-series/")) TvType.TvSeries else TvType.Movie
 
-        val imdbId = doc.select("div.ta-full_rating1 > div")
-            .firstOrNull()?.attr("onclick")
-            ?.let { imdbRegex.find(it)?.value }
+        val imdbId = doc.select("div.ta-full_rating1 > div").firstOrNull()?.attr("onclick")?.let { imdbRegex.find(it)?.value }
 
-        val script = doc.select("script:containsData(atob)").getOrNull(1)?.data()
-            ?: throw ErrorLoadingException("PlayerJS not found; only torrent links available")
+        // BUKTI ORIGINAL: PlayerJS Extraction LOOP (Menghindari "empty file string")
+        val scriptElements = doc.select("script:containsData(atob)")
+        var playerRoot: JSONObject? = null
 
-        val decoded = base64Decode(script.substringAfter("atob(\"").substringBefore("\")"))
-        val raw = decoded.substringAfter("new Playerjs(").substringBeforeLast(");")
-        val playerRoot = JSONObject(raw)
+        for (script in scriptElements) {
+            val scriptData = script.data()
+            if (scriptData.contains("atob(\"")) {
+                val decoded = base64Decode(scriptData.substringAfter("atob(\"").substringBefore("\")"))
+                if (decoded.contains("new Playerjs(")) {
+                    val raw = decoded.substringAfter("new Playerjs(").substringBeforeLast(");")
+                    try {
+                        val tempRoot = tryParseJson<JSONObject>(raw) ?: JSONObject(raw)
+                        // Pastikan script ini valid dan memiliki kunci "file" yang terisi
+                        if (tempRoot.has("file") && tempRoot.optString("file").isNotBlank()) {
+                            playerRoot = tempRoot
+                            break
+                        }
+                    } catch (e: Exception) { Log.d(TAG, "Failed parsing PlayerJS block") }
+                }
+            }
+        }
 
+        if (playerRoot == null) throw ErrorLoadingException("PlayerJS not found; only torrent links available")
         val fileValue = playerRoot.opt("file") ?: throw ErrorLoadingException("PlayerJS: missing file field")
         val fileArray = normalizeFile(fileValue)
-
-        Log.d(TAG, fileArray.toString())
 
         val movieData = buildMovieData(playerRoot, fileArray)
         val cfHeaders = CinemacityPlugin.getCfHeaders()
 
         return if (tvType != TvType.TvSeries) {
             newMovieLoadResponse(title, url, TvType.Movie, movieData) {
-                this.posterUrl = poster
-                this.backgroundPosterUrl = background
+                this.posterUrl = poster?.let { fixUrl(it) }
+                this.backgroundPosterUrl = background?.let { fixUrl(it) }
                 this.plot = plot
                 this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
@@ -199,8 +206,8 @@ class Cinemacity : MainAPI() {
         } else {
             val episodes = buildEpisodes(fileArray)
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster
-                this.backgroundPosterUrl = background
+                this.posterUrl = poster?.let { fixUrl(it) }
+                this.backgroundPosterUrl = background?.let { fixUrl(it) }
                 this.plot = plot
                 this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
