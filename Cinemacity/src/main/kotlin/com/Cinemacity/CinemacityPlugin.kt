@@ -3,6 +3,7 @@ package com.Cinemacity
 import android.app.Activity
 import android.app.Application
 import android.content.Context
+import android.content.ContextWrapper
 import android.os.Bundle
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
@@ -29,6 +30,16 @@ class CinemacityPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
+        // Coba ekstrak Activity langsung dari context saat instalasi/hot-reload
+        var ctx: Context? = context
+        while (ctx is ContextWrapper) {
+            if (ctx is Activity) {
+                ActivityHelper.currentActivity = ctx
+                break
+            }
+            ctx = ctx.baseContext
+        }
+
         val app = context.applicationContext as Application
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
