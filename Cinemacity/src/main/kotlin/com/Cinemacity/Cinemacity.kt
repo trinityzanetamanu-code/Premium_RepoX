@@ -40,13 +40,18 @@ class Cinemacity : MainAPI() {
             val success = showCinemacityCFBypassDialogAndWait()
             if (success) {
                 Log.d(TAG, "CF Bypass success, retrying request...")
-                // Retry dengan Cookie dan UA terbaru yang otomatis disuntikkan via Interceptor
                 response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
+            } else {
+                if (ActivityHelper.currentActivity == null) {
+                    throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa (Swipe Up/Clear Recent) aplikasi CloudStream lalu buka kembali agar Auto-Bypass berfungsi.")
+                } else {
+                    throw ErrorLoadingException("Bypass Cloudflare dibatalkan atau gagal. Coba muat ulang.")
+                }
             }
         }
         
         if (isCloudflareBlocked(response.code, response.text)) {
-            throw ErrorLoadingException("CinemaCity: Cloudflare blocked. Go to Settings -> Bypass Cloudflare.")
+            throw ErrorLoadingException("CinemaCity: Terhalang Cloudflare. Coba muat ulang.")
         }
         
         return response
@@ -79,9 +84,12 @@ class Cinemacity : MainAPI() {
     }
 
     private fun org.jsoup.nodes.Element.toSearchResult(): SearchResponse? {
-        val href = this.select("div.dar-short_bg a").firstOrNull()?.attr("href")
-            ?: this.select("a:not([data-highslide])").firstOrNull()?.attr("href")
-            ?: return null
+        // Filter URL agar tidak nyasar mengambil URL gambar .webp/.jpg
+        val href = this.select("a").firstOrNull { 
+            val link = it.attr("href")
+            link.isNotBlank() && !link.contains("/uploads/") && !link.endsWith(".webp", true) && !link.endsWith(".jpg", true)
+        }?.attr("href") ?: return null
+        
         val fixedHref = fixUrl(href)
 
         val title = this.select("div.dar-short_bg.e-cover > div > span")
@@ -94,13 +102,17 @@ class Cinemacity : MainAPI() {
             ?.takeIf { it.isNotBlank() }
             ?: this.select("img").firstOrNull()?.attr("src")
 
+        val cfHeaders = CinemacityPlugin.getCfHeaders()
+
         return if (fixedHref.contains("/tv-series/")) {
             newTvSeriesSearchResponse(title, fixedHref, TvType.TvSeries) {
                 this.posterUrl = poster?.let { fixUrl(it) }
+                this.posterHeaders = cfHeaders
             }
         } else {
             newMovieSearchResponse(title, fixedHref, TvType.Movie) {
                 this.posterUrl = poster?.let { fixUrl(it) }
+                this.posterHeaders = cfHeaders
             }
         }
     }
@@ -168,12 +180,14 @@ class Cinemacity : MainAPI() {
         Log.d(TAG, fileArray.toString())
 
         val movieData = buildMovieData(playerRoot, fileArray)
+        val cfHeaders = CinemacityPlugin.getCfHeaders()
 
         return if (tvType != TvType.TvSeries) {
             newMovieLoadResponse(title, url, TvType.Movie, movieData) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = background
                 this.plot = plot
+                this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
             }
         } else {
@@ -182,6 +196,7 @@ class Cinemacity : MainAPI() {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = background
                 this.plot = plot
+                this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
             }
         }
