@@ -4,12 +4,12 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.os.Bundle
-import androidx.fragment.app.FragmentActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
 object ActivityHelper {
-    var currentActivity: FragmentActivity? = null
+    @Volatile
+    var currentActivity: Activity? = null
 }
 
 @CloudstreamPlugin
@@ -32,9 +32,7 @@ class CinemacityPlugin : Plugin() {
         val app = context.applicationContext as Application
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
-                if (activity is FragmentActivity) {
-                    ActivityHelper.currentActivity = activity
-                }
+                ActivityHelper.currentActivity = activity
             }
             override fun onActivityPaused(activity: Activity) {}
             override fun onActivityStarted(activity: Activity) {}
@@ -49,6 +47,5 @@ class CinemacityPlugin : Plugin() {
         })
 
         registerMainAPI(Cinemacity())
-        this.settings = CinemacitySettingsFragment::class.java
     }
 }
