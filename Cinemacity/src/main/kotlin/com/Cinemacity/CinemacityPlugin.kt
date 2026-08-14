@@ -25,12 +25,12 @@ class CinemacityPlugin : Plugin() {
             val h = LinkedHashMap<String, String>()
             if (cfUserAgent.isNotEmpty()) h["User-Agent"] = cfUserAgent
             if (cfCookies.isNotEmpty()) h["Cookie"] = cfCookies
+            h["Referer"] = "https://cinemacity.cc/" // WAJIB ada agar Coil lolos dari 403 Image CF
             return h
         }
     }
 
     override fun load(context: Context) {
-        // Ekstrak Activity langsung dari context saat instalasi/hot-reload
         var ctx: Context? = context
         while (ctx is ContextWrapper) {
             if (ctx is Activity) {
@@ -40,7 +40,6 @@ class CinemacityPlugin : Plugin() {
             ctx = ctx.baseContext
         }
 
-        // Daftarkan ke lifecycle untuk melacak activity saat aplikasi berjalan
         val app = context.applicationContext as Application
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
