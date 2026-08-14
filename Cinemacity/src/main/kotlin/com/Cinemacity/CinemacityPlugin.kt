@@ -30,7 +30,7 @@ class CinemacityPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        // Coba ekstrak Activity langsung dari context saat instalasi/hot-reload
+        // Ekstrak Activity langsung dari context saat instalasi/hot-reload
         var ctx: Context? = context
         while (ctx is ContextWrapper) {
             if (ctx is Activity) {
@@ -40,6 +40,7 @@ class CinemacityPlugin : Plugin() {
             ctx = ctx.baseContext
         }
 
+        // Daftarkan ke lifecycle untuk melacak activity saat aplikasi berjalan
         val app = context.applicationContext as Application
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
