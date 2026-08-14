@@ -6,22 +6,8 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.api.Log
 import org.json.JSONArray
 import org.json.JSONObject
-import org.jsoup.nodes.Document
-
-// PATCH: Import eksplisit extension function addImdbId dari companion object LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 
-/**
- * PORT v1 — mengikuti CINEMACITY PORTING CONTRACT v1 + dua koreksi FINAL REVIEW.
- *
- * Nama class dipertahankan `Cinemacity` seperti aslinya
- * (com.Cinemacity.Cinemacity extends MainAPI).
- *
- * SCOPE v1 : main page · search · load (movie + series) · subtitle ·
- *            loadLinks jalur HLS · cookie · Cloudflare interceptor
- * DITUNDA  : jalur download (buildDownloadLinks / makeDownloadHref /
- *            extractQuality), WebView challenge Cloudflare
- */
 class Cinemacity : MainAPI() {
 
     override var mainUrl = "https://cinemacity.cc"
@@ -31,55 +17,52 @@ class Cinemacity : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     companion object {
-        /**
-         * private static final, ditulis SEKALI di <clinit> @000a,
-         * dibaca load @046b dan loadLinks @02e5/@02fa.
-         */
         private const val loginCookie = "" // [REDACTED_SECRET] — isi manual
-
         private val seasonRegex = Regex("""Season\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val episodeRegex = Regex("""Episode\s*(\d+)""", RegexOption.IGNORE_CASE)
-
         private val imdbRegex = Regex("""tt\d+""")
         private val dleHashRegex = Regex("""dle_login_hash\s*=\s*'([^']+)'""")
         private val subtitleRegex = Regex("""\[(.+?)](https?://.+)""")
-
         private val cfMarkers = listOf(
             "<title>just a moment",
             "id=\"challenge-form\"",
             "cf-browser-verification",
             "checking your browser before accessing"
         )
-
         private const val TAG = "Phisher"
     }
 
-    // ---------------------------------------------------------------
-    // HTTP
-    // ---------------------------------------------------------------
-
-    private suspend fun appGet(url: String, headers: Map<String, String> = emptyMap()) =
-        app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
+    private suspend fun appGet(url: String, headers: Map<String, String> = emptyMap()): com.lagradost.nicehttp.NiceResponse {
+        var response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
+        
+        if (isCloudflareBlocked(response.code, response.text)) {
+            Log.d(TAG, "CF Challenge detected, attempting bypass...")
+            val success = showCinemacityCFBypassDialogAndWait()
+            if (success) {
+                Log.d(TAG, "CF Bypass success, retrying request...")
+                // Retry dengan Cookie dan UA terbaru yang otomatis disuntikkan via Interceptor
+                response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
+            }
+        }
+        
+        if (isCloudflareBlocked(response.code, response.text)) {
+            throw ErrorLoadingException("CinemaCity: Cloudflare blocked. Go to Settings -> Bypass Cloudflare.")
+        }
+        
+        return response
+    }
 
     private fun isCloudflareBlocked(code: Int, text: String): Boolean {
-        if (code != 403 && code != 503) {
-            // Evaluasi kode HTTP dibypass untuk marker teks
-        }
         val lower = text.lowercase()
         return cfMarkers.any { lower.contains(it) }
     }
 
-    private fun siteCookieHeader(): Map<String, String> =
-        mapOf("Cookie" to buildCookieValue())
+    private fun siteCookieHeader(): Map<String, String> = mapOf("Cookie" to buildCookieValue())
 
     private fun buildCookieValue(): String {
         val cf = CinemacityPlugin.cfCookies
-        return if (cf.isEmpty()) loginCookie else "$loginCookie; $cf"
+        return if (cf.isEmpty()) loginCookie else if (loginCookie.isEmpty()) cf else "$loginCookie; $cf"
     }
-
-    // ---------------------------------------------------------------
-    // MAIN PAGE
-    // ---------------------------------------------------------------
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
@@ -122,19 +105,9 @@ class Cinemacity : MainAPI() {
         }
     }
 
-    // ---------------------------------------------------------------
-    // SEARCH
-    // ---------------------------------------------------------------
-
     override suspend fun search(query: String): List<SearchResponse> {
         val seedUrl = "$mainUrl/?do=search&subaction=search&search_start=0&full_search=0&story="
         val seed = appGet(seedUrl, siteCookieHeader())
-
-        if (isCloudflareBlocked(seed.code, seed.text)) {
-            throw ErrorLoadingException(
-                "CinemaCity: Cloudflare blocked. Go to Settings → Bypass Cloudflare."
-            )
-        }
 
         val doc = seed.document
         val dleHash = doc.select("input[name=dle_hash]").firstOrNull()?.attr("value")
@@ -158,31 +131,23 @@ class Cinemacity : MainAPI() {
             interceptor = CinemacityCFBypassInterceptor
         )
 
+        if (isCloudflareBlocked(res.code, res.text)) {
+            throw ErrorLoadingException("CinemaCity: Cloudflare blocked. Go to Settings -> Bypass Cloudflare.")
+        }
+
         return res.document.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
     }
 
-    // ---------------------------------------------------------------
-    // LOAD
-    // ---------------------------------------------------------------
-
     override suspend fun load(url: String): LoadResponse? {
         val res = appGet(url, siteCookieHeader())
-        if (isCloudflareBlocked(res.code, res.text)) {
-            throw ErrorLoadingException(
-                "CinemaCity: Cloudflare blocked. Go to Settings → Bypass Cloudflare."
-            )
-        }
         val doc = res.document
 
-        val title = doc.select("meta[property=og:title]").attr("content")
-            .ifBlank { doc.title() }
-        val poster = doc.select("meta[property=og:image]").attr("content")
-            .takeIf { it.isNotBlank() }
+        val title = doc.select("meta[property=og:title]").attr("content").ifBlank { doc.title() }
+        val poster = doc.select("meta[property=og:image]").attr("content").takeIf { it.isNotBlank() }
         val background = doc.select("div.dar-full_bg a").attr("data-vbg")
             .ifBlank { doc.select("div.dar-full_bg.e-cover > div").attr("data-vbg") }
             .takeIf { it.isNotBlank() }
-        val plot = doc.select("#about div.ta-full_text1").text().trim()
-            .takeIf { it.isNotBlank() }
+        val plot = doc.select("#about div.ta-full_text1").text().trim().takeIf { it.isNotBlank() }
 
         val tvType = if (url.contains("/tv-series/")) TvType.TvSeries else TvType.Movie
 
@@ -193,16 +158,11 @@ class Cinemacity : MainAPI() {
         val script = doc.select("script:containsData(atob)").getOrNull(1)?.data()
             ?: throw ErrorLoadingException("PlayerJS not found; only torrent links available")
 
-        val decoded = base64Decode(
-            script.substringAfter("atob(\"").substringBefore("\")")
-        )
-
+        val decoded = base64Decode(script.substringAfter("atob(\"").substringBefore("\")"))
         val raw = decoded.substringAfter("new Playerjs(").substringBeforeLast(");")
         val playerRoot = JSONObject(raw)
 
-        val fileValue = playerRoot.opt("file")
-            ?: throw ErrorLoadingException("PlayerJS: missing file field")
-
+        val fileValue = playerRoot.opt("file") ?: throw ErrorLoadingException("PlayerJS: missing file field")
         val fileArray = normalizeFile(fileValue)
 
         Log.d(TAG, fileArray.toString())
@@ -214,7 +174,7 @@ class Cinemacity : MainAPI() {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = background
                 this.plot = plot
-                addImdbId(imdbId) // Sekarang terbaca karena import eksplisit
+                addImdbId(imdbId)
             }
         } else {
             val episodes = buildEpisodes(fileArray)
@@ -222,39 +182,29 @@ class Cinemacity : MainAPI() {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = background
                 this.plot = plot
-                addImdbId(imdbId) // Sekarang terbaca karena import eksplisit
+                addImdbId(imdbId)
             }
         }
     }
 
     private fun normalizeFile(fileValue: Any): JSONArray {
         if (fileValue is JSONArray) return fileValue
-
         if (fileValue is String) {
             val s = fileValue.trim()
             if (s.isBlank()) throw ErrorLoadingException("PlayerJS: empty file string")
-
             if (s.startsWith("[") && s.endsWith("]")) return JSONArray(s)
-
-            if (s.startsWith("{") && s.endsWith("}")) {
-                return JSONArray().put(JSONObject(s))
-            }
-
+            if (s.startsWith("{") && s.endsWith("}")) return JSONArray().put(JSONObject(s))
             return JSONArray().put(JSONObject().put("file", s))
         }
-
         throw ErrorLoadingException("PlayerJS: unsupported file type")
     }
 
     private fun buildMovieData(playerRoot: JSONObject, arr: JSONArray): String? {
         val first = arr.optJSONObject(0) ?: return null
         if (first.has("folder")) return null
-
         val streamUrl = first.optString("file").takeIf { it.isNotBlank() } ?: return null
-
         val rootSub = playerRoot.opt("subtitle") as? String
         val subtitleSource = rootSub ?: (arr.optJSONObject(0)?.opt("subtitle") as? String)
-
         return JSONObject()
             .put("streamUrl", streamUrl)
             .put("subtitleTracks", parseSubtitles(subtitleSource))
@@ -263,37 +213,26 @@ class Cinemacity : MainAPI() {
 
     private fun buildEpisodes(arr: JSONArray): List<Episode> {
         val episodes = mutableListOf<Episode>()
-
         for (i in 0 until arr.length()) {
             val season = arr.getJSONObject(i)
-            val seasonNo = seasonRegex.find(season.optString("title"))
-                ?.groupValues?.getOrNull(1)?.toIntOrNull()
-
+            val seasonNo = seasonRegex.find(season.optString("title"))?.groupValues?.getOrNull(1)?.toIntOrNull()
             val folder = season.optJSONArray("folder") ?: continue
-
             for (j in 0 until folder.length()) {
                 val ep = folder.getJSONObject(j)
-                val epNo = episodeRegex.find(ep.optString("title"))
-                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
-
+                val epNo = episodeRegex.find(ep.optString("title"))?.groupValues?.getOrNull(1)?.toIntOrNull()
                 val urls = mutableListOf<String>()
-
                 ep.optString("file").takeIf { it.isNotBlank() }?.let { urls.add(it) }
-
                 ep.optJSONArray("folder")?.let { nested ->
                     for (k in 0 until nested.length()) {
                         val src = nested.optJSONObject(k) ?: continue
                         src.optString("file").takeIf { it.isNotBlank() }?.let { urls.add(it) }
                     }
                 }
-
                 if (urls.isEmpty()) continue
-
                 val data = JSONObject()
                     .put("streams", JSONArray(urls))
                     .put("subtitleTracks", parseSubtitles(ep.optString("subtitle")))
                     .toString()
-
                 episodes.add(
                     newEpisode(data) {
                         this.name = ep.optString("title").takeIf { it.isNotBlank() }
@@ -314,19 +253,11 @@ class Cinemacity : MainAPI() {
             val lang = m.groupValues.getOrNull(1)?.trim().orEmpty()
             val subUrl = m.groupValues.getOrNull(2)?.trim().orEmpty()
             if (lang.isNotEmpty() && subUrl.isNotEmpty()) {
-                out.put(
-                    JSONObject()
-                        .put("language", lang)
-                        .put("subtitleUrl", subUrl)
-                )
+                out.put(JSONObject().put("language", lang).put("subtitleUrl", subUrl))
             }
         }
         return out
     }
-
-    // ---------------------------------------------------------------
-    // LOADLINKS
-    // ---------------------------------------------------------------
 
     override suspend fun loadLinks(
         data: String,
@@ -335,36 +266,23 @@ class Cinemacity : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val obj = JSONObject(data)
-
         obj.optJSONArray("subtitleTracks")?.let { subs ->
             for (i in 0 until subs.length()) {
                 val s = subs.getJSONObject(i)
-                subtitleCallback(
-                    newSubtitleFile(
-                        s.getString("language"),
-                        s.getString("subtitleUrl")
-                    )
-                )
+                subtitleCallback(newSubtitleFile(s.getString("language"), s.getString("subtitleUrl")))
             }
         }
-
         val urls = mutableListOf<String>()
         obj.optJSONArray("streams")?.let { streams ->
             for (i in 0 until streams.length()) {
-                streams.optString(i).takeIf { it.isNotBlank() }
-                    ?.let { urls.add(it) }
+                streams.optString(i).takeIf { it.isNotBlank() }?.let { urls.add(it) }
             }
         }
-
         if (urls.isEmpty()) {
-            obj.optString("streamUrl").takeIf { it.isNotBlank() }
-                ?.let { urls.add(it) }
+            obj.optString("streamUrl").takeIf { it.isNotBlank() }?.let { urls.add(it) }
         }
-
         if (urls.isEmpty()) return false
-
         val linkHeaders = mapOf("Cookie" to buildCookieValue())
-
         urls.forEach { streamUrl ->
             callback(
                 newExtractorLink(
@@ -378,7 +296,6 @@ class Cinemacity : MainAPI() {
                 }
             )
         }
-
         return true
     }
 }
