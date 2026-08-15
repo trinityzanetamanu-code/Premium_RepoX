@@ -33,7 +33,6 @@ class Cinemacity : MainAPI() {
         private const val TAG = "Phisher"
     }
 
-    // FIX: Membangun Header lengkap yang meniru browser asli untuk melewati filter ketat Cloudflare
     private fun siteHeaders(): Map<String, String> {
         val cf = CinemacityPlugin.cfCookies
         val cookie = if (cf.isEmpty()) loginCookie else if (loginCookie.isEmpty()) cf else "$loginCookie; $cf"
@@ -41,9 +40,7 @@ class Cinemacity : MainAPI() {
             "Cookie" to cookie,
             "Referer" to "$mainUrl/",
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.5",
-            "Connection" to "keep-alive",
-            "Upgrade-Insecure-Requests" to "1"
+            "Accept-Language" to "en-US,en;q=0.5"
         )
         if (CinemacityPlugin.cfUserAgent.isNotEmpty()) {
             headers["User-Agent"] = CinemacityPlugin.cfUserAgent
@@ -91,7 +88,6 @@ class Cinemacity : MainAPI() {
     }
 
     private fun org.jsoup.nodes.Element.toSearchResult(): SearchResponse? {
-        // FIX: Hanya tangkap elemen <a> yang memiliki URL film/series, BUKAN link gambar
         val linkElement = this.select("a").firstOrNull { 
             val h = it.attr("href")
             h.contains("/movies/") || h.contains("/tv-series/") 
@@ -121,6 +117,7 @@ class Cinemacity : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        // [WEBSITE STRUCTURE PROVEN] Menggunakan metode GET sesuai form HTML asli
         val searchUrl = "$mainUrl/index.php?do=search&subaction=search&story=$query"
         val doc = appGet(searchUrl).document
         return doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
@@ -133,10 +130,11 @@ class Cinemacity : MainAPI() {
         val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
             ?.substringBefore(" » CinemaCity")?.trim()?.ifBlank { doc.title() } ?: ""
             
-        val poster = doc.selectFirst("img.poster")?.attr("src") 
+        // [WEBSITE STRUCTURE PROVEN] Mengekstrak URL gambar resolusi HD dari atribut href <a>
+        val poster = doc.selectFirst("div.dar-full_poster a")?.attr("href") 
+            ?: doc.selectFirst("img.poster")?.attr("src") 
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
             
-        // FIX: Tarik resolusi tinggi gambar dari atribut href milik tag <a> pembungkus
         val background = doc.selectFirst("div.dar-full_bg a")?.attr("href") 
             ?: doc.selectFirst("img.background")?.attr("src")
             ?: poster
@@ -146,7 +144,6 @@ class Cinemacity : MainAPI() {
 
         val imdbId = doc.select("div.ta-full_rating1 > div").firstOrNull()?.attr("onclick")?.let { imdbRegex.find(it)?.value }
 
-        // MENGHINDARI BUG JSON/REGEX: Tarik langsung menggunakan string manipulasi
         val htmlContent = doc.html()
         val atobMatches = Regex("""atob\(['"]([^'"]+)['"]\)""").findAll(htmlContent)
         var fileArray: JSONArray? = null
@@ -154,15 +151,17 @@ class Cinemacity : MainAPI() {
         for (match in atobMatches) {
             val decoded = base64Decode(match.groupValues[1])
             if (decoded.contains("Playerjs")) {
-                var fileArrayStr = decoded.substringAfter("file:'", "").substringBefore("',")
-                if (fileArrayStr.isEmpty()) {
-                     fileArrayStr = decoded.substringAfter("file:\"", "").substringBefore("\",")
-                }
-                if (fileArrayStr.isNotEmpty()) {
+                // [PARSER BUG PROVEN] Regex aman: Ambil string JSON di antara file: ' dan ' penutup
+                val fileMatch = Regex("""file\s*:\s*(['"])(\[.*?\])\1""").find(decoded)
+                val fileArrayStr = fileMatch?.groupValues?.get(2)
+                
+                if (!fileArrayStr.isNullOrEmpty()) {
                     try {
                         fileArray = normalizeFile(fileArrayStr)
                         if (fileArray != null && fileArray.length() > 0) break
-                    } catch (e: Exception) { Log.d(TAG, "Failed parsing PlayerJS array") }
+                    } catch (e: Exception) { 
+                        Log.d(TAG, "Failed parsing PlayerJS array: ${e.message}") 
+                    }
                 }
             }
         }
