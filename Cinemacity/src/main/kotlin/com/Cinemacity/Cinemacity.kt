@@ -22,7 +22,6 @@ class Cinemacity : MainAPI() {
         private val seasonRegex = Regex("""Season\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val episodeRegex = Regex("""Episode\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val imdbRegex = Regex("""tt\d+""")
-        private val dleHashRegex = Regex("""dle_login_hash\s*=\s*'([^']+)'""")
         private val subtitleRegex = Regex("""\[(.+?)](https?://.+)""")
         private val cfMarkers = listOf(
             "<title>just a moment",
@@ -93,7 +92,6 @@ class Cinemacity : MainAPI() {
         
         val fixedHref = fixUrl(href)
 
-        // AMBIL TITLE: Prioritas alt image, fallback ke span KEDUA (bukan CAM-Rip)
         val title = this.selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: this.select("div.dar-short_bg.e-cover > div > span").lastOrNull()?.text()?.trim()
             ?: this.selectFirst("a")?.text()?.trim()
@@ -118,37 +116,10 @@ class Cinemacity : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val seedUrl = "$mainUrl/?do=search&subaction=search&search_start=0&full_search=0&story="
-        val seed = appGet(seedUrl, siteCookieHeader())
-
-        val doc = seed.document
-        val dleHash = doc.selectFirst("input[name=dle_hash]")?.attr("value")?.takeIf { it.isNotBlank() }
-            ?: dleHashRegex.find(seed.text)?.groupValues?.getOrNull(1)
-
-        val postHeaders = mapOf(
-            "X-Requested-With" to "XMLHttpRequest",
-            "Origin" to mainUrl,
-            "Referer" to seedUrl,
-            "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
-            "Cookie" to buildCookieValue(),
-            "User-Agent" to CinemacityPlugin.cfUserAgent
-        )
-        val data = mutableMapOf("story" to query)
-        if (!dleHash.isNullOrBlank()) data["dle_hash"] = dleHash
-
-        val res = app.post(
-            "$mainUrl/engine/mods/dle_search/ajax.php",
-            headers = postHeaders,
-            data = data,
-            interceptor = CinemacityCFBypassInterceptor
-        )
-
-        if (isCloudflareBlocked(res.code, res.text)) {
-            throw ErrorLoadingException("CinemaCity: Cloudflare blocked. Go to Settings -> Bypass Cloudflare.")
-        }
-
-        // BUKTI ORIGINAL: ajax.php mengembalikan dle-fast_item
-        return res.document.select("div.dar-short_item, div.dle-fast_item").mapNotNull { it.toSearchResult() }
+        // MENGGUNAKAN GET MURNI AGAR SEARCH DILINDUNGI AUTO-BYPASS CLOUDFLARE
+        val searchUrl = "$mainUrl/index.php?do=search&subaction=search&story=$query"
+        val doc = appGet(searchUrl, siteCookieHeader()).document
+        return doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse? {
@@ -166,19 +137,19 @@ class Cinemacity : MainAPI() {
 
         val imdbId = doc.select("div.ta-full_rating1 > div").firstOrNull()?.attr("onclick")?.let { imdbRegex.find(it)?.value }
 
-        // BUKTI ORIGINAL: PlayerJS Extraction LOOP (Menghindari "empty file string")
+        // ROBUST PLAYERJS EXTRACTION
         val scriptElements = doc.select("script:containsData(atob)")
         var playerRoot: JSONObject? = null
 
         for (script in scriptElements) {
             val scriptData = script.data()
-            if (scriptData.contains("atob(\"")) {
-                val decoded = base64Decode(scriptData.substringAfter("atob(\"").substringBefore("\")"))
+            val b64Match = Regex("""atob\(['"]([^'"]+)['"]\)""").find(scriptData)
+            if (b64Match != null) {
+                val decoded = base64Decode(b64Match.groupValues[1])
                 if (decoded.contains("new Playerjs(")) {
-                    val raw = decoded.substringAfter("new Playerjs(").substringBeforeLast(");")
+                    val raw = decoded.substringAfter("new Playerjs(").substringBeforeLast(")")
                     try {
                         val tempRoot = tryParseJson<JSONObject>(raw) ?: JSONObject(raw)
-                        // Pastikan script ini valid dan memiliki kunci "file" yang terisi
                         if (tempRoot.has("file") && tempRoot.optString("file").isNotBlank()) {
                             playerRoot = tempRoot
                             break
@@ -188,15 +159,31 @@ class Cinemacity : MainAPI() {
             }
         }
 
-        if (playerRoot == null) throw ErrorLoadingException("PlayerJS not found; only torrent links available")
-        val fileValue = playerRoot.opt("file") ?: throw ErrorLoadingException("PlayerJS: missing file field")
-        val fileArray = normalizeFile(fileValue)
+        var movieData: String? = null
 
-        val movieData = buildMovieData(playerRoot, fileArray)
+        if (playerRoot != null) {
+            val fileValue = playerRoot.opt("file")
+            if (fileValue != null && fileValue.toString().isNotBlank()) {
+                val fileArray = normalizeFile(fileValue)
+                movieData = if (tvType != TvType.TvSeries) buildMovieData(playerRoot, fileArray) else null
+                // Untuk serial TV, kita tidak simpan ke movieData, tapi langsung iterasi di bawah
+            }
+        }
+        
+        // IFRAME FALLBACK (JIKA PLAYERJS TIDAK ADA/DIHAPUS SERVER)
+        if (playerRoot == null || (tvType != TvType.TvSeries && movieData == null)) {
+            val iframeSrc = doc.selectFirst("iframe")?.attr("src")
+            if (iframeSrc != null && iframeSrc.isNotBlank()) {
+                movieData = JSONObject().put("streamUrl", iframeSrc).toString()
+            } else if (tvType != TvType.TvSeries) {
+                throw ErrorLoadingException("PlayerJS/IFrame not found; only torrent links available")
+            }
+        }
+
         val cfHeaders = CinemacityPlugin.getCfHeaders()
 
         return if (tvType != TvType.TvSeries) {
-            newMovieLoadResponse(title, url, TvType.Movie, movieData) {
+            newMovieLoadResponse(title, url, TvType.Movie, movieData ?: "") {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.backgroundPosterUrl = background?.let { fixUrl(it) }
                 this.plot = plot
@@ -204,7 +191,7 @@ class Cinemacity : MainAPI() {
                 addImdbId(imdbId)
             }
         } else {
-            val episodes = buildEpisodes(fileArray)
+            val episodes = if (playerRoot != null) buildEpisodes(normalizeFile(playerRoot.opt("file")!!)) else emptyList()
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.backgroundPosterUrl = background?.let { fixUrl(it) }
@@ -220,8 +207,8 @@ class Cinemacity : MainAPI() {
         if (fileValue is String) {
             val s = fileValue.trim()
             if (s.isBlank()) throw ErrorLoadingException("PlayerJS: empty file string")
-            if (s.startsWith("[") && s.endsWith("]")) return JSONArray(s)
-            if (s.startsWith("{") && s.endsWith("}")) return JSONArray().put(JSONObject(s))
+            if (s.startsWith("[") && s.endsWith("]")) return tryParseJson<JSONArray>(s) ?: JSONArray(s)
+            if (s.startsWith("{") && s.endsWith("}")) return JSONArray().put(tryParseJson<JSONObject>(s) ?: JSONObject(s))
             return JSONArray().put(JSONObject().put("file", s))
         }
         throw ErrorLoadingException("PlayerJS: unsupported file type")
@@ -310,19 +297,26 @@ class Cinemacity : MainAPI() {
             obj.optString("streamUrl").takeIf { it.isNotBlank() }?.let { urls.add(it) }
         }
         if (urls.isEmpty()) return false
+        
         val linkHeaders = mapOf("Cookie" to buildCookieValue())
         urls.forEach { streamUrl ->
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "$name • HLS • Master ",
-                    url = streamUrl,
-                    type = INFER_TYPE
-                ) {
-                    this.referer = mainUrl
-                    this.headers = linkHeaders
-                }
-            )
+            // Deteksi jika ini adalah link video langsung (HLS/MP4) atau IFrame eksternal
+            if (streamUrl.contains(".m3u8") || streamUrl.contains(".mp4") || streamUrl.contains("/public_files/")) {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "$name • HLS • Master ",
+                        url = streamUrl,
+                        type = INFER_TYPE
+                    ) {
+                        this.referer = mainUrl
+                        this.headers = linkHeaders
+                    }
+                )
+            } else {
+                // IFrame fallback
+                loadExtractor(streamUrl, subtitleCallback, callback)
+            }
         }
         return true
     }
