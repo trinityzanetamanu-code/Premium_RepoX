@@ -25,7 +25,8 @@ class CinemacityPlugin : Plugin() {
             val h = LinkedHashMap<String, String>()
             if (cfUserAgent.isNotEmpty()) h["User-Agent"] = cfUserAgent
             if (cfCookies.isNotEmpty()) h["Cookie"] = cfCookies
-            h["Referer"] = "https://cinemacity.cc/" // WAJIB ada agar Coil lolos dari 403 Image CF
+            // FIX: Referer mutlak dibutuhkan agar Poster/Backdrop lolos 403 Hotlink Protection
+            h["Referer"] = "https://cinemacity.cc/" 
             return h
         }
     }
