@@ -22,7 +22,6 @@ class Cinemacity : MainAPI() {
         private val seasonRegex = Regex("""Season\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val episodeRegex = Regex("""Episode\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val imdbRegex = Regex("""tt\d+""")
-        private val dleHashRegex = Regex("""dle_login_hash\s*=\s*'([^']+)'""")
         private val subtitleRegex = Regex("""\[(.+?)](https?://.+)""")
         private val cfMarkers = listOf(
             "<title>just a moment",
@@ -34,41 +33,63 @@ class Cinemacity : MainAPI() {
         private const val TAG = "Phisher"
     }
 
-    private suspend fun appGet(url: String, headers: Map<String, String> = emptyMap()): com.lagradost.nicehttp.NiceResponse {
-        var response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
+    // FIX: Sinkronisasi Total Header (User-Agent, Cookie, Referer) untuk semua request OkHttp
+    private fun siteHeaders(): Map<String, String> {
+        val cf = CinemacityPlugin.cfCookies
+        val cookie = if (cf.isEmpty()) loginCookie else if (loginCookie.isEmpty()) cf else "$loginCookie; $cf"
+        val headers = mutableMapOf(
+            "Cookie" to cookie,
+            "Referer" to "$mainUrl/"
+        )
+        if (CinemacityPlugin.cfUserAgent.isNotEmpty()) {
+            headers["User-Agent"] = CinemacityPlugin.cfUserAgent
+        }
+        return headers
+    }
+
+    private suspend fun appGet(url: String): com.lagradost.nicehttp.NiceResponse {
+        var response = app.get(url, headers = siteHeaders(), interceptor = CinemacityCFBypassInterceptor)
         
         if (isCloudflareBlocked(response.code, response.text)) {
             Log.d(TAG, "CF Challenge detected, attempting bypass...")
             val success = showCinemacityCFBypassDialogAndWait()
             if (success) {
                 Log.d(TAG, "CF Bypass success, retrying request...")
-                response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
+                response = app.get(url, headers = siteHeaders(), interceptor = CinemacityCFBypassInterceptor)
             } else {
-                if (ActivityHelper.currentActivity == null) {
-                    throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa aplikasi CloudStream (Clear Recent Apps) lalu buka kembali.")
-                } else {
-                    throw ErrorLoadingException("Bypass Cloudflare dibatalkan/gagal. Coba muat ulang.")
-                }
+                throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa aplikasi CloudStream (Clear Recent Apps) lalu buka kembali.")
             }
         }
         
         if (isCloudflareBlocked(response.code, response.text)) {
             throw ErrorLoadingException("CinemaCity: Terhalang Cloudflare. Coba muat ulang.")
         }
+        return response
+    }
+
+    private suspend fun appPost(url: String, data: Map<String, String>): com.lagradost.nicehttp.NiceResponse {
+        val postHeaders = siteHeaders().toMutableMap()
+        postHeaders["Content-Type"] = "application/x-www-form-urlencoded"
         
+        var response = app.post(url, headers = postHeaders, data = data, interceptor = CinemacityCFBypassInterceptor)
+        
+        if (isCloudflareBlocked(response.code, response.text)) {
+            val success = showCinemacityCFBypassDialogAndWait()
+            if (success) {
+                response = app.post(url, headers = siteHeaders(), data = data, interceptor = CinemacityCFBypassInterceptor)
+            } else {
+                throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa aplikasi CloudStream (Clear Recent Apps) lalu buka kembali.")
+            }
+        }
+        if (isCloudflareBlocked(response.code, response.text)) {
+            throw ErrorLoadingException("CinemaCity: Terhalang Cloudflare. Coba muat ulang.")
+        }
         return response
     }
 
     private fun isCloudflareBlocked(code: Int, text: String): Boolean {
         val lower = text.lowercase()
         return cfMarkers.any { lower.contains(it) }
-    }
-
-    private fun siteCookieHeader(): Map<String, String> = mapOf("Cookie" to buildCookieValue())
-
-    private fun buildCookieValue(): String {
-        val cf = CinemacityPlugin.cfCookies
-        return if (cf.isEmpty()) loginCookie else if (loginCookie.isEmpty()) cf else "$loginCookie; $cf"
     }
 
     override val mainPage = mainPageOf(
@@ -79,7 +100,7 @@ class Cinemacity : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) request.data else "${request.data}page/$page/"
-        val doc = appGet(url, siteCookieHeader()).document
+        val doc = appGet(url).document
 
         val items = doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, items)
@@ -91,11 +112,10 @@ class Cinemacity : MainAPI() {
             ?: return null
             
         val href = linkElement.attr("href")
-        
         val rawTitle = linkElement.text().trim()
         val title = rawTitle.replace(Regex("""\s*\(\d{4}(?:–\d{4}|–)?\)$"""), "").trim()
 
-        val poster = this.selectFirst("img.poster")?.attr("src") 
+        val poster = this.selectFirst("img.poster, img.background")?.attr("src") 
             ?: this.selectFirst("img")?.attr("src")
 
         val cfHeaders = CinemacityPlugin.getCfHeaders()
@@ -114,22 +134,29 @@ class Cinemacity : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val searchUrl = "$mainUrl/index.php?do=search&subaction=search&story=$query"
-        val doc = appGet(searchUrl, siteCookieHeader()).document
-        return doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
+        // FIX: Menggunakan POST request langsung ke Full Search sesuai struktur HTML Source 17
+        val searchUrl = "$mainUrl/index.php?do=search"
+        val data = mapOf(
+            "do" to "search",
+            "subaction" to "search",
+            "from_page" to "0",
+            "story" to query
+        )
+        val doc = appPost(searchUrl, data).document
+        return doc.select("div.dar-short_item, div.dle-fast_item").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val res = appGet(url, siteCookieHeader())
+        val res = appGet(url)
         val doc = res.document
 
-        // FIX: Membersihkan suffix judul
         val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
             ?.substringBefore(" » CinemaCity")?.trim()?.ifBlank { doc.title() } ?: ""
             
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
-        
-        // FIX: Mengambil URL gambar asli untuk Backdrop, bukan Video Youtube dari data-vbg
+        // BUKTI ORIGINAL: Selector gambar sesuai struktur HTML detail
+        val poster = doc.selectFirst("img.poster")?.attr("src") 
+            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
+            
         val background = doc.selectFirst("img.background")?.attr("src") 
             ?: poster
 
@@ -138,23 +165,22 @@ class Cinemacity : MainAPI() {
 
         val imdbId = doc.select("div.ta-full_rating1 > div").firstOrNull()?.attr("onclick")?.let { imdbRegex.find(it)?.value }
 
-        // BUKTI ORIGINAL: PlayerJS Extraction
         val scriptElements = doc.select("script:containsData(atob)")
         var fileArray: JSONArray? = null
 
+        // FIX: Evaluasi String JavaScript secara String Pattern (Bypass Error JSONObject)
         for (script in scriptElements) {
             val scriptData = script.data()
             val b64Match = Regex("""atob\(['"]([^'"]+)['"]\)""").find(scriptData)
             if (b64Match != null) {
                 val decoded = base64Decode(b64Match.groupValues[1])
-                // Jika mengandung struktur playlist/file playerjs (misal: "file":" atau [{"title")
-                if (decoded.contains("\"file\":") || decoded.contains("[{\"title\"")) {
-                    // Cari string JSON array atau object di dalam string eval()
-                    val jsonMatch = Regex("""(\[\{.*?\}]|(?:\{.*?"file".*?\}))""").find(decoded)
-                    if (jsonMatch != null) {
+                if (decoded.contains("Playerjs")) {
+                    // Tangkap isi Array JSON secara langsung dari dalam file: '...' atau file: "..."
+                    val fileMatch = Regex("""(?:file|\"file\")\s*:\s*(['"])(.*?)\1""").find(decoded)
+                    if (fileMatch != null) {
                         try {
-                            fileArray = normalizeFile(jsonMatch.value)
-                            break // Berhenti jika berhasil mengurai data film
+                            fileArray = normalizeFile(fileMatch.groupValues[2])
+                            if (fileArray != null && fileArray.length() > 0) break
                         } catch (e: Exception) { Log.d(TAG, "Failed parsing PlayerJS array") }
                     }
                 }
@@ -293,7 +319,7 @@ class Cinemacity : MainAPI() {
         }
         if (urls.isEmpty()) return false
         
-        val linkHeaders = mapOf("Cookie" to buildCookieValue())
+        val linkHeaders = siteHeaders()
         urls.forEach { streamUrl ->
             if (streamUrl.contains(".m3u8") || streamUrl.contains(".mp4") || streamUrl.contains("/public_files/")) {
                 callback(
