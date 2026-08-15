@@ -22,6 +22,7 @@ class Cinemacity : MainAPI() {
         private val seasonRegex = Regex("""Season\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val episodeRegex = Regex("""Episode\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val imdbRegex = Regex("""tt\d+""")
+        private val dleHashRegex = Regex("""dle_login_hash\s*=\s*'([^']+)'""")
         private val subtitleRegex = Regex("""\[(.+?)](https?://.+)""")
         private val cfMarkers = listOf(
             "<title>just a moment",
@@ -85,14 +86,12 @@ class Cinemacity : MainAPI() {
     }
 
     private fun org.jsoup.nodes.Element.toSearchResult(): SearchResponse? {
-        // FIX: Bidik elemen a.e-nowrap (URL Film Asli) atau URL yang berakhiran .html
         val linkElement = this.selectFirst("a.e-nowrap") 
             ?: this.select("a").firstOrNull { it.attr("href").contains(".html") }
             ?: return null
             
         val href = linkElement.attr("href")
         
-        // FIX: Ekstrak judul dari elemen yang sama, bersihkan angka tahun di akhirnya
         val rawTitle = linkElement.text().trim()
         val title = rawTitle.replace(Regex("""\s*\(\d{4}(?:–\d{4}|–)?\)$"""), "").trim()
 
@@ -115,7 +114,6 @@ class Cinemacity : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // FIX: Gunakan GET HTTP standar agar lolos Cloudflare Bypass, ajax.php terlalu rentan diblokir
         val searchUrl = "$mainUrl/index.php?do=search&subaction=search&story=$query"
         val doc = appGet(searchUrl, siteCookieHeader()).document
         return doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
@@ -125,11 +123,14 @@ class Cinemacity : MainAPI() {
         val res = appGet(url, siteCookieHeader())
         val doc = res.document
 
-        val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()?.ifBlank { doc.title() } ?: ""
+        // FIX: Membersihkan suffix judul
+        val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
+            ?.substringBefore(" » CinemaCity")?.trim()?.ifBlank { doc.title() } ?: ""
+            
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
         
-        val background = doc.selectFirst("div.dar-full_bg a")?.attr("data-vbg")
-            ?: doc.selectFirst("div.dar-full_bg.e-cover > div")?.attr("data-vbg")
+        // FIX: Mengambil URL gambar asli untuk Backdrop, bukan Video Youtube dari data-vbg
+        val background = doc.selectFirst("img.background")?.attr("src") 
             ?: poster
 
         val plot = doc.select("#about div.ta-full_text1").text().trim().takeIf { it.isNotBlank() }
@@ -137,37 +138,36 @@ class Cinemacity : MainAPI() {
 
         val imdbId = doc.select("div.ta-full_rating1 > div").firstOrNull()?.attr("onclick")?.let { imdbRegex.find(it)?.value }
 
+        // BUKTI ORIGINAL: PlayerJS Extraction
         val scriptElements = doc.select("script:containsData(atob)")
-        var playerRoot: JSONObject? = null
+        var fileArray: JSONArray? = null
 
         for (script in scriptElements) {
             val scriptData = script.data()
-            if (scriptData.contains("atob(\"")) {
-                val decoded = base64Decode(scriptData.substringAfter("atob(\"").substringBefore("\")"))
-                if (decoded.contains("new Playerjs(")) {
-                    val raw = decoded.substringAfter("new Playerjs(").substringBeforeLast(");")
-                    try {
-                        val tempRoot = tryParseJson<JSONObject>(raw) ?: JSONObject(raw)
-                        if (tempRoot.has("file") && tempRoot.optString("file").isNotBlank()) {
-                            playerRoot = tempRoot
-                            break
-                        }
-                    } catch (e: Exception) { Log.d(TAG, "Failed parsing PlayerJS block") }
+            val b64Match = Regex("""atob\(['"]([^'"]+)['"]\)""").find(scriptData)
+            if (b64Match != null) {
+                val decoded = base64Decode(b64Match.groupValues[1])
+                // Jika mengandung struktur playlist/file playerjs (misal: "file":" atau [{"title")
+                if (decoded.contains("\"file\":") || decoded.contains("[{\"title\"")) {
+                    // Cari string JSON array atau object di dalam string eval()
+                    val jsonMatch = Regex("""(\[\{.*?\}]|(?:\{.*?"file".*?\}))""").find(decoded)
+                    if (jsonMatch != null) {
+                        try {
+                            fileArray = normalizeFile(jsonMatch.value)
+                            break // Berhenti jika berhasil mengurai data film
+                        } catch (e: Exception) { Log.d(TAG, "Failed parsing PlayerJS array") }
+                    }
                 }
             }
         }
 
         var movieData: String? = null
 
-        if (playerRoot != null) {
-            val fileValue = playerRoot.opt("file")
-            if (fileValue != null && fileValue.toString().isNotBlank()) {
-                val fileArray = normalizeFile(fileValue)
-                movieData = if (tvType != TvType.TvSeries) buildMovieData(playerRoot, fileArray) else null
-            }
+        if (fileArray != null) {
+            movieData = if (tvType != TvType.TvSeries) buildMovieData(fileArray) else null
         }
         
-        if (playerRoot == null || (tvType != TvType.TvSeries && movieData == null)) {
+        if (fileArray == null || (tvType != TvType.TvSeries && movieData == null)) {
             val iframeSrc = doc.selectFirst("iframe")?.attr("src")
             if (iframeSrc != null && iframeSrc.isNotBlank()) {
                 movieData = JSONObject().put("streamUrl", iframeSrc).toString()
@@ -183,17 +183,15 @@ class Cinemacity : MainAPI() {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.backgroundPosterUrl = background?.let { fixUrl(it) }
                 this.plot = plot
-                // FIX: PosterHeaders untuk Backdrop Detail
-                this.posterHeaders = cfHeaders 
+                this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
             }
         } else {
-            val episodes = if (playerRoot != null) buildEpisodes(normalizeFile(playerRoot.opt("file")!!)) else emptyList()
+            val episodes = if (fileArray != null) buildEpisodes(fileArray) else emptyList()
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.backgroundPosterUrl = background?.let { fixUrl(it) }
                 this.plot = plot
-                // FIX: PosterHeaders untuk Backdrop Detail
                 this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
             }
@@ -212,12 +210,11 @@ class Cinemacity : MainAPI() {
         throw ErrorLoadingException("PlayerJS: unsupported file type")
     }
 
-    private fun buildMovieData(playerRoot: JSONObject, arr: JSONArray): String? {
+    private fun buildMovieData(arr: JSONArray): String? {
         val first = arr.optJSONObject(0) ?: return null
         if (first.has("folder")) return null
         val streamUrl = first.optString("file").takeIf { it.isNotBlank() } ?: return null
-        val rootSub = playerRoot.opt("subtitle") as? String
-        val subtitleSource = rootSub ?: (arr.optJSONObject(0)?.opt("subtitle") as? String)
+        val subtitleSource = first.optString("subtitle")
         return JSONObject()
             .put("streamUrl", streamUrl)
             .put("subtitleTracks", parseSubtitles(subtitleSource))
