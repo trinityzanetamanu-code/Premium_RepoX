@@ -8,6 +8,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 
 class Cinemacity : MainAPI() {
 
@@ -273,7 +274,7 @@ class Cinemacity : MainAPI() {
                 this.year = year
                 this.tags = tags
                 this.duration = duration
-                this.rating = rating?.toRatingInt()
+                this.score = Score.from(rating, 10)
                 this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
                 addActors(actors)
@@ -288,7 +289,7 @@ class Cinemacity : MainAPI() {
                 this.year = year
                 this.tags = tags
                 this.duration = duration
-                this.rating = rating?.toRatingInt()
+                this.score = Score.from(rating, 10)
                 this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
                 addActors(actors)
