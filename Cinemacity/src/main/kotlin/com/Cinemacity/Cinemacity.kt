@@ -7,7 +7,10 @@ import com.lagradost.api.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
-import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class Cinemacity : MainAPI() {
 
@@ -15,14 +18,17 @@ class Cinemacity : MainAPI() {
     override var name = "CinemaCity"
     override val hasMainPage = true
     override var lang = "en"
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
     companion object {
-        private const val loginCookie = "" 
+        private const val loginCookie = ""
         private val seasonRegex = Regex("""Season\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val episodeRegex = Regex("""Episode\s*(\d+)""", RegexOption.IGNORE_CASE)
         private val imdbRegex = Regex("""tt\d+""")
         private val subtitleRegex = Regex("""\[(.+?)](https?://.+)""")
+        private val yearRegex = Regex("""\((\d{4})""")
+        private val titleYearRegex = Regex("""\s*\(\d{4}(?:–\d{4}|–)?\)\s*$""")
+        private val durationRegex = Regex("""(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?""")
         private val cfMarkers = listOf(
             "<title>just a moment",
             "id=\"challenge-form\"",
@@ -31,40 +37,61 @@ class Cinemacity : MainAPI() {
             "attention required"
         )
         private const val TAG = "Phisher"
+
+        /**
+         * Menjamin HANYA SATU dialog bypass Cloudflare berjalan pada satu waktu.
+         *
+         * Tanpa ini, setiap request yang terblokir memanggil dialognya sendiri.
+         * Saat layar utama memuat beberapa kategori sekaligus, hasilnya beberapa
+         * WebView berebut memuat halaman tantangan yang sama - Cloudflare
+         * menganggapnya perilaku bot dan verifikasinya tidak pernah selesai.
+         */
+        private val cfMutex = Mutex()
+
+        private fun hasClearance(): Boolean =
+            CinemacityPlugin.cfCookies.contains("cf_clearance=")
     }
 
-    private fun siteHeaders(): Map<String, String> {
-        val cf = CinemacityPlugin.cfCookies
-        val cookie = if (cf.isEmpty()) loginCookie else if (loginCookie.isEmpty()) cf else "$loginCookie; $cf"
-        val headers = mutableMapOf(
-            "Cookie" to cookie,
-            "Referer" to "$mainUrl/",
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.5"
-        )
-        if (CinemacityPlugin.cfUserAgent.isNotEmpty()) {
-            headers["User-Agent"] = CinemacityPlugin.cfUserAgent
-        }
-        return headers
-    }
+    // ---------------------------------------------------------------
+    // HTTP
+    // ---------------------------------------------------------------
 
-    private suspend fun appGet(url: String): com.lagradost.nicehttp.NiceResponse {
-        var response = app.get(url, headers = siteHeaders(), interceptor = CinemacityCFBypassInterceptor)
-        
+    private suspend fun appGet(
+        url: String,
+        headers: Map<String, String> = emptyMap()
+    ): com.lagradost.nicehttp.NiceResponse {
+        var response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
+
         if (isCloudflareBlocked(response.code, response.text)) {
             Log.d(TAG, "CF Challenge detected, attempting bypass...")
-            val success = showCinemacityCFBypassDialogAndWait()
+
+            // Hanya satu pemanggil yang boleh membuka dialog. Pemanggil lain
+            // menunggu di sini, lalu memakai cookie yang sudah didapat.
+            val success = cfMutex.withLock {
+                if (hasClearance()) {
+                    Log.d(TAG, "cf_clearance sudah ada dari permintaan lain, dialog dilewati.")
+                    true
+                } else {
+                    showCinemacityCFBypassDialogAndWait()
+                }
+            }
+
             if (success) {
                 Log.d(TAG, "CF Bypass success, retrying request...")
-                response = app.get(url, headers = siteHeaders(), interceptor = CinemacityCFBypassInterceptor)
+                response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
             } else {
-                throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa aplikasi CloudStream (Clear Recent Apps) lalu buka kembali.")
+                if (ActivityHelper.currentActivity == null) {
+                    throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa aplikasi CloudStream (Clear Recent Apps) lalu buka kembali.")
+                } else {
+                    throw ErrorLoadingException("Bypass Cloudflare dibatalkan/gagal. Coba muat ulang.")
+                }
             }
         }
-        
+
         if (isCloudflareBlocked(response.code, response.text)) {
             throw ErrorLoadingException("CinemaCity: Terhalang Cloudflare. Coba muat ulang.")
         }
+
         return response
     }
 
@@ -73,134 +100,273 @@ class Cinemacity : MainAPI() {
         return cfMarkers.any { lower.contains(it) }
     }
 
+    private fun siteCookieHeader(): Map<String, String> = mapOf("Cookie" to buildCookieValue())
+
+    private fun buildCookieValue(): String {
+        val cf = CinemacityPlugin.cfCookies
+        return if (cf.isEmpty()) loginCookie
+        else if (loginCookie.isEmpty()) cf
+        else "$loginCookie; $cf"
+    }
+
+    // ---------------------------------------------------------------
+    // KATEGORI — diambil dari menu asli situs (home.txt):
+    //   /movies/  /tv-series/  dan  /genre/<slug>/
+    // Paginasi situs: "<url>page/N/"
+    // ---------------------------------------------------------------
+
+    // CATATAN PENTING:
+    // CloudStream memuat SELURUH entri mainPage saat layar utama dibuka.
+    // Daftar yang panjang berarti puluhan request serentak ke situs yang
+    // dilindungi Cloudflare -> tantangan CF ikut terpicu dan gagal.
+    // Karena itu daftar ini sengaja DIPENDEKKAN. Genre lain tetap bisa
+    // diakses lewat pencarian.
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "Home",
         "$mainUrl/movies/" to "Movies",
-        "$mainUrl/tv-series/" to "TV Series"
+        "$mainUrl/tv-series/" to "TV Series",
+        "$mainUrl/genre/anime/" to "Anime",
+        "$mainUrl/genre/asian/" to "Asian"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) request.data else "${request.data}page/$page/"
-        val doc = appGet(url).document
+        val doc = appGet(url, siteCookieHeader()).document
 
         val items = doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, items)
     }
 
+    /**
+     * Struktur nyata satu item (home.txt / pencarian.txt):
+     *
+     *   <div class="dar-short_item swiper-slide">
+     *     <div class="dar-short_bg e-cover">
+     *       <a href="POSTER_PENUH.webp" data-highslide="single">    <- BUKAN link detail
+     *         <img class="xfieldimage poster" src="/uploads/.../thumbs/....webp">
+     *       </a>
+     *       <div><span>CAM-Rip</span></div>       film
+     *       <div><span>S2 • E8</span></div>       serial
+     *     </div>
+     *     <a href=".../movies/2794-....html" class="e-nowrap">The Wrong Girls (2026)</a>
+     *     <div class="dar-short_meta"><span>Comedy</span> • <span>2026</span> • <span>1h 39m</span></div>
+     *   </div>
+     *
+     * Serial memakai meta pertama "<span>2 Seasons</span>".
+     */
     private fun org.jsoup.nodes.Element.toSearchResult(): SearchResponse? {
-        val linkElement = this.select("a").firstOrNull { 
-            val h = it.attr("href")
-            h.contains("/movies/") || h.contains("/tv-series/") 
-        } ?: return null
-            
-        val href = linkElement.attr("href")
-        
-        val rawTitle = linkElement.text().trim()
-        val title = rawTitle.replace(Regex("""\s*\(\d{4}(?:–\d{4}|–)?\)$"""), "").trim()
+        val linkElement = this.selectFirst("a.e-nowrap")
+            ?: this.select("a:not([data-highslide])").firstOrNull { it.attr("href").contains(".html") }
+            ?: return null
 
-        val poster = this.selectFirst("img.poster, img.background")?.attr("src") 
+        val href = linkElement.attr("href")
+        if (href.isBlank()) return null
+
+        val rawTitle = linkElement.text().trim()
+        if (rawTitle.isBlank()) return null
+        val title = rawTitle.replace(titleYearRegex, "").trim()
+        val year = yearRegex.find(rawTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+        val poster = this.selectFirst("img.poster")?.attr("src")
             ?: this.selectFirst("img")?.attr("src")
 
         val cfHeaders = CinemacityPlugin.getCfHeaders()
 
-        return if (href.contains("/tv-series/")) {
+        // badge: kualitas untuk film, "S2 • E8" untuk serial
+        val badge = this.selectFirst("div.dar-short_bg div span")?.text()?.trim()
+
+        val isSeries = href.contains("/tv-series/") ||
+            this.select("div.dar-short_meta span").any {
+                it.text().contains("Season", ignoreCase = true)
+            }
+
+        return if (isSeries) {
             newTvSeriesSearchResponse(title, fixUrl(href), TvType.TvSeries) {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.posterHeaders = cfHeaders
+                this.year = year
             }
         } else {
             newMovieSearchResponse(title, fixUrl(href), TvType.Movie) {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.posterHeaders = cfHeaders
+                this.year = year
+                this.quality = getQualityFromString(badge)
             }
         }
     }
 
+    // ---------------------------------------------------------------
+    // SEARCH — halaman hasil memakai struktur item yang SAMA
+    // ---------------------------------------------------------------
+
     override suspend fun search(query: String): List<SearchResponse> {
-        // [WEBSITE STRUCTURE PROVEN] Menggunakan metode GET sesuai form HTML asli
-        val searchUrl = "$mainUrl/index.php?do=search&subaction=search&story=$query"
-        val doc = appGet(searchUrl).document
+        val searchUrl = "$mainUrl/index.php?do=search&subaction=search&story=${query.trim()}"
+        val doc = appGet(searchUrl, siteCookieHeader()).document
         return doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
     }
 
+    // ---------------------------------------------------------------
+    // LOAD
+    // ---------------------------------------------------------------
+
     override suspend fun load(url: String): LoadResponse? {
-        val res = appGet(url)
+        val res = appGet(url, siteCookieHeader())
         val doc = res.document
 
-        val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
-            ?.substringBefore(" » CinemaCity")?.trim()?.ifBlank { doc.title() } ?: ""
-            
-        // [WEBSITE STRUCTURE PROVEN] Mengekstrak URL gambar resolusi HD dari atribut href <a>
-        val poster = doc.selectFirst("div.dar-full_poster a")?.attr("href") 
-            ?: doc.selectFirst("img.poster")?.attr("src") 
-            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
-            
-        val background = doc.selectFirst("div.dar-full_bg a")?.attr("href") 
+        // <h1>Obsession (2025) </h1> lebih bersih daripada og:title
+        val rawTitle = doc.selectFirst("div.dar-full_center h1")?.text()?.trim()
+            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
+                ?.substringBefore(" » CinemaCity")?.trim()
+            ?: ""
+        val title = rawTitle.replace(titleYearRegex, "").trim()
+        val year = yearRegex.find(rawTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+            ?.takeIf { it.isNotBlank() }
+
+        // data-vbg berisi URL YOUTUBE (trailer), BUKAN gambar.
+        // Latar yang benar: img.background di dalam div.dar-full_bg
+        val background = doc.selectFirst("div.dar-full_bg img.background")?.attr("src")
             ?: doc.selectFirst("img.background")?.attr("src")
             ?: poster
 
+        val trailer = doc.selectFirst("div.dar-full_bg [data-vbg]")?.attr("data-vbg")
+            ?.takeIf { it.contains("youtube", ignoreCase = true) }
+
         val plot = doc.select("#about div.ta-full_text1").text().trim().takeIf { it.isNotBlank() }
+        val tagline = doc.selectFirst("div.dar-full_subtitle")?.text()?.trim()
+
+        // <div class="dar-full_meta"><span><a>Horror</a></span> • <span><a>WEB-DL</a></span>
+        //   • <span><a>R</a></span> • <span>1h 48m</span></div>
+        val tags = doc.select("div.dar-full_meta span a[href*=/genre/]").map { it.text().trim() }
+        val duration = doc.select("div.dar-full_meta span")
+            .map { it.text().trim() }
+            .firstOrNull { it.matches(Regex("""\d+\s*h(\s*\d+\s*m)?|\d+\s*m""")) }
+            ?.let { parseDuration(it) }
+
+        // <div class="ta-full_rating-source" onclick="...imdb.com/title/tt37287335...">
+        val imdbId = doc.select("div.ta-full_rating1 > div").firstOrNull()
+            ?.attr("onclick")?.let { imdbRegex.find(it)?.value }
+        val rating = doc.selectFirst("div.ta-full_rating1 strong.ta-full_rating-value")
+            ?.text()?.trim()
+
+        // #persons -> <li><span>Stars</span><span><a>Nama</a>, ...</span></li>
+        val actors = doc.select("#persons li").firstOrNull {
+            it.selectFirst("span")?.text()?.contains("Stars", ignoreCase = true) == true
+        }?.select("a")?.mapNotNull { it.text().trim().takeIf { t -> t.isNotBlank() } } ?: emptyList()
+
         val tvType = if (url.contains("/tv-series/")) TvType.TvSeries else TvType.Movie
 
-        val imdbId = doc.select("div.ta-full_rating1 > div").firstOrNull()?.attr("onclick")?.let { imdbRegex.find(it)?.value }
+        // ---------- PlayerJS ----------
+        val fileArray = extractPlayerJsFile(doc)
+        if (fileArray != null) Log.d(TAG, fileArray.toString())
 
-        val htmlContent = doc.html()
-        val atobMatches = Regex("""atob\(['"]([^'"]+)['"]\)""").findAll(htmlContent)
-        var fileArray: JSONArray? = null
-
-        for (match in atobMatches) {
-            val decoded = base64Decode(match.groupValues[1])
-            if (decoded.contains("Playerjs")) {
-                // [PARSER BUG PROVEN] Regex aman: Ambil string JSON di antara file: ' dan ' penutup
-                val fileMatch = Regex("""file\s*:\s*(['"])(\[.*?\])\1""").find(decoded)
-                val fileArrayStr = fileMatch?.groupValues?.get(2)
-                
-                if (!fileArrayStr.isNullOrEmpty()) {
-                    try {
-                        fileArray = normalizeFile(fileArrayStr)
-                        if (fileArray != null && fileArray.length() > 0) break
-                    } catch (e: Exception) { 
-                        Log.d(TAG, "Failed parsing PlayerJS array: ${e.message}") 
-                    }
-                }
-            }
-        }
-
-        var movieData: String? = null
-
-        if (fileArray != null) {
-            movieData = if (tvType != TvType.TvSeries) buildMovieData(fileArray) else null
-        }
-        
-        if (fileArray == null || (tvType != TvType.TvSeries && movieData == null)) {
-            val iframeSrc = doc.selectFirst("iframe")?.attr("src")
-            if (iframeSrc != null && iframeSrc.isNotBlank()) {
-                movieData = JSONObject().put("streamUrl", iframeSrc).toString()
-            } else if (tvType != TvType.TvSeries) {
-                throw ErrorLoadingException("PlayerJS/IFrame not found; only torrent links available")
-            }
-        }
+        // Ekstraksi movie dihitung LEBIH DULU, tanpa dipagari TvType (koreksi A.3)
+        val movieData = fileArray?.let { buildMovieData(it) }
 
         val cfHeaders = CinemacityPlugin.getCfHeaders()
+        val fullPlot = listOfNotNull(tagline, plot).joinToString("\n\n").takeIf { it.isNotBlank() }
 
         return if (tvType != TvType.TvSeries) {
-            newMovieLoadResponse(title, url, TvType.Movie, movieData ?: "") {
+            val data = movieData
+                ?: doc.selectFirst("iframe")?.attr("src")?.takeIf { it.isNotBlank() }
+                    ?.let { JSONObject().put("streamUrl", it).toString() }
+                ?: throw ErrorLoadingException("PlayerJS/IFrame not found; only torrent links available")
+
+            newMovieLoadResponse(title, url, TvType.Movie, data) {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.backgroundPosterUrl = background?.let { fixUrl(it) }
-                this.plot = plot
+                this.plot = fullPlot
+                this.year = year
+                this.tags = tags
+                this.duration = duration
+                this.score = Score.from(rating, 10)
                 this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
+                addActors(actors)
+                if (trailer != null) addTrailer(trailer)
             }
         } else {
-            val episodes = if (fileArray != null) buildEpisodes(fileArray) else emptyList()
+            val episodes = fileArray?.let { buildEpisodes(it) } ?: emptyList()
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.backgroundPosterUrl = background?.let { fixUrl(it) }
-                this.plot = plot
+                this.plot = fullPlot
+                this.year = year
+                this.tags = tags
+                this.duration = duration
+                this.score = Score.from(rating, 10)
                 this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
+                addActors(actors)
+                if (trailer != null) addTrailer(trailer)
             }
         }
+    }
+
+    private fun parseDuration(text: String): Int? {
+        val m = durationRegex.find(text) ?: return null
+        val h = m.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
+        val min = m.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
+        return (h * 60 + min).takeIf { it > 0 }
+    }
+
+    /**
+     * Bentuk nyata di halaman detail (terverifikasi dari detailmovie/detailseries):
+     *
+     *   <script>...atob("BASE64")...</script>   <- blok atob KEDUA (indeks 1)
+     *   hasil decode:
+     *     window.playerjs_1 = new Playerjs({id: mountId, ready:"PlayerjsReady",
+     *          file:'[{"title":"WEB-DL","file":"https://...","subtitle":"..."}]',
+     *          poster:"...", ...});
+     *
+     * `file` adalah STRING JS berkutip tunggal berisi JSON. JSONObject Android
+     * bersifat lenient (kunci tanpa kutip, string berkutip tunggal, sisa teks
+     * setelah objek diabaikan), sehingga aman mem-parsing potongan setelah
+     * "new Playerjs(".
+     *
+     * Pendekatan regex `\[\{.*?\}]` TIDAK dipakai: pada serial ia berhenti di
+     * `}]` pertama (penutup folder) dan menghasilkan JSON rusak. Diuji pada
+     * data nyata — regex: 16 KB gagal parse; cara ini: 238 KB valid,
+     * 2 musim, 8 episode.
+     */
+    private fun extractPlayerJsFile(doc: org.jsoup.nodes.Document): JSONArray? {
+        val scripts = doc.select("script:containsData(atob)")
+
+        // urutan asli plugin: blok atob indeks 1 lebih dulu
+        val ordered = ArrayList<org.jsoup.nodes.Element>()
+        scripts.getOrNull(1)?.let { ordered.add(it) }
+        scripts.forEachIndexed { i, el -> if (i != 1) ordered.add(el) }
+
+        for (script in ordered) {
+            val b64 = Regex("""atob\(["']([^"']+)["']\)""").find(script.data())
+                ?.groupValues?.getOrNull(1) ?: continue
+
+            val decoded = try {
+                base64Decode(b64)
+            } catch (e: Exception) {
+                continue
+            }
+            if (!decoded.contains("new Playerjs(")) continue
+
+            val payload = decoded.substringAfter("new Playerjs(")
+
+            val fileValue: Any = try {
+                JSONObject(payload).opt("file")
+            } catch (e: Exception) {
+                null
+            } ?: Regex("""file\s*:\s*'([^']*)'""").find(payload)
+                ?.groupValues?.getOrNull(1)
+            ?: continue
+
+            return try {
+                normalizeFile(fileValue)
+            } catch (e: Exception) {
+                Log.d(TAG, "normalizeFile gagal: ${e.message}")
+                null
+            }
+        }
+        return null
     }
 
     private fun normalizeFile(fileValue: Any): JSONArray {
@@ -208,33 +374,48 @@ class Cinemacity : MainAPI() {
         if (fileValue is String) {
             val s = fileValue.trim()
             if (s.isBlank()) throw ErrorLoadingException("PlayerJS: empty file string")
-            if (s.startsWith("[") && s.endsWith("]")) return tryParseJson<JSONArray>(s) ?: JSONArray(s)
-            if (s.startsWith("{") && s.endsWith("}")) return JSONArray().put(tryParseJson<JSONObject>(s) ?: JSONObject(s))
+            if (s.startsWith("[") && s.endsWith("]")) return JSONArray(s)
+            if (s.startsWith("{") && s.endsWith("}")) return JSONArray().put(JSONObject(s))
             return JSONArray().put(JSONObject().put("file", s))
         }
         throw ErrorLoadingException("PlayerJS: unsupported file type")
     }
 
+    /**
+     * MOVIE — file[0] TANPA kunci "folder".
+     * Nyata: {"title":"WEB-DL","file":"https://...master.m3u8","subtitle":"[Lang]url,..."}
+     */
     private fun buildMovieData(arr: JSONArray): String? {
         val first = arr.optJSONObject(0) ?: return null
         if (first.has("folder")) return null
         val streamUrl = first.optString("file").takeIf { it.isNotBlank() } ?: return null
-        val subtitleSource = first.optString("subtitle")
         return JSONObject()
             .put("streamUrl", streamUrl)
-            .put("subtitleTracks", parseSubtitles(subtitleSource))
+            .put("subtitleTracks", parseSubtitles(first.optString("subtitle")))
             .toString()
     }
 
+    /**
+     * SERIES — file[] = Season { title:"Season 1", folder:[ Episode ] }
+     * Episode = { title:"Episode 1", file:"https://...", subtitle:"...",
+     *             original_language, id, vars{cc_season, cc_episode, ...} }
+     *
+     * `vars` SENGAJA tidak dipakai; penomoran tetap dari regex judul.
+     */
     private fun buildEpisodes(arr: JSONArray): List<Episode> {
         val episodes = mutableListOf<Episode>()
         for (i in 0 until arr.length()) {
-            val season = arr.getJSONObject(i)
-            val seasonNo = seasonRegex.find(season.optString("title"))?.groupValues?.getOrNull(1)?.toIntOrNull()
+            val season = arr.optJSONObject(i) ?: continue
+            val seasonNo = seasonRegex.find(season.optString("title"))
+                ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: (i + 1)
             val folder = season.optJSONArray("folder") ?: continue
+
             for (j in 0 until folder.length()) {
-                val ep = folder.getJSONObject(j)
-                val epNo = episodeRegex.find(ep.optString("title"))?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val ep = folder.optJSONObject(j) ?: continue
+                val epTitle = ep.optString("title")
+                val epNo = episodeRegex.find(epTitle)
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: (j + 1)
+
                 val urls = mutableListOf<String>()
                 ep.optString("file").takeIf { it.isNotBlank() }?.let { urls.add(it) }
                 ep.optJSONArray("folder")?.let { nested ->
@@ -244,13 +425,15 @@ class Cinemacity : MainAPI() {
                     }
                 }
                 if (urls.isEmpty()) continue
+
                 val data = JSONObject()
                     .put("streams", JSONArray(urls))
                     .put("subtitleTracks", parseSubtitles(ep.optString("subtitle")))
                     .toString()
+
                 episodes.add(
                     newEpisode(data) {
-                        this.name = ep.optString("title").takeIf { it.isNotBlank() }
+                        this.name = epTitle.takeIf { it.isNotBlank() }
                         this.season = seasonNo
                         this.episode = epNo
                     }
@@ -260,6 +443,7 @@ class Cinemacity : MainAPI() {
         return episodes
     }
 
+    /** "[English (Full)]https://...vtt,[English (SDH)]https://...vtt" */
     private fun parseSubtitles(source: String?): JSONArray {
         val out = JSONArray()
         if (source.isNullOrBlank()) return out
@@ -274,19 +458,33 @@ class Cinemacity : MainAPI() {
         return out
     }
 
+    // ---------------------------------------------------------------
+    // LOADLINKS — tanpa network
+    // ---------------------------------------------------------------
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val obj = JSONObject(data)
+        val obj = try {
+            JSONObject(data)
+        } catch (e: Exception) {
+            return false
+        }
+
         obj.optJSONArray("subtitleTracks")?.let { subs ->
             for (i in 0 until subs.length()) {
-                val s = subs.getJSONObject(i)
-                subtitleCallback(newSubtitleFile(s.getString("language"), s.getString("subtitleUrl")))
+                val s = subs.optJSONObject(i) ?: continue
+                val lang = s.optString("language")
+                val subUrl = s.optString("subtitleUrl")
+                if (lang.isNotBlank() && subUrl.isNotBlank()) {
+                    subtitleCallback(newSubtitleFile(lang, subUrl))
+                }
             }
         }
+
         val urls = mutableListOf<String>()
         obj.optJSONArray("streams")?.let { streams ->
             for (i in 0 until streams.length()) {
@@ -297,10 +495,15 @@ class Cinemacity : MainAPI() {
             obj.optString("streamUrl").takeIf { it.isNotBlank() }?.let { urls.add(it) }
         }
         if (urls.isEmpty()) return false
-        
-        val linkHeaders = siteHeaders()
+
+        val linkHeaders = mapOf("Cookie" to buildCookieValue())
+
         urls.forEach { streamUrl ->
-            if (streamUrl.contains(".m3u8") || streamUrl.contains(".mp4") || streamUrl.contains("/public_files/")) {
+            // Nyata: https://s1.cccdn.net/<hash>:<ts>/public_files/,<...>,.urlset/master.m3u8
+            if (streamUrl.contains(".m3u8") ||
+                streamUrl.contains(".mp4") ||
+                streamUrl.contains("/public_files/")
+            ) {
                 callback(
                     newExtractorLink(
                         source = name,
@@ -313,7 +516,7 @@ class Cinemacity : MainAPI() {
                     }
                 )
             } else {
-                loadExtractor(streamUrl, subtitleCallback, callback)
+                loadExtractor(streamUrl, mainUrl, subtitleCallback, callback)
             }
         }
         return true
