@@ -44,7 +44,7 @@ class Cinemacity : MainAPI() {
                 response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
             } else {
                 if (ActivityHelper.currentActivity == null) {
-                    throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa aplikasi CloudStream (Clear Recent Apps) lalu buka kembali agar Bypass berfungsi.")
+                    throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa aplikasi CloudStream (Clear Recent Apps) lalu buka kembali.")
                 } else {
                     throw ErrorLoadingException("Bypass Cloudflare dibatalkan/gagal. Coba muat ulang.")
                 }
@@ -85,30 +85,29 @@ class Cinemacity : MainAPI() {
     }
 
     private fun org.jsoup.nodes.Element.toSearchResult(): SearchResponse? {
-        val href = this.select("a").firstOrNull { 
-            val link = it.attr("href").lowercase()
-            link.isNotBlank() && !link.contains("/uploads/") && !link.endsWith(".webp") && !link.endsWith(".jpg") && !link.endsWith(".png")
-        }?.attr("href") ?: return null
-        
-        val fixedHref = fixUrl(href)
-
-        val title = this.selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
-            ?: this.select("div.dar-short_bg.e-cover > div > span").lastOrNull()?.text()?.trim()
-            ?: this.selectFirst("a")?.text()?.trim()
+        // FIX: Bidik elemen a.e-nowrap (URL Film Asli) atau URL yang berakhiran .html
+        val linkElement = this.selectFirst("a.e-nowrap") 
+            ?: this.select("a").firstOrNull { it.attr("href").contains(".html") }
             ?: return null
+            
+        val href = linkElement.attr("href")
+        
+        // FIX: Ekstrak judul dari elemen yang sama, bersihkan angka tahun di akhirnya
+        val rawTitle = linkElement.text().trim()
+        val title = rawTitle.replace(Regex("""\s*\(\d{4}(?:–\d{4}|–)?\)$"""), "").trim()
 
-        val poster = this.selectFirst("[data-vbg]")?.attr("data-vbg")?.takeIf { it.isNotBlank() }
+        val poster = this.selectFirst("img.poster")?.attr("src") 
             ?: this.selectFirst("img")?.attr("src")
 
         val cfHeaders = CinemacityPlugin.getCfHeaders()
 
-        return if (fixedHref.contains("/tv-series/")) {
-            newTvSeriesSearchResponse(title, fixedHref, TvType.TvSeries) {
+        return if (href.contains("/tv-series/")) {
+            newTvSeriesSearchResponse(title, fixUrl(href), TvType.TvSeries) {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.posterHeaders = cfHeaders
             }
         } else {
-            newMovieSearchResponse(title, fixedHref, TvType.Movie) {
+            newMovieSearchResponse(title, fixUrl(href), TvType.Movie) {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.posterHeaders = cfHeaders
             }
@@ -116,7 +115,7 @@ class Cinemacity : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // MENGGUNAKAN GET MURNI AGAR SEARCH DILINDUNGI AUTO-BYPASS CLOUDFLARE
+        // FIX: Gunakan GET HTTP standar agar lolos Cloudflare Bypass, ajax.php terlalu rentan diblokir
         val searchUrl = "$mainUrl/index.php?do=search&subaction=search&story=$query"
         val doc = appGet(searchUrl, siteCookieHeader()).document
         return doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
@@ -128,6 +127,7 @@ class Cinemacity : MainAPI() {
 
         val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()?.ifBlank { doc.title() } ?: ""
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
+        
         val background = doc.selectFirst("div.dar-full_bg a")?.attr("data-vbg")
             ?: doc.selectFirst("div.dar-full_bg.e-cover > div")?.attr("data-vbg")
             ?: poster
@@ -137,17 +137,15 @@ class Cinemacity : MainAPI() {
 
         val imdbId = doc.select("div.ta-full_rating1 > div").firstOrNull()?.attr("onclick")?.let { imdbRegex.find(it)?.value }
 
-        // ROBUST PLAYERJS EXTRACTION
         val scriptElements = doc.select("script:containsData(atob)")
         var playerRoot: JSONObject? = null
 
         for (script in scriptElements) {
             val scriptData = script.data()
-            val b64Match = Regex("""atob\(['"]([^'"]+)['"]\)""").find(scriptData)
-            if (b64Match != null) {
-                val decoded = base64Decode(b64Match.groupValues[1])
+            if (scriptData.contains("atob(\"")) {
+                val decoded = base64Decode(scriptData.substringAfter("atob(\"").substringBefore("\")"))
                 if (decoded.contains("new Playerjs(")) {
-                    val raw = decoded.substringAfter("new Playerjs(").substringBeforeLast(")")
+                    val raw = decoded.substringAfter("new Playerjs(").substringBeforeLast(");")
                     try {
                         val tempRoot = tryParseJson<JSONObject>(raw) ?: JSONObject(raw)
                         if (tempRoot.has("file") && tempRoot.optString("file").isNotBlank()) {
@@ -166,11 +164,9 @@ class Cinemacity : MainAPI() {
             if (fileValue != null && fileValue.toString().isNotBlank()) {
                 val fileArray = normalizeFile(fileValue)
                 movieData = if (tvType != TvType.TvSeries) buildMovieData(playerRoot, fileArray) else null
-                // Untuk serial TV, kita tidak simpan ke movieData, tapi langsung iterasi di bawah
             }
         }
         
-        // IFRAME FALLBACK (JIKA PLAYERJS TIDAK ADA/DIHAPUS SERVER)
         if (playerRoot == null || (tvType != TvType.TvSeries && movieData == null)) {
             val iframeSrc = doc.selectFirst("iframe")?.attr("src")
             if (iframeSrc != null && iframeSrc.isNotBlank()) {
@@ -187,7 +183,8 @@ class Cinemacity : MainAPI() {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.backgroundPosterUrl = background?.let { fixUrl(it) }
                 this.plot = plot
-                this.posterHeaders = cfHeaders
+                // FIX: PosterHeaders untuk Backdrop Detail
+                this.posterHeaders = cfHeaders 
                 addImdbId(imdbId)
             }
         } else {
@@ -196,6 +193,7 @@ class Cinemacity : MainAPI() {
                 this.posterUrl = poster?.let { fixUrl(it) }
                 this.backgroundPosterUrl = background?.let { fixUrl(it) }
                 this.plot = plot
+                // FIX: PosterHeaders untuk Backdrop Detail
                 this.posterHeaders = cfHeaders
                 addImdbId(imdbId)
             }
@@ -300,7 +298,6 @@ class Cinemacity : MainAPI() {
         
         val linkHeaders = mapOf("Cookie" to buildCookieValue())
         urls.forEach { streamUrl ->
-            // Deteksi jika ini adalah link video langsung (HLS/MP4) atau IFrame eksternal
             if (streamUrl.contains(".m3u8") || streamUrl.contains(".mp4") || streamUrl.contains("/public_files/")) {
                 callback(
                     newExtractorLink(
@@ -314,7 +311,6 @@ class Cinemacity : MainAPI() {
                     }
                 )
             } else {
-                // IFrame fallback
                 loadExtractor(streamUrl, subtitleCallback, callback)
             }
         }
