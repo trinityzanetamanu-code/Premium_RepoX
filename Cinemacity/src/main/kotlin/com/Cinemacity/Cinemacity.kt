@@ -33,13 +33,17 @@ class Cinemacity : MainAPI() {
         private const val TAG = "Phisher"
     }
 
-    // FIX: Sinkronisasi Total Header (User-Agent, Cookie, Referer) untuk semua request OkHttp
+    // FIX: Membangun Header lengkap yang meniru browser asli untuk melewati filter ketat Cloudflare
     private fun siteHeaders(): Map<String, String> {
         val cf = CinemacityPlugin.cfCookies
         val cookie = if (cf.isEmpty()) loginCookie else if (loginCookie.isEmpty()) cf else "$loginCookie; $cf"
         val headers = mutableMapOf(
             "Cookie" to cookie,
-            "Referer" to "$mainUrl/"
+            "Referer" to "$mainUrl/",
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.5",
+            "Connection" to "keep-alive",
+            "Upgrade-Insecure-Requests" to "1"
         )
         if (CinemacityPlugin.cfUserAgent.isNotEmpty()) {
             headers["User-Agent"] = CinemacityPlugin.cfUserAgent
@@ -67,26 +71,6 @@ class Cinemacity : MainAPI() {
         return response
     }
 
-    private suspend fun appPost(url: String, data: Map<String, String>): com.lagradost.nicehttp.NiceResponse {
-        val postHeaders = siteHeaders().toMutableMap()
-        postHeaders["Content-Type"] = "application/x-www-form-urlencoded"
-        
-        var response = app.post(url, headers = postHeaders, data = data, interceptor = CinemacityCFBypassInterceptor)
-        
-        if (isCloudflareBlocked(response.code, response.text)) {
-            val success = showCinemacityCFBypassDialogAndWait()
-            if (success) {
-                response = app.post(url, headers = siteHeaders(), data = data, interceptor = CinemacityCFBypassInterceptor)
-            } else {
-                throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa aplikasi CloudStream (Clear Recent Apps) lalu buka kembali.")
-            }
-        }
-        if (isCloudflareBlocked(response.code, response.text)) {
-            throw ErrorLoadingException("CinemaCity: Terhalang Cloudflare. Coba muat ulang.")
-        }
-        return response
-    }
-
     private fun isCloudflareBlocked(code: Int, text: String): Boolean {
         val lower = text.lowercase()
         return cfMarkers.any { lower.contains(it) }
@@ -107,11 +91,14 @@ class Cinemacity : MainAPI() {
     }
 
     private fun org.jsoup.nodes.Element.toSearchResult(): SearchResponse? {
-        val linkElement = this.selectFirst("a.e-nowrap") 
-            ?: this.select("a").firstOrNull { it.attr("href").contains(".html") }
-            ?: return null
+        // FIX: Hanya tangkap elemen <a> yang memiliki URL film/series, BUKAN link gambar
+        val linkElement = this.select("a").firstOrNull { 
+            val h = it.attr("href")
+            h.contains("/movies/") || h.contains("/tv-series/") 
+        } ?: return null
             
         val href = linkElement.attr("href")
+        
         val rawTitle = linkElement.text().trim()
         val title = rawTitle.replace(Regex("""\s*\(\d{4}(?:–\d{4}|–)?\)$"""), "").trim()
 
@@ -134,16 +121,9 @@ class Cinemacity : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // FIX: Menggunakan POST request langsung ke Full Search sesuai struktur HTML Source 17
-        val searchUrl = "$mainUrl/index.php?do=search"
-        val data = mapOf(
-            "do" to "search",
-            "subaction" to "search",
-            "from_page" to "0",
-            "story" to query
-        )
-        val doc = appPost(searchUrl, data).document
-        return doc.select("div.dar-short_item, div.dle-fast_item").mapNotNull { it.toSearchResult() }
+        val searchUrl = "$mainUrl/index.php?do=search&subaction=search&story=$query"
+        val doc = appGet(searchUrl).document
+        return doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse? {
@@ -153,11 +133,12 @@ class Cinemacity : MainAPI() {
         val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
             ?.substringBefore(" » CinemaCity")?.trim()?.ifBlank { doc.title() } ?: ""
             
-        // BUKTI ORIGINAL: Selector gambar sesuai struktur HTML detail
         val poster = doc.selectFirst("img.poster")?.attr("src") 
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
             
-        val background = doc.selectFirst("img.background")?.attr("src") 
+        // FIX: Tarik resolusi tinggi gambar dari atribut href milik tag <a> pembungkus
+        val background = doc.selectFirst("div.dar-full_bg a")?.attr("href") 
+            ?: doc.selectFirst("img.background")?.attr("src")
             ?: poster
 
         val plot = doc.select("#about div.ta-full_text1").text().trim().takeIf { it.isNotBlank() }
@@ -165,24 +146,23 @@ class Cinemacity : MainAPI() {
 
         val imdbId = doc.select("div.ta-full_rating1 > div").firstOrNull()?.attr("onclick")?.let { imdbRegex.find(it)?.value }
 
-        val scriptElements = doc.select("script:containsData(atob)")
+        // MENGHINDARI BUG JSON/REGEX: Tarik langsung menggunakan string manipulasi
+        val htmlContent = doc.html()
+        val atobMatches = Regex("""atob\(['"]([^'"]+)['"]\)""").findAll(htmlContent)
         var fileArray: JSONArray? = null
 
-        // FIX: Evaluasi String JavaScript secara String Pattern (Bypass Error JSONObject)
-        for (script in scriptElements) {
-            val scriptData = script.data()
-            val b64Match = Regex("""atob\(['"]([^'"]+)['"]\)""").find(scriptData)
-            if (b64Match != null) {
-                val decoded = base64Decode(b64Match.groupValues[1])
-                if (decoded.contains("Playerjs")) {
-                    // Tangkap isi Array JSON secara langsung dari dalam file: '...' atau file: "..."
-                    val fileMatch = Regex("""(?:file|\"file\")\s*:\s*(['"])(.*?)\1""").find(decoded)
-                    if (fileMatch != null) {
-                        try {
-                            fileArray = normalizeFile(fileMatch.groupValues[2])
-                            if (fileArray != null && fileArray.length() > 0) break
-                        } catch (e: Exception) { Log.d(TAG, "Failed parsing PlayerJS array") }
-                    }
+        for (match in atobMatches) {
+            val decoded = base64Decode(match.groupValues[1])
+            if (decoded.contains("Playerjs")) {
+                var fileArrayStr = decoded.substringAfter("file:'", "").substringBefore("',")
+                if (fileArrayStr.isEmpty()) {
+                     fileArrayStr = decoded.substringAfter("file:\"", "").substringBefore("\",")
+                }
+                if (fileArrayStr.isNotEmpty()) {
+                    try {
+                        fileArray = normalizeFile(fileArrayStr)
+                        if (fileArray != null && fileArray.length() > 0) break
+                    } catch (e: Exception) { Log.d(TAG, "Failed parsing PlayerJS array") }
                 }
             }
         }
