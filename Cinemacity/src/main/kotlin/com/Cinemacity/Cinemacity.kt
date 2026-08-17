@@ -58,9 +58,11 @@ class Cinemacity : MainAPI() {
 
     private suspend fun appGet(
         url: String,
-        headers: Map<String, String> = emptyMap()
+        headers: Map<String, String> = emptyMap(),
+        tag: String = "OTHER"                     // DIAGNOSTIC: label saja, punya default
     ): com.lagradost.nicehttp.NiceResponse {
         var response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
+        ccDiagHttp(tag, "TRY1", response, url)    // DIAGNOSTIC
 
         if (isCloudflareBlocked(response.code, response.text)) {
             Log.d(TAG, "CF Challenge detected, attempting bypass...")
@@ -70,15 +72,19 @@ class Cinemacity : MainAPI() {
             val success = cfMutex.withLock {
                 if (hasClearance()) {
                     Log.d(TAG, "cf_clearance sudah ada dari permintaan lain, dialog dilewati.")
+                    Log.d(TAG, "[$tag/CF] hasClearance=true -> DIALOG DILEWATI, retry pakai cookie lama")  // DIAGNOSTIC
                     true
                 } else {
+                    Log.d(TAG, "[$tag/CF] hasClearance=false -> buka dialog WebView")                      // DIAGNOSTIC
                     showCinemacityCFBypassDialogAndWait()
                 }
             }
+            Log.d(TAG, "[$tag/CF] bypassResult=$success")                                                  // DIAGNOSTIC
 
             if (success) {
                 Log.d(TAG, "CF Bypass success, retrying request...")
                 response = app.get(url, headers = headers, interceptor = CinemacityCFBypassInterceptor)
+                ccDiagHttp(tag, "TRY2", response, url)                                                     // DIAGNOSTIC
             } else {
                 if (ActivityHelper.currentActivity == null) {
                     throw ErrorLoadingException("Cloudflare Aktif! Tutup paksa aplikasi CloudStream (Clear Recent Apps) lalu buka kembali.")
@@ -89,10 +95,157 @@ class Cinemacity : MainAPI() {
         }
 
         if (isCloudflareBlocked(response.code, response.text)) {
+            Log.d(TAG, "[$tag/CF] STOP: masih ter-challenge setelah retry")   // DIAGNOSTIC
             throw ErrorLoadingException("CinemaCity: Terhalang Cloudflare. Coba muat ulang.")
         }
 
         return response
+    }
+
+    // ===============================================================
+    // DIAGNOSTIC ONLY — read-only, tidak mengubah request/state apa pun.
+    // Hapus seluruh blok ini setelah root cause terkunci.
+    //
+    // Member NiceResponse yang dipakai DIBATASI pada yang sudah terbukti
+    // ada di file ini sebelum patch: .code, .text, .document.
+    // .url dan .headers TIDAK dipakai (belum terverifikasi di project ini);
+    // URL diambil dari parameter `url` milik appGet.
+    // ===============================================================
+
+    /** Nama cookie + panjang + fingerprint. TIDAK pernah mencetak nilai asli. */
+    private fun ccDiagCookieFp(): String {
+        val raw = CinemacityPlugin.cfCookies
+        if (raw.isBlank()) return "NONE"
+        return raw.split(";").mapNotNull { part ->
+            val t = part.trim()
+            if (t.isEmpty()) return@mapNotNull null
+            val name = t.substringBefore('=', "")
+            val value = t.substringAfter('=', "")
+            if (name.isBlank()) null
+            else "$name(len=${value.length},fp=${value.hashCode().toString(16)})"
+        }.joinToString(",")
+    }
+
+    /**
+     * Tahap C-G: apa yang benar-benar diterima OkHttp.
+     *
+     * CATATAN BACA: `pjRaw` hampir selalu false pada halaman detail normal,
+     * karena `new Playerjs(` berada di dalam base64. pjRaw=true justru anomali.
+     */
+    private fun ccDiagHttp(
+        tag: String,
+        phase: String,
+        res: com.lagradost.nicehttp.NiceResponse,
+        requestedUrl: String
+    ) {
+        val body = res.text
+        val low = body.lowercase()
+        val head = body.take(400).replace('\n', ' ').replace('\r', ' ')
+
+        val hasAtob = body.contains("atob(")
+        val hasPjRaw = body.contains("new Playerjs(")
+        val hasFileKey = low.contains("\"file\"")
+        val hasJustAMoment = low.contains("just a moment")
+        val hasCfChl = body.contains("cf-chl") || body.contains("__cf_chl")
+        val hasChallengeWord = low.contains("challenge")
+        val hasShortItem = body.contains("dar-short_item")
+        val hasPlayerShell = body.contains("cc-player-shell")
+        val hasDleLogout = low.contains("action=logout")
+        val cookieFp = ccDiagCookieFp()
+
+        Log.d(TAG, "[$tag/$phase] reqUrl=$requestedUrl")
+        Log.d(TAG, "[$tag/$phase] code=${res.code} bodyLen=${body.length}")
+        Log.d(
+            TAG,
+            "[$tag/$phase] atob=$hasAtob pjRaw=$hasPjRaw fileKey=$hasFileKey" +
+                " justAMoment=$hasJustAMoment cfChl=$hasCfChl challengeWord=$hasChallengeWord" +
+                " shortItem=$hasShortItem playerShell=$hasPlayerShell dleLogout=$hasDleLogout"
+        )
+        Log.d(TAG, "[$tag/$phase] cookies=$cookieFp")
+        Log.d(TAG, "[$tag/$phase] head=$head")
+
+        // ---------------------------------------------------------------
+        // OPSIONAL — header Cloudflare (cf-mitigated / cf-ray).
+        // SAYA TIDAK BISA MEMVERIFIKASI property `headers` pada NiceResponse
+        // versi project ini, jadi baris ini SENGAJA dinonaktifkan.
+        // Uncomment, build sekali. Kalau hijau: biarkan (datanya berguna).
+        // Kalau merah: comment lagi — sisa diagnostik tetap lengkap dan
+        // pembuktian D1 tidak bergantung pada baris ini.
+        //
+        // Log.d(TAG, "[$tag/$phase] cf-mitigated=${res.headers["cf-mitigated"] ?: "-"} cf-ray=${res.headers["cf-ray"] ?: "-"}")
+        // ---------------------------------------------------------------
+    }
+
+    /**
+     * Tahap H-L, READ-ONLY.
+     *
+     * Membaca ulang dokumen HANYA untuk pelaporan. Tidak memanggil,
+     * tidak memakai, dan tidak mengubah extractPlayerJsFile() maupun
+     * normalizeFile()/buildMovieData()/buildEpisodes().
+     * Semua akses JSON memakai opt... dan has(), yang bersifat read-only.
+     */
+    private fun ccDiagLadder(tag: String, doc: org.jsoup.nodes.Document, fileArray: JSONArray?) {
+        val scripts = doc.select("script:containsData(atob)")
+        Log.d(TAG, "[$tag/LADDER] scriptsWithAtob=${scripts.size}")
+
+        var blocksWithPlayerjs = 0
+        scripts.forEachIndexed { i, el ->
+            val data = el.data()
+            val matches = Regex("""atob\(["']([^"']+)["']\)""").findAll(data).toList()
+            val atobOccurrences = data.split("atob(").size - 1
+            Log.d(
+                TAG,
+                "[$tag/LADDER] script[$i] dataLen=${data.length}" +
+                    " atobOccurrences=$atobOccurrences regexHits=${matches.size}"
+            )
+            matches.forEachIndexed { j, m ->
+                val b64 = m.groupValues[1]
+                val dec = try {
+                    base64Decode(b64)
+                } catch (e: Exception) {
+                    Log.d(TAG, "[$tag/LADDER] script[$i].atob[$j] DECODE_FAIL ${e.message}")
+                    ""
+                }
+                val hasPj = dec.contains("new Playerjs(")
+                var fileValLen = -1
+                if (hasPj) {
+                    blocksWithPlayerjs++
+                    val fm = Regex("""file\s*:\s*'""").find(dec)
+                    if (fm != null) {
+                        val end = dec.indexOf('\'', fm.range.last + 1)
+                        fileValLen = if (end < 0) -2 else end - (fm.range.last + 1)
+                    }
+                }
+                Log.d(
+                    TAG,
+                    "[$tag/LADDER] script[$i].atob[$j] b64Len=${b64.length}" +
+                        " decLen=${dec.length} newPlayerjs=$hasPj fileValLen=$fileValLen"
+                )
+            }
+        }
+        Log.d(TAG, "[$tag/LADDER] blocksWithPlayerjs=$blocksWithPlayerjs")
+
+        if (fileArray == null) {
+            Log.d(TAG, "[$tag/LADDER] fileArray=NULL")
+            return
+        }
+        val first = fileArray.optJSONObject(0)
+        Log.d(
+            TAG,
+            "[$tag/LADDER] fileArray.len=${fileArray.length()}" +
+                " hasFolder=${first?.has("folder")}" +
+                " item0.titleLen=${first?.optString("title")?.length ?: -1}" +
+                " item0.fileLen=${first?.optString("file")?.length ?: -1}" +
+                " item0.subLen=${first?.optString("subtitle")?.length ?: -1}"
+        )
+        val folder = first?.optJSONArray("folder")
+        if (folder != null) {
+            Log.d(
+                TAG,
+                "[$tag/LADDER] season0.episodes=${folder.length()}" +
+                    " ep0.fileLen=${folder.optJSONObject(0)?.optString("file")?.length ?: -1}"
+            )
+        }
     }
 
     private fun isCloudflareBlocked(code: Int, text: String): Boolean {
@@ -130,9 +283,14 @@ class Cinemacity : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) request.data else "${request.data}page/$page/"
-        val doc = appGet(url, siteCookieHeader()).document
+        val doc = appGet(url, siteCookieHeader(), "MAINPAGE").document
 
+        val rawNodes = doc.select("div.dar-short_item")          // DIAGNOSTIC (read-only)
         val items = doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
+        Log.d(
+            TAG,
+            "[MAINPAGE] name=${request.name} page=$page rawItems=${rawNodes.size} parsed=${items.size}"
+        )   // DIAGNOSTIC
         return newHomePageResponse(request.name, items)
     }
 
@@ -201,7 +359,9 @@ class Cinemacity : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/index.php?do=search&subaction=search&story=${query.trim()}"
-        val doc = appGet(searchUrl, siteCookieHeader()).document
+        val doc = appGet(searchUrl, siteCookieHeader(), "SEARCH").document
+        val rawNodes = doc.select("div.dar-short_item")           // DIAGNOSTIC (read-only)
+        Log.d(TAG, "[SEARCH] query=$query rawItems=${rawNodes.size}")   // DIAGNOSTIC
         return doc.select("div.dar-short_item").mapNotNull { it.toSearchResult() }
     }
 
@@ -210,7 +370,8 @@ class Cinemacity : MainAPI() {
     // ---------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
-        val res = appGet(url, siteCookieHeader())
+        val detailTag = if (url.contains("/tv-series/")) "DETAIL-SERIES" else "DETAIL-MOVIE"   // DIAGNOSTIC
+        val res = appGet(url, siteCookieHeader(), detailTag)
         val doc = res.document
 
         // <h1>Obsession (2025) </h1> lebih bersih daripada og:title
@@ -259,10 +420,19 @@ class Cinemacity : MainAPI() {
 
         // ---------- PlayerJS ----------
         val fileArray = extractPlayerJsFile(doc)
-        if (fileArray != null) Log.d(TAG, fileArray.toString())
+        // DIAGNOSTIC: dinonaktifkan sementara — pada serial baris ini mencetak
+        // ratusan KB ke logcat dan memotong (truncate) log diagnostik lain.
+        // if (fileArray != null) Log.d(TAG, fileArray.toString())
+        ccDiagLadder(detailTag, doc, fileArray)   // DIAGNOSTIC
 
         // Ekstraksi movie dihitung LEBIH DULU, tanpa dipagari TvType (koreksi A.3)
         val movieData = fileArray?.let { buildMovieData(it) }
+        // DIAGNOSTIC: memakai hasil pipeline yang SUDAH dihitung di atas,
+        // buildMovieData TIDAK dipanggil ulang.
+        Log.d(
+            TAG,
+            "[$detailTag] tvType=$tvType titleLen=${title.length} movieDataNull=${movieData == null} episodesWillBuild=${tvType == TvType.TvSeries}"
+        )
 
         val cfHeaders = CinemacityPlugin.getCfHeaders()
         val fullPlot = listOfNotNull(tagline, plot).joinToString("\n\n").takeIf { it.isNotBlank() }
@@ -498,6 +668,15 @@ class Cinemacity : MainAPI() {
 
         val linkHeaders = mapOf("Cookie" to buildCookieValue())
 
+        // DIAGNOSTIC: host + panjang + tail saja, URL CDN tidak dicetak penuh.
+        val diagSubCount = obj.optJSONArray("subtitleTracks")?.length() ?: 0
+        Log.d(TAG, "[LINKS] urlCount=${urls.size} subCount=$diagSubCount")
+        urls.forEachIndexed { i, u ->
+            val diagHost = u.substringAfter("//", "").substringBefore("/")
+            val diagTail = u.takeLast(60)
+            Log.d(TAG, "[LINKS] url[$i] len=${u.length} host=$diagHost tail=$diagTail")
+        }
+
         urls.forEach { streamUrl ->
             // Nyata: https://s1.cccdn.net/<hash>:<ts>/public_files/,<...>,.urlset/master.m3u8
             if (streamUrl.contains(".m3u8") ||
@@ -519,6 +698,7 @@ class Cinemacity : MainAPI() {
                 loadExtractor(streamUrl, mainUrl, subtitleCallback, callback)
             }
         }
+        Log.d(TAG, "[LINKS] selesai, callback dikirim untuk ${urls.size} url")   // DIAGNOSTIC
         return true
     }
 }
