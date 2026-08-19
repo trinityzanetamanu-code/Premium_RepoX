@@ -215,18 +215,39 @@ class PodjavProvider : MainAPI() {
                 subtitles.forEach { sub ->
                     val rawSrc = sub.src.trim()
                     if (rawSrc.isNotBlank()) {
-                        // PENYEBAB BUG: server mengirim path RELATIF, contoh:
-                        //   /subtitle.php?pid=15414&bid=1&token=b895...
-                        // ExoPlayer butuh URL absolut -> kalau relatif dia lempar
-                        // "HttpDataSourceException: Malformed URL" dan track subtitle
-                        // muncul di menu tapi isinya kosong.
-                        // fixUrl() milik MainAPI menggabungkannya dengan mainUrl.
-                        val subUrl = fixUrl(rawSrc)
+                        // BUG 1 - URL RELATIF
+                        // Server mengirim "/subtitle.php?pid=...&token=..." tanpa domain.
+                        // ExoPlayer butuh URL absolut; kalau relatif dia lempar
+                        // "HttpDataSourceException: Malformed URL" -> track subtitle
+                        // muncul di menu player tapi isinya kosong.
+                        var subUrl = fixUrl(rawSrc)
 
+                        // BUG 2 - SALAH TEBAK FORMAT
+                        // data-subtitles menulis "format":"srt", TAPI respons asli server
+                        // adalah  content-type: text/vtt  dengan body diawali "WEBVTT"
+                        // dan timestamp bertitik (00:00:42.000), bukan berkoma.
+                        // CloudStream menebak mime dari akhiran URL. "/subtitle.php?..."
+                        // tidak berakhiran apa pun -> default application/x-subrip ->
+                        // parser SRT dipakai untuk isi VTT -> tidak ada cue yang muncul.
+                        // Fragment "#.vtt" membuat tebakan jadi text/vtt, dan sesuai
+                        // spec HTTP fragment TIDAK pernah dikirim ke server,
+                        // jadi token di query string tetap utuh.
+                        if (!subUrl.endsWith("vtt", ignoreCase = true)) subUrl += "#.vtt"
+
+                        // BUG 3 - REQUEST TANPA IDENTITAS
+                        // subtitle.php menolak request "telanjang" dengan "Access denied.".
+                        // Capture request yang berhasil membawa Referer halaman film.
+                        // ExoPlayer punya HTTP client sendiri (tidak ikut sesi app.get),
+                        // jadi header harus dititipkan lewat SubtitleFile.
                         subtitleCallback.invoke(
                             SubtitleFile(
                                 lang = sub.label ?: "Indonesia",
-                                url = subUrl
+                                url = subUrl,
+                                headers = mapOf(
+                                    "Referer" to data,
+                                    "Accept" to "*/*",
+                                    "User-Agent" to "Mozilla/5.0 (Android 16; Mobile; rv:156.0) Gecko/156.0 Firefox/156.0"
+                                )
                             )
                         )
                     }
