@@ -41,9 +41,12 @@ class PodjavProvider : MainAPI() {
         if (url.isBlank() || !url.startsWith("http")) return null
 
         // Ambil judul dari class card-title atau data-title
-        val titleText = this.selectFirst(".card-title")?.text() 
-            ?: this.attr("data-title") 
-            ?: return null
+        // data-title dipakai kalau .card-title kosong. attr() mengembalikan ""
+        // (bukan null) saat atribut tidak ada, jadi kekosongan diperiksa lewat
+        // isNotBlank() setelah dibersihkan, bukan lewat rantai ?: saja.
+        val titleText = cleanTitle(
+            this.selectFirst(".card-title")?.text() ?: this.attr("data-title")
+        ).takeIf { it.isNotBlank() } ?: return null
         
         // Ambil gambar sampul/poster
         val posterUrl = this.selectFirst("img.thumb")?.attr("src")
@@ -121,10 +124,28 @@ class PodjavProvider : MainAPI() {
         return document.select("a.video-card").mapNotNull { it.toSearchResult() }
     }
 
+    /**
+     * Membersihkan judul dari situs.
+     *
+     * Semua judul podjav berpola "KODE Sub Indo : deskripsi". Potongan
+     * "Sub Indo :" muncul di SETIAP judul sehingga tidak menambah informasi
+     * apa pun, tapi memakan ~10 karakter dari jatah 2 baris judul CloudStream.
+     * Dibuang supaya deskripsinya kebagian ruang lebih banyak.
+     *
+     * Pola \s*Sub\s+[A-Za-z]+\s*:\s* juga menangkap "Sub Dutch", "Sub English",
+     * dan varian bahasa lain yang dipakai situs. Judul tanpa pola itu
+     * dibiarkan apa adanya.
+     */
+    private fun cleanTitle(raw: String): String = raw
+        .replace(Regex("""\s*Sub\s+[A-Za-z]+\s*:\s*""", RegexOption.IGNORE_CASE), ": ")
+        .replace(Regex("""\s{2,}"""), " ")
+        .trim()
+
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url).document
 
-        val titleText = document.selectFirst("h1.video-info-title")?.text() ?: return null
+        val titleText = cleanTitle(document.selectFirst("h1.video-info-title")?.text() ?: "")
+            .takeIf { it.isNotBlank() } ?: return null
         // POSTER HALAMAN DETAIL
         // Halaman detail memuat DUA gambar untuk film yang sama:
         //   video[data-poster]  -> JUL-657-cover.jpg   sampul penuh, lebar ~2:1
@@ -164,8 +185,10 @@ class PodjavProvider : MainAPI() {
                             ?.map { it.text().trim() }
                             ?.firstOrNull { it.length > 40 }
                 }
-            ?: document.selectFirst("meta[name=description]")
-                ?.attr("content")?.trim()?.takeIf { it.length > 40 }
+            // meta[name=description] SENGAJA tidak dipakai sebagai cadangan:
+            // isinya cuma "Nonton JAV <judul>", yaitu judul yang diulang.
+            // Lebih jujur menyatakan sinopsisnya memang belum ada.
+            ?: "Sinopsis belum tersedia."
         
         val tags = mutableListOf<String>()
         var year: Int? = null
@@ -236,7 +259,12 @@ class PodjavProvider : MainAPI() {
                             callback.invoke(
                                 newExtractorLink(
                                     source = this.name,
-                                    name = source.label ?: "Server Bawaan (Podjav)",
+                                    // source.label sering berisi string KOSONG,
+                                    // bukan null, sehingga "?:" tidak pernah aktif
+                                    // dan nama server tampil blank di daftar pemutar.
+                                    // isNotBlank() menangani keduanya sekaligus.
+                                    name = source.label?.takeIf { it.isNotBlank() }
+                                        ?: if (isDirectMp4) "Podjav (MP4)" else "Podjav (M3U8)",
                                     url = url,
                                     type = if (isDirectMp4) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
                                 ) {
