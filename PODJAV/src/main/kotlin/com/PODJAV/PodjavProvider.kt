@@ -51,7 +51,11 @@ class PodjavProvider : MainAPI() {
         // Mendeteksi label Uncensored dari class badge atau data genre
         val isUncensored = this.selectFirst(".badge-uncen") != null ||
             this.attr("data-genre").contains("uncensored", ignoreCase = true)
-        val finalTitle = if (isUncensored) "🔥 [UNCENSORED] $titleText" else titleText
+
+        // Judul kartu di CloudStream cuma muat ~2 baris. Prefix "🔥 [UNCENSORED] "
+        // (16 karakter) memakan habis ruang itu, jadi judul asli tidak pernah kelihatan.
+        // Cukup pakai 1 emoji sebagai penanda -> tetap jelas, judul tetap terbaca.
+        val finalTitle = if (isUncensored) "🔞 $titleText" else titleText
 
         return newMovieSearchResponse(finalTitle, url, TvType.NSFW) {
             this.posterUrl = posterUrl
@@ -209,8 +213,22 @@ class PodjavProvider : MainAPI() {
             if (dataSubtitlesRaw.isNotBlank() && dataSubtitlesRaw != "[]") {
                 val subtitles = AppUtils.parseJson<List<SubtitleSource>>(dataSubtitlesRaw)
                 subtitles.forEach { sub ->
-                    if (sub.src.isNotBlank()) {
-                         subtitleCallback.invoke(SubtitleFile(lang = sub.label ?: "Indonesia", url = sub.src))
+                    val rawSrc = sub.src.trim()
+                    if (rawSrc.isNotBlank()) {
+                        // PENYEBAB BUG: server mengirim path RELATIF, contoh:
+                        //   /subtitle.php?pid=15414&bid=1&token=b895...
+                        // ExoPlayer butuh URL absolut -> kalau relatif dia lempar
+                        // "HttpDataSourceException: Malformed URL" dan track subtitle
+                        // muncul di menu tapi isinya kosong.
+                        // fixUrl() milik MainAPI menggabungkannya dengan mainUrl.
+                        val subUrl = fixUrl(rawSrc)
+
+                        subtitleCallback.invoke(
+                            SubtitleFile(
+                                lang = sub.label ?: "Indonesia",
+                                url = subUrl
+                            )
+                        )
                     }
                 }
             }
