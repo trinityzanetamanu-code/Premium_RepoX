@@ -166,7 +166,8 @@ class PodjavProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val mainRes = app.get(data)
+        val document = mainRes.document
 
         // Cari elemen video utama
         val videoElement = document.selectFirst("#podjavPlayer")
@@ -212,48 +213,89 @@ class PodjavProvider : MainAPI() {
             val dataSubtitlesRaw = videoElement.attr("data-subtitles")
             if (dataSubtitlesRaw.isNotBlank() && dataSubtitlesRaw != "[]") {
                 val subtitles = AppUtils.parseJson<List<SubtitleSource>>(dataSubtitlesRaw)
+
+                // Cookie sesi (PHPSESSID dll) dari halaman film. ExoPlayer punya HTTP
+                // client sendiri dan TIDAK ikut cookie jar app.get(), jadi harus
+                // dititipkan manual lewat SubtitleFile.headers.
+                val cookieHeader = mainRes.cookies.entries
+                    .joinToString("; ") { "${it.key}=${it.value}" }
+
                 subtitles.forEach { sub ->
                     val rawSrc = sub.src.trim()
                     if (rawSrc.isNotBlank()) {
-                        // BUG 1 - URL RELATIF
-                        // Server mengirim "/subtitle.php?pid=...&token=..." tanpa domain.
-                        // ExoPlayer butuh URL absolut; kalau relatif dia lempar
-                        // "HttpDataSourceException: Malformed URL" -> track subtitle
-                        // muncul di menu player tapi isinya kosong.
-                        var subUrl = fixUrl(rawSrc)
 
-                        // BUG 2 - SALAH TEBAK FORMAT
+                        // BUG 1 - TOKEN DI HTML SUDAH BASI
+                        // Halaman film dilayani dari cache (LiteSpeed / x-subtitle-cache: HIT),
+                        // jadi token di dalam data-subtitles ikut basi -> subtitle.php
+                        // menjawab "Access denied.".
+                        // Player asli tidak pernah memakai token itu: dia POST dulu ke
+                        // admin-ajax.php action=podjav_fresh_subtitle_url untuk minta
+                        // token baru, baru mengunduh subtitlenya.
+                        val pid = Regex("""pid=(\d+)""").find(rawSrc)?.groupValues?.getOrNull(1)
+                        val bid = Regex("""bid=(\d+)""").find(rawSrc)?.groupValues?.getOrNull(1) ?: "1"
+
+                        var chosenSrc = rawSrc
+                        if (pid != null) {
+                            try {
+                                val freshRes = app.post(
+                                    "$mainUrl/wp-admin/admin-ajax.php",
+                                    data = mapOf(
+                                        "action" to "podjav_fresh_subtitle_url",
+                                        "pid" to pid,
+                                        "bid" to bid
+                                    ),
+                                    referer = data,
+                                    headers = mapOf("Origin" to mainUrl)
+                                )
+                                val fresh = AppUtils.tryParseJson<FreshSubtitleResponse>(freshRes.text)
+                                val freshUrl = fresh?.data?.url?.trim()
+                                if (fresh?.success == true && !freshUrl.isNullOrBlank()) {
+                                    chosenSrc = freshUrl
+                                }
+                            } catch (e: Exception) {
+                                // Kalau AJAX gagal, pakai token dari HTML sebagai cadangan
+                            }
+                        }
+
+                        // BUG 2 - URL RELATIF
+                        // Server mengirim "/subtitle.php?..." tanpa domain. ExoPlayer butuh
+                        // URL absolut; kalau relatif dia lempar "Malformed URL" dan track
+                        // subtitle muncul di menu tapi isinya kosong.
+                        var subUrl = fixUrl(chosenSrc)
+
+                        // BUG 3 - SALAH TEBAK FORMAT
                         // data-subtitles menulis "format":"srt", TAPI respons asli server
-                        // adalah  content-type: text/vtt  dengan body diawali "WEBVTT"
-                        // dan timestamp bertitik (00:00:42.000), bukan berkoma.
-                        // CloudStream menebak mime dari akhiran URL. "/subtitle.php?..."
+                        // adalah content-type: text/vtt, body diawali "WEBVTT", dan seluruh
+                        // timestampnya bertitik (00:00:42.000) bukan berkoma.
+                        // CloudStream menebak mime dari akhiran URL; "/subtitle.php?..."
                         // tidak berakhiran apa pun -> default application/x-subrip ->
-                        // parser SRT dipakai untuk isi VTT -> tidak ada cue yang muncul.
-                        // Fragment "#.vtt" membuat tebakan jadi text/vtt, dan sesuai
-                        // spec HTTP fragment TIDAK pernah dikirim ke server,
-                        // jadi token di query string tetap utuh.
+                        // parser SRT dipakai untuk isi VTT -> nol cue, tanpa error.
+                        // Fragment "#.vtt" membuat tebakan jadi text/vtt, dan sesuai spec
+                        // HTTP fragment TIDAK pernah dikirim ke server, jadi token utuh.
                         if (!subUrl.endsWith("vtt", ignoreCase = true)) subUrl += "#.vtt"
 
-                        // BUG 3 - REQUEST TANPA IDENTITAS
-                        // subtitle.php menolak request "telanjang" dengan "Access denied.".
-                        // Capture request yang berhasil membawa Referer halaman film.
-                        // ExoPlayer punya HTTP client sendiri (tidak ikut sesi app.get),
-                        // jadi header harus dititipkan lewat SubtitleFile.
+                        // BUG 4 - REQUEST TANPA IDENTITAS
+                        // Capture request yang berhasil membawa Referer halaman film,
+                        // Origin, dan cookie sesi.
+                        val subHeaders = mutableMapOf(
+                            "Referer" to data,
+                            "Accept" to "*/*",
+                            "User-Agent" to "Mozilla/5.0 (Android 16; Mobile; rv:156.0) Gecko/156.0 Firefox/156.0"
+                        )
+                        if (cookieHeader.isNotBlank()) subHeaders["Cookie"] = cookieHeader
+
                         subtitleCallback.invoke(
                             SubtitleFile(
                                 lang = sub.label ?: "Indonesia",
                                 url = subUrl,
-                                headers = mapOf(
-                                    "Referer" to data,
-                                    "Accept" to "*/*",
-                                    "User-Agent" to "Mozilla/5.0 (Android 16; Mobile; rv:156.0) Gecko/156.0 Firefox/156.0"
-                                )
+                                headers = subHeaders
                             )
                         )
                     }
                 }
             }
         }
+
 
         // Jika kita sudah menemukan direct link (seperti MP4), HENTIKAN proses.
         // Kita tidak perlu susah-susah mencari dan membongkar iframe lagi.
@@ -336,4 +378,17 @@ data class SubtitleSource(
     @JsonProperty("src") val src: String,
     @JsonProperty("srclang") val srclang: String?,
     @JsonProperty("label") val label: String?
+)
+
+/**
+ * Balasan admin-ajax.php action=podjav_fresh_subtitle_url
+ * Contoh: {"success":true,"data":{"url":"\/subtitle.php?pid=13587&bid=1&token=4840..."}}
+ */
+data class FreshSubtitleResponse(
+    @JsonProperty("success") val success: Boolean?,
+    @JsonProperty("data") val data: FreshSubtitleData?
+)
+
+data class FreshSubtitleData(
+    @JsonProperty("url") val url: String?
 )
