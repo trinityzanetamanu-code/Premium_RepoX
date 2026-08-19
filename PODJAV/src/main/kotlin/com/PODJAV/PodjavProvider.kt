@@ -166,8 +166,7 @@ class PodjavProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val mainRes = app.get(data)
-        val document = mainRes.document
+        val document = app.get(data).document
 
         // Cari elemen video utama
         val videoElement = document.selectFirst("#podjavPlayer")
@@ -213,12 +212,6 @@ class PodjavProvider : MainAPI() {
             val dataSubtitlesRaw = videoElement.attr("data-subtitles")
             if (dataSubtitlesRaw.isNotBlank() && dataSubtitlesRaw != "[]") {
                 val subtitles = AppUtils.parseJson<List<SubtitleSource>>(dataSubtitlesRaw)
-
-                // Cookie sesi (PHPSESSID dll) dari halaman film. ExoPlayer punya HTTP
-                // client sendiri dan TIDAK ikut cookie jar app.get(), jadi harus
-                // dititipkan manual lewat SubtitleFile.headers.
-                val cookieHeader = mainRes.cookies.entries
-                    .joinToString("; ") { "${it.key}=${it.value}" }
 
                 subtitles.forEach { sub ->
                     val rawSrc = sub.src.trim()
@@ -274,21 +267,16 @@ class PodjavProvider : MainAPI() {
                         // HTTP fragment TIDAK pernah dikirim ke server, jadi token utuh.
                         if (!subUrl.endsWith("vtt", ignoreCase = true)) subUrl += "#.vtt"
 
-                        // BUG 4 - REQUEST TANPA IDENTITAS
-                        // Capture request yang berhasil membawa Referer halaman film,
-                        // Origin, dan cookie sesi.
-                        val subHeaders = mutableMapOf(
-                            "Referer" to data,
-                            "Accept" to "*/*",
-                            "User-Agent" to "Mozilla/5.0 (Android 16; Mobile; rv:156.0) Gecko/156.0 Firefox/156.0"
-                        )
-                        if (cookieHeader.isNotBlank()) subHeaders["Cookie"] = cookieHeader
-
+                        // CATATAN HEADER
+                        // Konstruktor SubtitleFile(lang, url, headers) bersifat PRIVATE.
+                        // Jalur resminya adalah builder newSubtitleFile (lihat issue #1809 /
+                        // PR #1810 di repo cloudstream). Untuk sekarang dipakai konstruktor
+                        // 2-argumen yang publik, karena setelah token diperbarui lewat AJAX
+                        // header kemungkinan besar tidak lagi dibutuhkan.
                         subtitleCallback.invoke(
                             SubtitleFile(
                                 lang = sub.label ?: "Indonesia",
-                                url = subUrl,
-                                headers = subHeaders
+                                url = subUrl
                             )
                         )
                     }
