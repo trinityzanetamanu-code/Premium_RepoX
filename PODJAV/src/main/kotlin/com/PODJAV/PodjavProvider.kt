@@ -89,7 +89,10 @@ class PodjavProvider : MainAPI() {
                 
                 val list = section.select("a.video-card").mapNotNull { it.toSearchResult() }
                 if (list.isNotEmpty()) {
-                    items.add(HomePageList(sectionTitle, list))
+                    // isHorizontalImages = true -> kartu jadi landscape.
+                    // Sampul podjav memang berformat lebar (~2:1), selama ini
+                    // dipotong paksa ke potret sehingga cuma terlihat sepotong.
+                    items.add(HomePageList(sectionTitle, list, isHorizontalImages = true))
                 }
             }
         } else {
@@ -97,7 +100,7 @@ class PodjavProvider : MainAPI() {
             val elements = document.select("a.video-card")
             val list = elements.mapNotNull { it.toSearchResult() }
             if (list.isNotEmpty()) {
-                items.add(HomePageList(request.name, list))
+                items.add(HomePageList(request.name, list, isHorizontalImages = true))
             }
         }
 
@@ -120,7 +123,29 @@ class PodjavProvider : MainAPI() {
 
         val titleText = document.selectFirst("h1.video-info-title")?.text() ?: return null
         val posterUrl = document.selectFirst(".video-info-top img")?.attr("src")
+        // SINOPSIS
+        // Selector lama "#tab-synopsis .text-sm p" sudah tidak cocok dengan tata
+        // letak situs sekarang -> muncul "Plot Tidak Ditemukan".
+        // Dicoba berjenjang, dari yang paling spesifik ke yang paling tahan banting.
+        // Cara terakhir tidak bergantung nama class sama sekali: cari heading yang
+        // teksnya "SYNOPSIS", lalu ambil elemen berisi teks panjang sesudahnya.
         val plot = document.selectFirst("#tab-synopsis .text-sm p")?.text()
+            ?: document.selectFirst("#tab-synopsis p")?.text()
+            ?: document.selectFirst("[class*=synopsis] p")?.text()
+            ?: document.selectFirst("[id*=synopsis] p")?.text()
+            ?: document.select("h1,h2,h3,h4,h5,h6,div,span,strong")
+                .firstOrNull { it.ownText().trim().equals("SYNOPSIS", ignoreCase = true) }
+                ?.let { heading ->
+                    generateSequence(heading.nextElementSibling()) { it.nextElementSibling() }
+                        .take(6)
+                        .map { it.text().trim() }
+                        .firstOrNull { it.length > 40 }
+                        ?: heading.parent()?.select("p")
+                            ?.map { it.text().trim() }
+                            ?.firstOrNull { it.length > 40 }
+                }
+            ?: document.selectFirst("meta[name=description]")
+                ?.attr("content")?.trim()?.takeIf { it.length > 40 }
         
         val tags = mutableListOf<String>()
         var year: Int? = null
