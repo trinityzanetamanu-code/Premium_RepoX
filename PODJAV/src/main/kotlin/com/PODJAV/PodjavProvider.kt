@@ -48,14 +48,21 @@ class PodjavProvider : MainAPI() {
         // Ambil gambar sampul/poster
         val posterUrl = this.selectFirst("img.thumb")?.attr("src")
 
-        // Mendeteksi label Uncensored dari class badge atau data genre
-        val isUncensored = this.selectFirst(".badge-uncen") != null ||
-            this.attr("data-genre").contains("uncensored", ignoreCase = true)
+        // Mendeteksi label Uncensored.
+        // Dipastikan langsung dari sumber HTML situs; dua penanda ini selalu ada:
+        //   <span class="badge-uncen">UNCEN</span>
+        //   data-genre="... uncensored"
+        // data-genre dipecah per token supaya cocok persis, bukan sekadar contains.
+        val isUncensored = this.selectFirst("span.badge-uncen") != null ||
+            this.attr("data-genre").split(" ").any { it.equals("uncensored", ignoreCase = true) }
 
-        // Judul kartu di CloudStream cuma muat ~2 baris. Prefix "🔥 [UNCENSORED] "
-        // (16 karakter) memakan habis ruang itu, jadi judul asli tidak pernah kelihatan.
-        // Cukup pakai 1 emoji sebagai penanda -> tetap jelas, judul tetap terbaca.
-        val finalTitle = if (isUncensored) "🔞 $titleText" else titleText
+        // Dua status ditandai sekaligus supaya perbedaannya tidak ambigu:
+        //   🔓 = uncensored     🔒 = disensor
+        // Sebelumnya dipakai 🔞, tapi ikon itu berarti "konten dewasa" yang berlaku
+        // untuk SEMUA judul di situs ini, jadi tidak membedakan apa pun.
+        // Kalau ingin hanya yang uncensored yang bertanda, ganti bagian else
+        // menjadi: else titleText
+        val finalTitle = if (isUncensored) "🔓 $titleText" else "🔒 $titleText"
 
         return newMovieSearchResponse(finalTitle, url, TvType.NSFW) {
             this.posterUrl = posterUrl
@@ -122,7 +129,21 @@ class PodjavProvider : MainAPI() {
         val document = app.get(url).document
 
         val titleText = document.selectFirst("h1.video-info-title")?.text() ?: return null
-        val posterUrl = document.selectFirst(".video-info-top img")?.attr("src")
+        // POSTER HALAMAN DETAIL
+        // Sumber HTML membuktikan situs menyimpan DUA gambar per film:
+        //   MDYD-992.jpg        -> thumb lebar 300x169 (16:9), dipakai di kartu
+        //   MDYD-992-poster.jpg -> poster tegak, dipakai di .hero-poster-frame
+        // Header detail CloudStream memakai centerCrop pada wadah yang lebih tinggi,
+        // jadi thumb 16:9 pasti terpotong di sisi kiri-kanan. Poster tegak jauh lebih pas.
+        //
+        // og:image SENGAJA TIDAK dipakai: di situs ini Yoast mengisinya dengan
+        // logo podjav.jpg (500x500), bukan sampul filmnya.
+        //
+        // Kalau varian -poster tidak ada di suatu halaman, jatuh balik ke gambar
+        // lama supaya tidak ada risiko poster kosong.
+        val posterUrl = document.selectFirst("img[src*='-poster']")?.attr("src")
+            ?: document.selectFirst(".video-info-top img")?.attr("src")
+
         // SINOPSIS
         // Selector lama "#tab-synopsis .text-sm p" sudah tidak cocok dengan tata
         // letak situs sekarang -> muncul "Plot Tidak Ditemukan".
