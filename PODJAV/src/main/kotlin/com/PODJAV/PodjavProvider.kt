@@ -56,13 +56,9 @@ class PodjavProvider : MainAPI() {
         val isUncensored = this.selectFirst("span.badge-uncen") != null ||
             this.attr("data-genre").split(" ").any { it.equals("uncensored", ignoreCase = true) }
 
-        // Dua status ditandai sekaligus supaya perbedaannya tidak ambigu:
-        //   🔓 = uncensored     🔒 = disensor
-        // Sebelumnya dipakai 🔞, tapi ikon itu berarti "konten dewasa" yang berlaku
-        // untuk SEMUA judul di situs ini, jadi tidak membedakan apa pun.
-        // Kalau ingin hanya yang uncensored yang bertanda, ganti bagian else
-        // menjadi: else titleText
-        val finalTitle = if (isUncensored) "🔓 $titleText" else "🔒 $titleText"
+        // Hanya yang uncensored diberi penanda; yang disensor dibiarkan polos.
+        // Satu ikon di depan judul, tidak memakan ruang judul seperti teks panjang.
+        val finalTitle = if (isUncensored) "👑 $titleText" else titleText
 
         return newMovieSearchResponse(finalTitle, url, TvType.NSFW) {
             this.posterUrl = posterUrl
@@ -130,18 +126,21 @@ class PodjavProvider : MainAPI() {
 
         val titleText = document.selectFirst("h1.video-info-title")?.text() ?: return null
         // POSTER HALAMAN DETAIL
-        // Sumber HTML membuktikan situs menyimpan DUA gambar per film:
-        //   MDYD-992.jpg        -> thumb lebar 300x169 (16:9), dipakai di kartu
-        //   MDYD-992-poster.jpg -> poster tegak, dipakai di .hero-poster-frame
-        // Header detail CloudStream memakai centerCrop pada wadah yang lebih tinggi,
-        // jadi thumb 16:9 pasti terpotong di sisi kiri-kanan. Poster tegak jauh lebih pas.
+        // Halaman detail memuat DUA gambar untuk film yang sama:
+        //   video[data-poster]  -> JUL-657-cover.jpg   sampul penuh, lebar ~2:1
+        //   .video-info-top img -> JAV-JUL-657-1.jpg   200x283, tegak
+        // Header detail CloudStream berbentuk lebar dan memakai centerCrop, jadi
+        // gambar tegak pasti terpotong atas-bawah. Sampul lebar hampir pas mengisi
+        // wadah itu, sehingga tampil paling utuh.
         //
-        // og:image SENGAJA TIDAK dipakai: di situs ini Yoast mengisinya dengan
-        // logo podjav.jpg (500x500), bukan sampul filmnya.
+        // JANGAN pakai "img[src*='-poster']": karusel "Rekomendasi JAV" di bagian
+        // bawah halaman berisi gambar -poster.jpg MILIK FILM LAIN, dan poster film
+        // ini sendiri tidak mengandung kata "poster" pada namanya. selectFirst akan
+        // mengambil poster film lain.
         //
-        // Kalau varian -poster tidak ada di suatu halaman, jatuh balik ke gambar
-        // lama supaya tidak ada risiko poster kosong.
-        val posterUrl = document.selectFirst("img[src*='-poster']")?.attr("src")
+        // og:image juga tidak dipakai: isinya sama dengan versi tegak 379x538.
+        val posterUrl = document.selectFirst("video[data-poster]")
+            ?.attr("data-poster")?.trim()?.takeIf { it.isNotBlank() }
             ?: document.selectFirst(".video-info-top img")?.attr("src")
 
         // SINOPSIS
