@@ -1,5 +1,6 @@
 package com.Adicinemax21
 
+import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -11,6 +12,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.security.MessageDigest
+import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.abs
@@ -219,6 +221,13 @@ object Adicinemax21Extractor : Adicinemax21() {
     //
     // DIAGNOSTIK: filter logcat dengan tag "Adicinemax21MB".
     private const val MB_TAG = "Adicinemax21MB"
+
+    /**
+     * Dipanggil dari Adicinemax21Plugin.load(). Menyiapkan identity persisten
+     * MovieBox sebelum request pertama. Hanya meneruskan Context; tidak
+     * mengubah apa pun pada Kisskh maupun jalur TMDB.
+     */
+    fun attachContext(context: Context) = MovieboxHelper.attachContext(context)
 
     // Berapa banyak subject MovieBox yang boleh dicoba untuk satu judul.
     // TV murah karena season-info langsung membuang subject kosong (1 request/subject);
@@ -621,7 +630,82 @@ object Adicinemax21Extractor : Adicinemax21() {
         const val API_URL = "https://api3.aoneroom.com"
         const val USER_AGENT = "com.community.oneroom/50020088 (Linux; U; Android 13; en_US; Samsung; Build/TQ3A.230901.001)"
 
-        private const val CLIENT_INFO = """{"package_name":"com.community.oneroom","version_name":"3.0.13.0325.03","version_code":50020088,"os":"android","os_version":"13","device_id":"71e0f7746936dc98","install_store":"ps","system_language":"en","net":"NETWORK_WIFI","region":"US","timezone":"Asia/Calcutta","sp_code":""}"""
+        /**
+         * x-client-info dirakit saat request, bukan konstanta, karena device_id
+         * berasal dari identity persisten per-instalasi.
+         *
+         * Field lain TIDAK berubah sedikit pun dari versi sebelumnya.
+         * x-client-info tidak ikut ditandatangani (buildCanonical hanya memakai
+         * method/accept/content-type/panjang body/ts/md5 body/path), jadi
+         * perubahan ini tidak dapat memengaruhi signature.
+         */
+        private fun clientInfo(): String =
+            "{\"package_name\":\"com.community.oneroom\",\"version_name\":\"3.0.13.0325.03\"," +
+            "\"version_code\":50020088,\"os\":\"android\",\"os_version\":\"13\"," +
+            "\"device_id\":\"${deviceId()}\",\"install_store\":\"ps\"," +
+            "\"system_language\":\"en\",\"net\":\"NETWORK_WIFI\",\"region\":\"US\"," +
+            "\"timezone\":\"Asia/Calcutta\",\"sp_code\":\"\"}"
+
+        // ---------------------------------------------------------------
+        // IDENTITY  (meniru Lmh/b;->h pada APK MovieBox: UUID -> MD5 -> persist)
+        //
+        //   APK  : MMKV("vshow")["apkdeviceid"]  <- Lph/a$a;->d(UUID) = MD5 hex 32
+        //   sini : SharedPreferences("adicinemax21_identity")["apkdeviceid"]
+        //
+        // Sengaja TERPISAH dari storage plugin MovieBox standalone, supaya
+        // kedua plugin tidak saling bergantung pada identity masing-masing.
+        //
+        // device_id yang sebelumnya di-hardcode dipakai bersama oleh semua
+        // instalasi, sehingga server memetakannya ke satu guest user dan
+        // membatasi search/v2 serta play-info dengan HTTP 406 "find no content".
+        // ---------------------------------------------------------------
+        private const val ID_PREFS = "adicinemax21_identity"
+        private const val ID_KEY = "apkdeviceid"
+        private val ID_FORMAT = Regex("^[0-9a-f]{32}$")
+
+        @Volatile private var appContext: Context? = null
+        @Volatile private var cachedDeviceId: String? = null
+        @Volatile private var persisted = false
+
+        fun attachContext(context: Context) {
+            appContext = context.applicationContext
+            val id = deviceId()
+            Log.d(MB_TAG, "[IDENTITY] device_id=$id len=${id.length} " +
+                    "valid=${ID_FORMAT.matches(id)} persisted=$persisted")
+        }
+
+        /**
+         * Storage adalah sumber kebenaran. Nilai dibuat sekali lalu dipakai
+         * selamanya. Nilai in-memory hanya dipakai bila storage sedang tidak
+         * tersedia, dan akan dipersist pada kesempatan pertama sehingga identity
+         * tidak berganti antar-restart.
+         */
+        private fun deviceId(): String {
+            val cached = cachedDeviceId
+            if (cached != null && persisted) return cached
+
+            val ctx = appContext
+            if (ctx != null) {
+                try {
+                    val sp = ctx.getSharedPreferences(ID_PREFS, Context.MODE_PRIVATE)
+                    val existing = sp.getString(ID_KEY, null)
+                    if (!existing.isNullOrBlank() && ID_FORMAT.matches(existing)) {
+                        cachedDeviceId = existing
+                        persisted = true
+                        return existing
+                    }
+                    val fresh = cached ?: md5(UUID.randomUUID().toString())
+                    sp.edit().putString(ID_KEY, fresh).apply()
+                    cachedDeviceId = fresh
+                    persisted = true
+                    return fresh
+                } catch (e: Exception) {
+                    Log.e(MB_TAG, "[IDENTITY] storage tidak tersedia: ${e.message}")
+                }
+            }
+
+            return cached ?: md5(UUID.randomUUID().toString()).also { cachedDeviceId = it }
+        }
 
         // Double base64 decode, persis MovieBoxProvider.
         private val SECRET_BYTES: ByteArray by lazy {
@@ -682,7 +766,7 @@ object Adicinemax21Extractor : Adicinemax21() {
                 "content-type" to "application/json",
                 "x-client-token" to generateGuestToken(ts),
                 "x-tr-signature" to signature,
-                "x-client-info" to CLIENT_INFO,
+                "x-client-info" to clientInfo(),
                 "x-client-status" to "0"
             )
             if (!bearer.isNullOrBlank()) h["authorization"] = "Bearer $bearer"
