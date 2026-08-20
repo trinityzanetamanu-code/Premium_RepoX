@@ -1,0 +1,674 @@
+[
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Adicinemax21.cs3",
+        "status": 1,
+        "version": 14,
+        "name": "Adicinemax21",
+        "internalName": "Adicinemax21",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 131491,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-ef12286a9786fb88e99417d36976b7c1812c1478950555892b31f6ea2dd63288"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiDrakor.cs3",
+        "status": 1,
+        "version": 8,
+        "name": "AdiDrakor",
+        "internalName": "AdiDrakor",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 130702,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-01f6f7b34bce187fae66f5a695d8700c5752958429a1f15790515597bb00b814"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiFilmSemi.cs3",
+        "status": 1,
+        "version": 6,
+        "name": "AdiFilmSemi",
+        "internalName": "AdiFilmSemi",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 240700,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://klikxxi.me/wp-content/uploads/2024/02/cropped-site-icon.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-24905d304c149c3f2edb8626ed9dadec44ecde5e7ae8b094b0270817b3aec34c"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Adimoviebox.cs3",
+        "status": 1,
+        "version": 6,
+        "name": "Adimoviebox",
+        "internalName": "Adimoviebox",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 31578,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://moviebox.ph/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-e7ac7371cc3283df530cac54a60ff815767f646612b3ba0a6ffcf2a9ee73d7ac"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiXtream.cs3",
+        "status": 1,
+        "version": 12,
+        "name": "AdiXtream",
+        "internalName": "AdiXtream",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 69923,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-ae1ecb6fbe31781de5d5a8c73ea95afaac22c8966d0bd4ba4b7b4c009318e778"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Cinemacity.cs3",
+        "status": 1,
+        "version": 17,
+        "name": "Cinemacity",
+        "internalName": "Cinemacity",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 36587,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-a40fe717e4e07171e8be370d93798af90f09d8f7adc46cdf45e380ab6aaa2dbf"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/DramaBox.cs3",
+        "status": 1,
+        "version": 34,
+        "name": "DramaBox",
+        "internalName": "DramaBox",
+        "authors": [
+            "AdiManu"
+        ],
+        "fileSize": 33551,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime",
+            "AsianDrama"
+        ],
+        "iconUrl": "https://www.dramabox.com/images/logo.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-0c41130d253bd17b631eadf6256677646b671fd5437c37ca5fae518a3bb31656"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Eporner.cs3",
+        "status": 1,
+        "version": 13,
+        "name": "Eporner",
+        "internalName": "Eporner",
+        "authors": [
+            "AdiManu"
+        ],
+        "description": "Eporner",
+        "fileSize": 15092,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://raw.githubusercontent.com/phisher98/TVVVV/main/eporner.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-a6432977bf3e16070f5ac62dafef72fb1f568cfccce08a40525242433cfbd671"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/FourKHDHub.cs3",
+        "status": 1,
+        "version": 14,
+        "name": "FourKHDHub",
+        "internalName": "FourKHDHub",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 39768,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=4khdhub.one&sz=256",
+        "apiVersion": 1,
+        "fileHash": "sha256-c48237f57374bb07545800672a32bf050bf65ab818079af978cd72abe63296cb"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/FreeReels.cs3",
+        "status": 1,
+        "version": 31,
+        "name": "FreeReels",
+        "internalName": "FreeReels",
+        "authors": [
+            "AdiManu"
+        ],
+        "fileSize": 37443,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime",
+            "AsianDrama"
+        ],
+        "iconUrl": "https://free-reels.com/free-reels.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-61cbfdda055c7c832613ff9cb528f412c03a3f7486d9923b6d9ad0a7f6d9d426"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/IdlixProvider.cs3",
+        "status": 1,
+        "version": 8,
+        "name": "IdlixProvider",
+        "internalName": "IdlixProvider",
+        "authors": [
+            "AdiManu"
+        ],
+        "fileSize": 50622,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime",
+            "AsianDrama"
+        ],
+        "iconUrl": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://idlixian.com&size=16",
+        "apiVersion": 1,
+        "fileHash": "sha256-e6a55056e4540a6472fb6e27b233dfb075c072098c669b5ea7c5317a14d1cef8"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/IndoAsia.cs3",
+        "status": 1,
+        "version": 6,
+        "name": "IndoAsia",
+        "internalName": "IndoAsia",
+        "authors": [
+            "aldry84"
+        ],
+        "description": "Jangan Coli Yaa",
+        "fileSize": 21260,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://homecookingrocks.com/wp-content/uploads/2024/10/cropped-indomax21-favicon-color-1.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-8d19d011d470ceb87ecf2014205da1b9099f8c1eb99aaa19554c762001a0d744"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/IndoTV.cs3",
+        "status": 1,
+        "version": 35,
+        "name": "IndoTV",
+        "internalName": "IndoTV",
+        "authors": [
+            "AdiManu"
+        ],
+        "fileSize": 14998,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "Live"
+        ],
+        "iconUrl": "https://www.dramabox.com/images/logo.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-53ddc936a2aeb40a9fb9e529652a9249dd1e6a97f824d520d2596586c18e9e22"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/JavHey.cs3",
+        "status": 1,
+        "version": 10,
+        "name": "JavHey",
+        "internalName": "JavHey",
+        "authors": [
+            "aldey84"
+        ],
+        "description": "Best Japan AV porn site, free forever, high speed, no lag, over 100,000 videos, daily update, no ads while playing video.",
+        "fileSize": 23028,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://missav.ws/missav/logo-square.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-290dc870da0e179bcbc7511aa6e0af9d6c7c92eb5c7b61162ccc6426ac112d17"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Javtiful.cs3",
+        "status": 1,
+        "version": 10,
+        "name": "Javtiful",
+        "internalName": "Javtiful",
+        "authors": [
+            "aldey84"
+        ],
+        "description": "Best Japan AV porn site, free forever, high speed, no lag, over 100,000 videos, daily update, no ads while playing video.",
+        "fileSize": 32962,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://javtiful.com/uploads/site/icon/2026/04/27/new_jt_icon.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-7a206cd99916b539017013d1530760a79411bf32d6c5eea790d9d5e024482d55"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/JuraganFilm.cs3",
+        "status": 1,
+        "version": 6,
+        "name": "JuraganFilm",
+        "internalName": "JuraganFilm",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 23393,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://tv44.juragan.film/wp-content/uploads/2019/05/faviconjf-60x60.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-a1d3afd0a991b5a59d50d87055c5e0f6c445634656d9d83e61516edefdb7a62b"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/KisskhProvider.cs3",
+        "status": 1,
+        "version": 17,
+        "name": "KisskhProvider",
+        "internalName": "KisskhProvider",
+        "authors": [
+            "michat88"
+        ],
+        "fileSize": 39762,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "en",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Anime",
+            "Movie"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=kisskh.co&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-18f8b63d89628aafefb37cd1fea3246ec14c40b1fb886f475c1a01c8d2cd73dd",
+        "jarFileSize": 155236,
+        "jarUrl": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/KisskhProvider.jar",
+        "jarHash": "sha256-8fa93942b824c58cef8d79c60f6375a8ef1d712f38514f578f66a54b37e538d4"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/KlikXXI.cs3",
+        "status": 1,
+        "version": 7,
+        "name": "KlikXXI",
+        "internalName": "KlikXXI",
+        "authors": [
+            "aldry84"
+        ],
+        "description": "request @ian_hiro",
+        "fileSize": 33643,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://klikxxi.me/wp-content/uploads/2024/02/cropped-site-icon-60x60.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-0bfd34d69e57338a9627bdf06b2748e596d18db36f8dfec3e5c7ed4d16163b34"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/LayarKacaProvider.cs3",
+        "status": 1,
+        "version": 15,
+        "name": "LayarKacaProvider",
+        "internalName": "LayarKacaProvider",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 102926,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://assets.lk21.party/favicons/apple-icon-144x144.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-de89bcbec288e3f675399886f20465c04121021983058de91ac998069a8705c9"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Mangoporn.cs3",
+        "status": 1,
+        "version": 4,
+        "name": "Mangoporn",
+        "internalName": "Mangoporn",
+        "authors": [
+            "AmanHnB"
+        ],
+        "description": "MangoPorn",
+        "fileSize": 19014,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "http://mangoporn.net/wp-content/uploads/2024/07/mangoporn.net_.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-f8cfa2d84d2628698109149d62428d89ca534126f7fa296100c259a653cf8864"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/MissAv.cs3",
+        "status": 1,
+        "version": 11,
+        "name": "MissAv",
+        "internalName": "MissAv",
+        "authors": [
+            "aldey84"
+        ],
+        "description": "Best Japan AV porn site, free forever, high speed, no lag, over 100,000 videos, daily update, no ads while playing video.",
+        "fileSize": 17587,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://missav.ws/missav/logo-square.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-430923302162cef220080ce3ce2cdb198acec8d86739fddfadd26a4824306892"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Moviebox.cs3",
+        "status": 1,
+        "version": 9,
+        "name": "Moviebox",
+        "internalName": "Moviebox",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 47229,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://moviebox.ph/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-15d6115d799bef42d5dc52083185bb9475e359dad276afb053cf2cbb39f426a8"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/NgeFilm.cs3",
+        "status": 1,
+        "version": 9,
+        "name": "NgeFilm",
+        "internalName": "NgeFilm",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 26001,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://new31.ngefilm.site/wp-content/uploads/2023/08/cropped-imageedit_8_4481000408-60x60.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-39d80fe5c42f8674dfde2b987892cfb8f16289c0245505b843ab412fd46a468f"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/OppaDrama.cs3",
+        "status": 1,
+        "version": 3,
+        "name": "OppaDrama",
+        "internalName": "OppaDrama",
+        "authors": [
+            "Aldry84"
+        ],
+        "description": "OppaDrama \u2014 Streaming Drama Korea, Movie and TV Series",
+        "fileSize": 84183,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://oppa.biz&size=128",
+        "apiVersion": 1,
+        "fileHash": "sha256-334ad2888ffdb6ffa4d4578e10e726d3db5a3f82d8cbec516de0998951484754"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/PODJAV.cs3",
+        "status": 1,
+        "version": 9,
+        "name": "PODJAV",
+        "internalName": "PODJAV",
+        "authors": [
+            "aldey84"
+        ],
+        "description": "Best Japan AV porn site, free forever, high speed, no lag, over 100,000 videos, daily update, no ads while playing video.",
+        "fileSize": 26588,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://podjav.tv/wp-content/uploads/2025/02/favicon-podjav.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-9f5d3ceb682aa6d9a1df2807a4d21052f04d0b1cfd3b113ca66b3dc3cafe05b7"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Pornhub.cs3",
+        "status": 1,
+        "version": 10,
+        "name": "Pornhub",
+        "internalName": "Pornhub",
+        "authors": [
+            "aldey84"
+        ],
+        "description": "Awas Jangan Coli Kawan",
+        "fileSize": 18227,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://www.pornhub.com/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-bb31b86ab7a3dc80663bc83393f4b0150b5def2e0a8bd6f596743e05c9fa9c61"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Rebahin.cs3",
+        "status": 1,
+        "version": 7,
+        "name": "Rebahin",
+        "internalName": "Rebahin",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 23988,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://rebahinxxi3.autos/wp-content/uploads/2024/03/cropped-rebahinicon-192x192.jpg",
+        "apiVersion": 1,
+        "fileHash": "sha256-7569ac21027b3f3505b05821af136d667948f9aa49ca84081bb0759bcc83bb5d"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/ReelShort.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "ReelShort",
+        "internalName": "ReelShort",
+        "authors": [
+            "AdiManu"
+        ],
+        "fileSize": 26314,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime",
+            "AsianDrama"
+        ],
+        "iconUrl": "https://v-mps.crazymaplestudios.com/images/211d3420-d721-11f0-84ad-6b5693b490dc.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-9ecb4bdb73b5d154ffdd56d800d6f349dc2ba6edc4a39e22728997eb7e48d4d8"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/RiveStream.cs3",
+        "status": 1,
+        "version": 8,
+        "name": "RiveStream",
+        "internalName": "RiveStream",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 75765,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://www.rivestream.app/icons/icon-192x192.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-2985604bb2ef8bdf0483650096a32df2acb509e0bad64e1d05478d3adebb3a60"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Sflix.cs3",
+        "status": 1,
+        "version": 3,
+        "name": "Sflix",
+        "internalName": "Sflix",
+        "authors": [
+            "AdiManu"
+        ],
+        "fileSize": 35559,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime",
+            "AsianDrama"
+        ],
+        "iconUrl": "https://sflix.film/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-ad07f81e5efb3b9aca06c60c16d10635e7ffdf6867c0356527b7cdadf1b43a40"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/streamzy.cs3",
+        "status": 1,
+        "version": 18,
+        "name": "streamzy",
+        "internalName": "streamzy",
+        "authors": [
+            "aldry84"
+        ],
+        "fileSize": 87313,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "AsianDrama",
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-b68701f538233547f9fe6f3d3d88af3f27672f8fabd1908b3878b2c7c3ca05c4"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Xhamster.cs3",
+        "status": 1,
+        "version": 9,
+        "name": "Xhamster",
+        "internalName": "Xhamster",
+        "authors": [
+            "aldey84"
+        ],
+        "description": "Awas Jangan Coli Kawan",
+        "fileSize": 16038,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "en",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "iconUrl": "https://static.xhpingcdn.com/xh-mobile/images/favicon/favicon-v2-512x512.png?v=1",
+        "apiVersion": 1,
+        "fileHash": "sha256-4663e37d407676d4a0e29ec6409bf72abac5f5327348ffb95ce7de2471d66cc4"
+    }
+]
