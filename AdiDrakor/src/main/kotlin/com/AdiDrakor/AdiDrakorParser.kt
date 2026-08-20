@@ -2,94 +2,117 @@ package com.AdiDrakor
 
 import com.fasterxml.jackson.annotation.JsonProperty
 
-// ================== TMDB DATA CLASSES ==================
-data class TmdbResponse(@JsonProperty("results") val results: List<TmdbMovie>)
-data class TmdbMovie(@JsonProperty("id") val id: Int, @JsonProperty("title") val title: String?, @JsonProperty("name") val name: String?, @JsonProperty("poster_path") val posterPath: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("media_type") val mediaType: String?)
-data class TmdbGenre(@JsonProperty("name") val name: String)
-data class TmdbVideoResult(@JsonProperty("results") val results: List<TmdbVideo>)
-data class TmdbVideo(@JsonProperty("type") val type: String, @JsonProperty("key") val key: String, @JsonProperty("site") val site: String)
-data class TmdbCredits(@JsonProperty("cast") val cast: List<TmdbCast>)
-data class TmdbCast(@JsonProperty("name") val name: String, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?)
-data class TmdbRecommendations(@JsonProperty("results") val results: List<TmdbMovie>)
-data class TmdbDetailResponse(@JsonProperty("title") val title: String?, @JsonProperty("poster_path") val posterPath: String?, @JsonProperty("backdrop_path") val backdropPath: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("release_date") val releaseDate: String?, @JsonProperty("runtime") val runtime: Int?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("genres") val genres: List<TmdbGenre>?, @JsonProperty("videos") val videos: TmdbVideoResult?, @JsonProperty("credits") val credits: TmdbCredits?, @JsonProperty("recommendations") val recommendations: TmdbRecommendations?, @JsonProperty("original_title") val originalTitle: String? = null)
-data class TmdbTvDetailResponse(@JsonProperty("name") val name: String?, @JsonProperty("poster_path") val posterPath: String?, @JsonProperty("backdrop_path") val backdropPath: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("first_air_date") val firstAirDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("seasons") val seasons: List<TmdbSeason>?, @JsonProperty("genres") val genres: List<TmdbGenre>?, @JsonProperty("videos") val videos: TmdbVideoResult?, @JsonProperty("credits") val credits: TmdbCredits?, @JsonProperty("recommendations") val recommendations: TmdbRecommendations?, @JsonProperty("original_name") val originalName: String? = null)
-data class TmdbSeason(@JsonProperty("season_number") val seasonNumber: Int, @JsonProperty("episode_count") val episodeCount: Int)
-data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisodeDetail>)
-data class TmdbEpisodeDetail(@JsonProperty("episode_number") val episodeNumber: Int, @JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("still_path") val stillPath: String?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?)
+// ================== MOVIEBOX DATA CLASSES ==================
+// Menggantikan seluruh data class Adimoviebox (V1) dan Adimoviebox2 (V2).
+// Semua di-prefix "Moviebox" supaya tidak bentrok dengan nama generik
+// (StreamItem / PlayData / CoverItem) milik MovieBoxProvider asli.
+//
+// Endpoint yang dipakai sebagai source playback:
+//   POST /wefeed-mobile-bff/subject-api/search/v2            -> data.results[].subjects[]
+//   GET  /wefeed-mobile-bff/subject-api/season-info          -> data.seasons[]
+//   GET  /wefeed-mobile-bff/subject-api/play-info            -> data.streams[]
+//   GET  /wefeed-mobile-bff/subject-api/get-stream-captions  -> data.extCaptions[]
 
-// ================== ADIMOVIEBOX (OLD/V1) DATA CLASSES ==================
-data class AdimovieboxResponse(
-    @JsonProperty("data") val data: AdimovieboxData? = null,
-)
-data class AdimovieboxData(
-    @JsonProperty("items") val items: ArrayList<AdimovieboxItem>? = arrayListOf(),
-    @JsonProperty("streams") val streams: ArrayList<AdimovieboxStreamItem>? = arrayListOf(),
-    @JsonProperty("captions") val captions: ArrayList<AdimovieboxCaptionItem>? = arrayListOf(),
-)
-data class AdimovieboxItem(
-    @JsonProperty("subjectId") val subjectId: String? = null,
-    @JsonProperty("title") val title: String? = null,
-    @JsonProperty("releaseDate") val releaseDate: String? = null,
-    @JsonProperty("detailPath") val detailPath: String? = null,
-)
-data class AdimovieboxStreamItem(
-    @JsonProperty("id") val id: String? = null,
-    @JsonProperty("format") val format: String? = null,
-    @JsonProperty("url") val url: String? = null,
-    @JsonProperty("resolutions") val resolutions: String? = null,
-)
-data class AdimovieboxCaptionItem(
-    @JsonProperty("lanName") val lanName: String? = null,
-    @JsonProperty("url") val url: String? = null,
+data class MovieboxSearchResponse(
+    @param:JsonProperty("code") val code: Int? = null,
+    @param:JsonProperty("data") val data: MovieboxSearchData? = null,
 )
 
-// ================== ADIMOVIEBOX 2 (NEW) DATA CLASSES ==================
-data class Adimoviebox2SearchResponse(
-    @JsonProperty("data") val data: Adimoviebox2SearchData? = null
-)
-data class Adimoviebox2SearchData(
-    @JsonProperty("results") val results: ArrayList<Adimoviebox2SearchResult>? = arrayListOf()
-)
-data class Adimoviebox2SearchResult(
-    @JsonProperty("subjects") val subjects: ArrayList<Adimoviebox2Subject>? = arrayListOf()
-)
-data class Adimoviebox2Subject(
-    @JsonProperty("subjectId") val subjectId: String? = null,
-    @JsonProperty("title") val title: String? = null,
-    @JsonProperty("releaseDate") val releaseDate: String? = null,
-    @JsonProperty("subjectType") val subjectType: Int? = null
-)
-data class Adimoviebox2PlayResponse(
-    @JsonProperty("data") val data: Adimoviebox2PlayData? = null
-)
-data class Adimoviebox2PlayData(
-    @JsonProperty("streams") val streams: ArrayList<Adimoviebox2Stream>? = arrayListOf()
-)
-data class Adimoviebox2Stream(
-    @JsonProperty("id") val id: String? = null,
-    @JsonProperty("url") val url: String? = null,
-    @JsonProperty("format") val format: String? = null,
-    @JsonProperty("resolutions") val resolutions: String? = null,
-    @JsonProperty("signCookie") val signCookie: String? = null
-)
-data class Adimoviebox2SubtitleResponse(
-    @JsonProperty("data") val data: Adimoviebox2SubtitleData? = null
-)
-data class Adimoviebox2SubtitleData(
-    @JsonProperty("extCaptions") val extCaptions: ArrayList<Adimoviebox2Caption>? = arrayListOf()
-)
-data class Adimoviebox2Caption(
-    @JsonProperty("url") val url: String? = null,
-    @JsonProperty("language") val language: String? = null,
-    @JsonProperty("lanName") val lanName: String? = null,
-    @JsonProperty("lan") val lan: String? = null
+data class MovieboxSearchData(
+    @param:JsonProperty("results") val results: List<MovieboxSearchResult>? = emptyList(),
 )
 
-// ================== VIDLINK DATA CLASSES (dari Adicinemax21) ==================
-data class VidlinkSources(
-    @JsonProperty("stream") val stream: VidlinkStream? = null,
-) {
-    data class VidlinkStream(
-        @JsonProperty("playlist") val playlist: String? = null,
-    )
-}
+data class MovieboxSearchResult(
+    @param:JsonProperty("subjects") val subjects: List<MovieboxSubject>? = emptyList(),
+)
+
+data class MovieboxSubject(
+    @param:JsonProperty("subjectId") val subjectId: String? = null,
+    @param:JsonProperty("title") val title: String? = null,
+    @param:JsonProperty("releaseDate") val releaseDate: String? = null,
+    // 1 = Movie, 2 = TV. Nilai lain (mis. 9 = UGC) tidak bisa diputar via play-info.
+    @param:JsonProperty("subjectType") val subjectType: Int? = null,
+)
+
+// [FIX-4] season-info dipakai untuk mengetahui indexing season milik MovieBox
+// (endpoint & struktur mengikuti MovieBoxProvider: data.seasons[] { se, maxEp }).
+data class MovieboxSeasonInfoResponse(
+    @param:JsonProperty("code") val code: Int? = null,
+    @param:JsonProperty("data") val data: MovieboxSeasonInfoData? = null,
+)
+
+data class MovieboxSeasonInfoData(
+    @param:JsonProperty("seasons") val seasons: List<MovieboxSeasonItem>? = emptyList(),
+)
+
+data class MovieboxSeasonItem(
+    @param:JsonProperty("se") val se: Int? = null,
+    @param:JsonProperty("maxEp") val maxEp: Int? = null,
+)
+
+data class MovieboxPlayInfoResponse(
+    @param:JsonProperty("code") val code: Int? = null,
+    @param:JsonProperty("message") val message: String? = null,
+    @param:JsonProperty("data") val data: MovieboxPlayData? = null,
+)
+
+data class MovieboxPlayData(
+    @param:JsonProperty("streams") val streams: List<MovieboxStreamItem>? = emptyList(),
+)
+
+data class MovieboxStreamItem(
+    @param:JsonProperty("id") val id: String? = null,
+    @param:JsonProperty("format") val format: String? = null,
+    @param:JsonProperty("url") val url: String? = null,
+    @param:JsonProperty("resolutions") val resolutions: String? = null,
+    @param:JsonProperty("codecName") val codecName: String? = null,
+    // Wajib ada, dikirim balik sebagai header Cookie lewat getVideoInterceptor.
+    @param:JsonProperty("signCookie") val signCookie: String? = null,
+)
+
+data class MovieboxCaptionResponse(
+    @param:JsonProperty("data") val data: MovieboxCaptionData? = null,
+)
+
+data class MovieboxCaptionData(
+    @param:JsonProperty("extCaptions") val extCaptions: List<MovieboxCaption>? = emptyList(),
+)
+
+data class MovieboxCaption(
+    @param:JsonProperty("url") val url: String? = null,
+    @param:JsonProperty("lan") val lan: String? = null,
+    @param:JsonProperty("lanName") val lanName: String? = null,
+    @param:JsonProperty("language") val language: String? = null,
+)
+
+// ================== KISSKH DATA CLASSES ==================
+// Catatan: AdiDrakorExtractor punya versi privat (nested) dari class ini,
+// jadi yang di bawah ini secara efektif tidak terpakai. Sengaja TIDAK dihapus
+// karena berada di luar scope migrasi Adimoviebox.
+data class KisskhMedia(
+    @param:JsonProperty("id") val id: Int?,
+    @param:JsonProperty("title") val title: String?
+)
+
+data class KisskhDetail(
+    @param:JsonProperty("episodes") val episodes: List<KisskhEpisode>?
+)
+
+data class KisskhEpisode(
+    @param:JsonProperty("id") val id: Int?,
+    @param:JsonProperty("number") val number: Double?
+)
+
+data class KisskhKey(
+    @param:JsonProperty("key") val key: String?
+)
+
+data class KisskhSources(
+    @param:JsonProperty("Video") val video: String?,
+    @param:JsonProperty("ThirdParty") val thirdParty: String?
+)
+
+data class KisskhSubtitle(
+    @param:JsonProperty("src") val src: String?,
+    @param:JsonProperty("label") val label: String?
+)
