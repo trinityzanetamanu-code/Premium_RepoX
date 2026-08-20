@@ -24,18 +24,8 @@ class MovieBoxProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override var hasMainPage = true
 
-    override val mainPage = mainPageOf(
-        "872031290915189720" to "Trending",
-        "8821254238245470240" to "Film",
-        "6528093688173053896" to "Indo Film",
-        "4380734070238626200" to "K-Drama",
-        "5283462032510044280" to "Indo Drama",
-        "8617025562613270856" to "Anime",
-        "1469286917119311888" to "Hollywood",
-        "8624142774394406504" to "C-Drama",
-        "5848753831881965888" to "Horror",
-        "1164329479448281992" to "Thai-Drama"
-    )
+    // Disusun dari daftar kategori yang server kirim (lihat mainPageEntries).
+    override val mainPage = mainPageOf(*mainPageEntries())
 
     companion object {
         private const val TAG = "MovieBox"
@@ -55,6 +45,77 @@ class MovieBoxProvider : MainAPI() {
             "\"device_id\":\"${deviceId()}\",\"install_store\":\"ps\"," +
             "\"system_language\":\"en\",\"net\":\"NETWORK_WIFI\",\"region\":\"US\"," +
             "\"timezone\":\"Asia/Calcutta\",\"sp_code\":\"\"}"
+
+        // ---------------------------------------------------------------
+        // KATEGORI HOME  (self-healing)
+        //
+        // Setiap respons tab/ranking-list membawa data.categoryList lengkap
+        // (name + type). Daftar itu disimpan, lalu dipakai menyusun mainPage
+        // pada pemuatan berikutnya. Daftar di bawah hanya seed untuk
+        // instalasi baru.
+        //
+        // Server membalas categoryType yang tidak dikenal dengan feed default
+        // (HTTP 200, tanpa error), sehingga kategori basi tampil sebagai
+        // daftar film yang sama berulang-ulang. Itu yang diperbaiki di sini.
+        //
+        // Parameter request TIDAK diubah: tabId=0, perPage=10, tanpa
+        // rankingListId -- terbukti identik dengan default APK (Ltl/d$a;->a).
+        // ---------------------------------------------------------------
+        private const val CAT_KEY = "categorylist"
+
+        private val SEED_CATEGORIES = listOf(
+            "4809349160627587984" to "Semua",
+            "4380734070238626200" to "K-Drama",
+            "5283462032510044280" to "Indo Drama",
+            "8617025562613270856" to "Anime",
+            "5307082080063488480" to "Barat",
+            "8624142774394406504" to "C-Drama",
+            "1164329479448281992" to "Thai-Drama",
+            "5720220657917522824" to "Reality"
+        )
+
+        @Volatile private var categories: List<Pair<String, String>> = SEED_CATEGORIES
+
+        private fun prefs() =
+            try { appContext?.getSharedPreferences(ID_PREFS, Context.MODE_PRIVATE) }
+            catch (e: Exception) { null }
+
+        /** Dipakai oleh mainPage. Sudah terisi karena attachContext() dipanggil duluan. */
+        private fun mainPageEntries(): Array<Pair<String, String>> = categories.toTypedArray()
+
+        private fun loadCategories() {
+            val parsed = prefs()?.getString(CAT_KEY, null)
+                ?.split("\n")
+                ?.mapNotNull { line ->
+                    val p = line.split("\t")
+                    if (p.size == 2 && p[0].isNotBlank() && p[1].isNotBlank()) p[0] to p[1] else null
+                }
+                ?.takeIf { it.isNotEmpty() }
+            if (parsed != null) categories = parsed
+            Log.d(TAG, "[CATEGORY] dimuat ${categories.size} kategori " +
+                    "(${if (parsed != null) "tersimpan" else "seed"}): " +
+                    categories.joinToString(", ") { it.second })
+        }
+
+        /** Dipanggil dari getMainPage. Menyimpan hanya bila daftar server berubah. */
+        private fun rememberCategories(fresh: List<CategoryItem>) {
+            val list = fresh.mapNotNull { c ->
+                val t = c.type
+                val n = c.name
+                if (t.isNullOrBlank() || n.isNullOrBlank()) null else t to n
+            }
+            if (list.isEmpty() || list == categories) return
+            categories = list
+            try {
+                prefs()?.edit()?.putString(
+                    CAT_KEY, list.joinToString("\n") { "${it.first}\t${it.second}" }
+                )?.apply()
+                Log.d(TAG, "[CATEGORY] daftar server berubah -> disimpan ${list.size}: " +
+                        list.joinToString(", ") { it.second })
+            } catch (e: Exception) {
+                Log.e(TAG, "[CATEGORY] gagal menyimpan: ${e.message}")
+            }
+        }
 
         // ---------------------------------------------------------------
         // IDENTITY  (meniru Lmh/b;->h pada APK: UUID -> MD5 -> persist)
@@ -78,6 +139,7 @@ class MovieBoxProvider : MainAPI() {
         /** Dipanggil dari MovieboxPlugin.load() sebelum provider didaftarkan. */
         fun attachContext(context: Context) {
             appContext = context.applicationContext
+            loadCategories()
             val id = deviceId()
             // Logging sementara: verifikasi stabil setelah restart, lalu boleh dihapus.
             Log.d(TAG, "[IDENTITY] device_id=$id len=${id.length} " +
@@ -329,6 +391,7 @@ class MovieBoxProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse? {
+        Log.d(TAG, "[CATEGORY] name=${request.name} categoryType=${request.data} page=$page")
         val bearerToken = getBearerToken() ?: return null
         val ts = System.currentTimeMillis().toString()
         val path = "/wefeed-mobile-bff/tab/ranking-list"
@@ -341,6 +404,9 @@ class MovieBoxProvider : MainAPI() {
 
         val jsonRes = response.parsedSafe<RankingResponse>() ?: return null
         val dataObj = jsonRes.data ?: return null
+
+        // Daftar kategori terbaru ikut menumpang di setiap respons. Nol request tambahan.
+        dataObj.categoryList?.let { rememberCategories(it) }
 
         val homeItems = dataObj.subjects?.mapNotNull { item ->
             val subjectId = item.subjectId ?: return@mapNotNull null
@@ -358,6 +424,11 @@ class MovieBoxProvider : MainAPI() {
                 }
             }
         } ?: emptyList()
+
+        val first = dataObj.subjects?.firstOrNull()
+        Log.d(TAG, "[CATEGORY] name=${request.name} HTTP=${response.code} " +
+                "subjects=${homeItems.size} firstSubjectId=${first?.subjectId} " +
+                "firstTitle=${first?.title}")
 
         return newHomePageResponse(request.name, homeItems)
     }
