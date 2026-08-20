@@ -176,7 +176,7 @@ object AdiDrakorIdlix {
             val contentId: String
 
             if (wantSeries) {
-                val seasonNum = season ?: return
+                val seasonNum = season
                 val epNum = episode ?: return
                 val seasonUrl = "$MAIN_URL/api/series/$slug/season/$seasonNum"
                 val parsedSeason = runCatching {
