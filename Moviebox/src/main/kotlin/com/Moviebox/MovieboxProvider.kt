@@ -11,8 +11,10 @@ import org.json.JSONObject
 import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import android.content.Context
 import android.util.Base64
 import android.util.Log
+import java.util.UUID
 import java.net.URLEncoder
 import java.net.URLDecoder
 
@@ -38,7 +40,82 @@ class MovieBoxProvider : MainAPI() {
     companion object {
         private const val TAG = "MovieBox"
         private const val CS_USER_AGENT = "com.community.oneroom/50020088 (Linux; U; Android 13; en_US; Samsung; Build/TQ3A.230901.001)"
-        private const val CLIENT_INFO = """{"package_name":"com.community.oneroom","version_name":"3.0.13.0325.03","version_code":50020088,"os":"android","os_version":"13","device_id":"71e0f7746936dc98","install_store":"ps","system_language":"en","net":"NETWORK_WIFI","region":"US","timezone":"Asia/Calcutta","sp_code":""}"""
+        /**
+         * x-client-info dirakit saat request, bukan konstanta, karena device_id
+         * berasal dari identity persisten per-instalasi.
+         *
+         * Isi field lain TIDAK berubah sedikit pun dari versi sebelumnya.
+         * x-client-info tidak ikut ditandatangani (buildCanonical hanya memakai
+         * method/accept/content-type/panjang body/ts/md5 body/path), jadi
+         * perubahan ini tidak dapat memengaruhi signature.
+         */
+        private fun clientInfo(): String =
+            "{\"package_name\":\"com.community.oneroom\",\"version_name\":\"3.0.13.0325.03\"," +
+            "\"version_code\":50020088,\"os\":\"android\",\"os_version\":\"13\"," +
+            "\"device_id\":\"${deviceId()}\",\"install_store\":\"ps\"," +
+            "\"system_language\":\"en\",\"net\":\"NETWORK_WIFI\",\"region\":\"US\"," +
+            "\"timezone\":\"Asia/Calcutta\",\"sp_code\":\"\"}"
+
+        // ---------------------------------------------------------------
+        // IDENTITY  (meniru Lmh/b;->h pada APK: UUID -> MD5 -> persist)
+        //
+        //   APK : MMKV("vshow")["apkdeviceid"]      <- Lph/a$a;->d(UUID)
+        //   sini: SharedPreferences("moviebox_identity")["apkdeviceid"]
+        //
+        // md5() yang sudah ada di companion ini identik dengan Lph/a$a;->d:
+        // MD5 hex huruf kecil 32 karakter. Cabang Android-ID pada APK sengaja
+        // TIDAK ditiru; jalur UUID adalah cabang yang sama yang dipakai APK
+        // pada Android modern, dan tidak menyentuh identifier perangkat.
+        // ---------------------------------------------------------------
+        private const val ID_PREFS = "moviebox_identity"
+        private const val ID_KEY = "apkdeviceid"
+        private val ID_FORMAT = Regex("^[0-9a-f]{32}$")
+
+        @Volatile private var appContext: Context? = null
+        @Volatile private var cachedDeviceId: String? = null
+        @Volatile private var persisted = false
+
+        /** Dipanggil dari MovieboxPlugin.load() sebelum provider didaftarkan. */
+        fun attachContext(context: Context) {
+            appContext = context.applicationContext
+            val id = deviceId()
+            // Logging sementara: verifikasi stabil setelah restart, lalu boleh dihapus.
+            Log.d(TAG, "[IDENTITY] device_id=$id len=${id.length} " +
+                    "valid=${ID_FORMAT.matches(id)} persisted=$persisted")
+        }
+
+        /**
+         * Storage adalah sumber kebenaran. Nilai hanya dibuat sekali, lalu
+         * dipakai selamanya. Nilai in-memory hanya dipakai bila storage sedang
+         * tidak tersedia, dan akan dipersist pada kesempatan pertama sehingga
+         * identity tidak berganti antar-restart.
+         */
+        private fun deviceId(): String {
+            val cached = cachedDeviceId
+            if (cached != null && persisted) return cached
+
+            val ctx = appContext
+            if (ctx != null) {
+                try {
+                    val sp = ctx.getSharedPreferences(ID_PREFS, Context.MODE_PRIVATE)
+                    val existing = sp.getString(ID_KEY, null)
+                    if (!existing.isNullOrBlank() && ID_FORMAT.matches(existing)) {
+                        cachedDeviceId = existing
+                        persisted = true
+                        return existing
+                    }
+                    val fresh = cached ?: md5(UUID.randomUUID().toString())
+                    sp.edit().putString(ID_KEY, fresh).apply()
+                    cachedDeviceId = fresh
+                    persisted = true
+                    return fresh
+                } catch (e: Exception) {
+                    Log.e(TAG, "[IDENTITY] storage tidak tersedia: ${e.message}")
+                }
+            }
+
+            return cached ?: md5(UUID.randomUUID().toString()).also { cachedDeviceId = it }
+        }
 
         private val SECRET_BYTES: ByteArray by lazy {
             val step1 = String(Base64.decode("NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw==", Base64.DEFAULT), Charsets.UTF_8)
@@ -106,7 +183,7 @@ class MovieBoxProvider : MainAPI() {
             "content-type" to "application/json",
             "x-client-token" to generateGuestToken(ts),
             "x-tr-signature" to signature,
-            "x-client-info" to CLIENT_INFO,
+            "x-client-info" to clientInfo(),
             "x-client-status" to "0"
         )
         if (!bearer.isNullOrBlank()) h["authorization"] = "Bearer $bearer"
