@@ -76,12 +76,31 @@ class MovieBoxProvider : MainAPI() {
 
         @Volatile private var categories: List<Pair<String, String>> = SEED_CATEGORIES
 
+        // ---------------------------------------------------------------
+        // BARIS FILTER  (subject-api/list, bukan tab/ranking-list)
+        //
+        // "Horror" sudah tidak ada di categoryList server, jadi tidak mungkin
+        // didapat lewat ranking-list. Layar Filter APK memakai endpoint lain:
+        //
+        //   GET  subject-api/filter-items  tl.c->b   (daftar opsi filter)
+        //   POST subject-api/list          tl.c->a   @Query(host) @Body()
+        //
+        // Nilai filter berupa string apa adanya dari filter-items
+        // ("Horror", "Indonesia"), bukan id.
+        // ---------------------------------------------------------------
+        private const val FILTER_PREFIX = "filter:"
+
+        private val EXTRA_ROWS = listOf(
+            FILTER_PREFIX + "subjectType=1&genre=Horror&country=Indonesia" to "Horror Indonesia"
+        )
+
         private fun prefs() =
             try { appContext?.getSharedPreferences(ID_PREFS, Context.MODE_PRIVATE) }
             catch (e: Exception) { null }
 
         /** Dipakai oleh mainPage. Sudah terisi karena attachContext() dipanggil duluan. */
-        private fun mainPageEntries(): Array<Pair<String, String>> = categories.toTypedArray()
+        private fun mainPageEntries(): Array<Pair<String, String>> =
+            (categories + EXTRA_ROWS).toTypedArray()
 
         private fun loadCategories() {
             val parsed = prefs()?.getString(CAT_KEY, null)
@@ -391,6 +410,8 @@ class MovieBoxProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse? {
+        if (request.data.startsWith(FILTER_PREFIX)) return filterPage(page, request)
+
         Log.d(TAG, "[CATEGORY] name=${request.name} categoryType=${request.data} page=$page")
         val bearerToken = getBearerToken() ?: return null
         val ts = System.currentTimeMillis().toString()
@@ -431,6 +452,52 @@ class MovieBoxProvider : MainAPI() {
                 "firstTitle=${first?.title}")
 
         return newHomePageResponse(request.name, homeItems)
+    }
+
+    /**
+     * Baris home yang bersumber dari layar Filter APK, bukan dari kategori.
+     *
+     * request.data berformat "filter:k=v&k=v"; pasangan tersebut dikirim apa
+     * adanya sebagai field body POST subject-api/list, ditambah page/perPage.
+     * Nama field dan nilainya terbukti dari runtime: body datar menghasilkan
+     * 10/10 item bergenre Horror dan bernegara Indonesia, sedangkan body tanpa
+     * filter mengembalikan katalog campur termasuk subjectType 6.
+     */
+    private suspend fun filterPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        val spec = request.data.removePrefix(FILTER_PREFIX)
+        Log.d(TAG, "[CATEGORY] name=${request.name} filter=$spec page=$page")
+
+        val bearerToken = getBearerToken() ?: return null
+
+        val body = JSONObject().put("page", page).put("perPage", 10)
+        spec.split("&").forEach { pair ->
+            val kv = pair.split("=", limit = 2)
+            if (kv.size == 2 && kv[0].isNotBlank()) {
+                val v = kv[1]
+                if (v.toIntOrNull() != null) body.put(kv[0], v.toInt()) else body.put(kv[0], v)
+            }
+        }
+
+        val raw = postSigned("/wefeed-mobile-bff/subject-api/list", body.toString(), bearerToken)
+            ?: return null
+
+        val items = try {
+            JSONObject(raw).optJSONObject("data")?.optJSONArray("items")
+        } catch (e: Exception) {
+            Log.e(TAG, "[CATEGORY] parse filter gagal: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+
+        val out = mutableListOf<SearchResponse>()
+        for (i in 0 until (items?.length() ?: 0)) {
+            val obj = items!!.optJSONObject(i) ?: continue
+            subjectToSearchResponse(obj)?.let { out.add(it) }
+        }
+
+        Log.d(TAG, "[CATEGORY] name=${request.name} items=${items?.length() ?: 0} mapped=${out.size} " +
+                "firstTitle=${items?.optJSONObject(0)?.optString("title")}")
+
+        return newHomePageResponse(request.name, out)
     }
 
     // 2. SEARCH
