@@ -11,10 +11,10 @@ class FourKHDHub : MainAPI() {
     override var lang = "en"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
-    // [VERIFIED] TMDB API key extracted from DEX for metadata enrichment.
+    // [VERIFIED RECONSTRUCTION] TMDB API key diekstrak dari bukti string DEX
     private val tmdbApiKey = "1865f43a0549ca50d341dd9ab8b29f49"
 
-    // [VERIFIED RECONSTRUCTION] Categories found strictly hardcoded in DEX strings.
+    // [VERIFIED RECONSTRUCTION] Hardcoded Categories dari DEX string mappings
     override val mainPage = mainPageOf(
         "$mainUrl/category/movies/page/" to "Movies",
         "$mainUrl/category/hindi-movies/page/" to "Hindi Movies",
@@ -29,7 +29,7 @@ class FourKHDHub : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // Optional dynamic mainUrl update
+        // [RECONSTRUCTED] Mengambil domain dinamis jika tersedia di cache Provider
         FourKHDHubProvider.getDomains()?.n4khdhub?.let { mainUrl = it }
 
         val document = app.get(request.data + page).document
@@ -46,20 +46,18 @@ class FourKHDHub : MainAPI() {
         }
     }
 
-    // [VERIFIED RECONSTRUCTION] ?s= verified via Termux.
+    // [VERIFIED RECONSTRUCTION] Menggunakan parameter pencarian bawaan website
     override suspend fun search(query: String): List<SearchResponse> {
         val document = app.get("$mainUrl/?s=$query").document
         return document.select(".movie-card").mapNotNull { it.toSearchResult() }
     }
 
-    // [RECONSTRUCTED FROM VERIFIED BEHAVIOR]
-    // Original DEX uses TMDB/Simkl intensively for Cast, Description, Score, Season, Episodes.
+    // [RECONSTRUCTED FROM VERIFIED BEHAVIOR] TMDB Integration
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url).document
         val rawTitle = document.selectFirst("title")?.text()?.substringBefore("-")?.trim() ?: ""
         val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
         
-        // Enrich Metadata using TMDB (Verified key from DEX)
         var plot = document.selectFirst("meta[name=description]")?.attr("content")
         var score: Score? = null
         var year: Int? = null
@@ -87,7 +85,6 @@ class FourKHDHub : MainAPI() {
         if (isSeries) {
             val episodes = mutableListOf<Episode>()
             
-            // [RECONSTRUCTED] Fetch episodes via TMDB since HTML series page lacks episode-items
             if (tmdbId != null) {
                 try {
                     val tvApi = "https://api.themoviedb.org/3/tv/$tmdbId?api_key=$tmdbApiKey&append_to_response=seasons"
@@ -99,7 +96,7 @@ class FourKHDHub : MainAPI() {
                         val seasonDetails = app.get(seasonApi).parsedSafe<TmdbSeason>()
                         
                         seasonDetails?.episodes?.forEach { ep ->
-                            episodes.add(newEpisode(data = url) { // Pass main URL to loadLinks
+                            episodes.add(newEpisode(data = url) {
                                 this.name = ep.name
                                 this.season = seasonNum
                                 this.episode = ep.episode_number
@@ -113,7 +110,7 @@ class FourKHDHub : MainAPI() {
                 }
             }
 
-            // Fallback if TMDB fails but we know it's a series
+            // Fallback dasar jika data TMDB gagal diambil
             if (episodes.isEmpty()) {
                 episodes.add(newEpisode(data = url) {
                     this.name = rawTitle
@@ -127,7 +124,8 @@ class FourKHDHub : MainAPI() {
                 this.plot = plot
                 this.year = year
                 this.score = score
-                tmdbId?.toString()?.let { this.addTMDbId(it) }
+                // [FIXED] API Contract match
+                tmdbId?.toString()?.let { this.syncData["tmdb"] = it }
             }
         } else {
             return newMovieLoadResponse(rawTitle, url, TvType.Movie, url) {
@@ -135,12 +133,12 @@ class FourKHDHub : MainAPI() {
                 this.plot = plot
                 this.year = year
                 this.score = score
-                tmdbId?.toString()?.let { this.addTMDbId(it) }
+                // [FIXED] API Contract match
+                tmdbId?.toString()?.let { this.syncData["tmdb"] = it }
             }
         }
     }
 
-    // [VERIFIED] Dispatch URL to registered Extractors
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -149,7 +147,6 @@ class FourKHDHub : MainAPI() {
     ): Boolean {
         val document = app.get(data).document
         
-        // Find iframes or direct links pointing to known extractors
         document.select("a[href], iframe[src]").forEach { element ->
             val link = element.attr("href").ifEmpty { element.attr("src") }
             
@@ -160,7 +157,7 @@ class FourKHDHub : MainAPI() {
         return true
     }
 
-    // TMDB DTOs for Verified API Decoding
+    // TMDB DTOs
     data class TmdbSearch(val results: List<TmdbResult>?)
     data class TmdbResult(val id: Int?, val media_type: String?, val overview: String?, val vote_average: Double?, val release_date: String?, val first_air_date: String?)
     data class TmdbTv(val seasons: List<TmdbSeason>?)
