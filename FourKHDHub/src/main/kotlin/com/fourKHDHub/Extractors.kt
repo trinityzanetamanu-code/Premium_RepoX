@@ -9,11 +9,6 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 
-// ============================================================================
-// [RECONSTRUCTED FROM VERIFIED BEHAVIOR]
-// Replaces 1380 unknown JADX instructions with verified Termux Network Chain: 
-// HubCloud -> Gamerxyt -> R2 / Googleusercontent / Pixeldrain
-// ============================================================================
 class HubCloud : ExtractorApi() {
     override val name = "HubCloud"
     override val mainUrl = "https://hubcloud.cx"
@@ -26,25 +21,18 @@ class HubCloud : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // 1. Fetch HubCloud
             val hubResponse = app.get(url, referer = referer).text
-            
-            // 2. Find Gamerxyt bypass URL
             val gamerxytRegex = Regex("""href=["'](https://gamerxyt\.com/hubcloud\.php[^"']+)["']""")
             val gamerxytUrl = gamerxytRegex.find(hubResponse)?.groupValues?.get(1)?.replace("&amp;", "&")
             
             if (gamerxytUrl != null) {
-                // 3. Fetch Gamerxyt
                 val gxResponse = app.get(gamerxytUrl, referer = url).text
-                
-                // 4. Extract final media/hoster URLs
                 val finalRegex = Regex("""<a[^>]+href=["'](https?://[^"']+)["'][^>]*>""")
                 val links = finalRegex.findAll(gxResponse).map { it.groupValues[1] }
 
                 links.forEach { finalUrl ->
                     when {
                         finalUrl.contains("r2.cloudflarestorage.com") -> {
-                            // [FIXED] API Contract Match: newExtractorLink builder
                             callback.invoke(
                                 newExtractorLink(
                                     source = "4K HDHUB [R2 FSL]",
@@ -58,7 +46,6 @@ class HubCloud : ExtractorApi() {
                             )
                         }
                         finalUrl.contains("video-downloads.googleusercontent.com") -> {
-                            // [FIXED] API Contract Match: newExtractorLink builder
                             callback.invoke(
                                 newExtractorLink(
                                     source = "4K HDHUB [Google]",
@@ -72,25 +59,22 @@ class HubCloud : ExtractorApi() {
                             )
                         }
                         finalUrl.contains("pixeldrain") -> {
-                            // Dispatch to native PixelDrainDev
                             loadExtractor(finalUrl, gamerxytUrl, subtitleCallback, callback)
                         }
                     }
                 }
             }
         } catch (e: Exception) {
-            e.printStackTrace() // Safe error handling
+            e.printStackTrace()
         }
     }
 }
 
-// ============================================================================
-// [RECONSTRUCTED FROM VERIFIED BEHAVIOR]
-// PixelDrain endpoint confirmed via Termux network response.
-// ============================================================================
+// PixelDrainDev – dipertahankan, tetapi mainUrl-nya mungkin tidak cocok dengan domain yang sebenarnya.
+// Namun karena loadExtractor akan mencoba semua ekstraktor, ini tidak merusak.
 class PixelDrainDev : ExtractorApi() {
     override val name = "PixelDrainDev"
-    override val mainUrl = "https://pixeldrain.dev"
+    override val mainUrl = "https://pixeldrain.dev" // Hanya untuk pencocokan jika ada domain .dev
     override val requiresReferer = false
 
     override suspend fun getUrl(
@@ -99,10 +83,7 @@ class PixelDrainDev : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // Appending standard download query if missing
         val finalUrl = if (!url.contains("?download")) "$url?download" else url
-        
-        // [FIXED] API Contract Match: newExtractorLink builder
         callback.invoke(
             newExtractorLink(
                 source = "Pixeldrain",
@@ -117,14 +98,7 @@ class PixelDrainDev : ExtractorApi() {
     }
 }
 
-// ============================================================================
-// [UNRECOVERED] SECONDARY EXTRACTORS
-// The following classes are verified to exist in the Golden Baseline DEX.
-// Their internal parsing logic is unrecoverable and there is no runtime/Termux 
-// evidence available to reconstruct them safely. They are stubbed to prevent 
-// crashes and satisfy Provider registry.
-// ============================================================================
-
+// Stubs (tidak diubah)
 class HdStream4u : ExtractorApi() {
     override val name = "HdStream4u"
     override val mainUrl = "https://hdstream4u.com" 
