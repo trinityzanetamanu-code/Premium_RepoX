@@ -7,8 +7,6 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 
 @CloudstreamPlugin
 class FourKHDHubProvider : BasePlugin() {
-    
-    // [FIXED] Parameter `Context` dihapus agar sesuai dengan API Contract.
     override fun load() {
         registerMainAPI(FourKHDHub())
         registerExtractorAPI(HubCloud())
