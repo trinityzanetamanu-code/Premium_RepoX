@@ -124,7 +124,7 @@ class FourKHDHub : MainAPI() {
                 this.plot = plot
                 this.year = year
                 this.score = score
-                // [FIXED] API Contract match
+                // [FIXED] Direct map assignment due to Companion Object extension limitations
                 tmdbId?.toString()?.let { this.syncData["tmdb"] = it }
             }
         } else {
@@ -133,7 +133,7 @@ class FourKHDHub : MainAPI() {
                 this.plot = plot
                 this.year = year
                 this.score = score
-                // [FIXED] API Contract match
+                // [FIXED] Direct map assignment
                 tmdbId?.toString()?.let { this.syncData["tmdb"] = it }
             }
         }
