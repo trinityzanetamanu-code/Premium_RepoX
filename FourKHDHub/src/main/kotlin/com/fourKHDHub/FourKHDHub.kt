@@ -113,23 +113,23 @@ class FourKHDHub : MainAPI() {
                             }
                         }
 
-                        tvDetails.seasons?.forEach { season ->
-                            val seasonNum = season.season_number ?: 1
+                        // PERBAIKAN: ubah nama parameter loop agar tidak menutupi properti Episode
+                        tvDetails.seasons?.forEach { seasonObj ->
+                            val seasonNum = seasonObj.season_number ?: 1
                             if (seasonNum > 0) {
                                 val seasonApi = "https://api.themoviedb.org/3/tv/$tmdbId/season/$seasonNum?api_key=$tmdbApiKey"
                                 val seasonDetails = app.get(seasonApi).parsedSafe<TmdbSeason>()
 
                                 seasonDetails?.episodes?.forEach { ep ->
-                                    // PERBAIKAN: panggil newEpisode dengan posisi argumen dan initializer eksplisit
+                                    // Gunakan this. untuk merujuk ke properti Episode
                                     val episode = newEpisode(url, initializer = {
-                                        name = ep.name
-                                        season = seasonNum
-                                        episode = ep.episode_number
-                                        description = ep.overview
-                                        posterUrl = ep.still_path?.let { "https://image.tmdb.org/t/p/w500$it" } ?: poster
-                                        ep.vote_average?.let { score = Score.from(it, 10) }
-                                        // tambahkan format tanggal untuk menghilangkan ambiguitas
-                                        ep.air_date?.let { addDate(it, "yyyy-MM-dd") }
+                                        this.name = ep.name
+                                        this.season = seasonNum
+                                        this.episode = ep.episode_number
+                                        this.description = ep.overview
+                                        this.posterUrl = ep.still_path?.let { "https://image.tmdb.org/t/p/w500$it" } ?: poster
+                                        ep.vote_average?.let { this.score = Score.from(it, 10) }
+                                        ep.air_date?.let { this.addDate(it, "yyyy-MM-dd") }
                                     })
                                     episodes.add(episode)
                                 }
@@ -143,9 +143,9 @@ class FourKHDHub : MainAPI() {
 
             if (episodes.isEmpty()) {
                 val fallbackEpisode = newEpisode(url, initializer = {
-                    name = rawTitle
-                    season = 1
-                    episode = 1
+                    this.name = rawTitle
+                    this.season = 1
+                    this.episode = 1
                 })
                 episodes.add(fallbackEpisode)
             }
@@ -165,6 +165,7 @@ class FourKHDHub : MainAPI() {
             }
 
         } else {
+            // Movie path (tidak ada perubahan, aman)
             var tmdbTags = listOf<String>()
             var tmdbActors = listOf<ActorData>()
             var tmdbTrailers = mutableListOf<TrailerData>()
@@ -236,7 +237,7 @@ class FourKHDHub : MainAPI() {
         return true
     }
 
-    // DTOs TMDB (tidak berubah)
+    // ===== DTOs (tidak berubah) =====
     data class TmdbSearch(val results: List<TmdbResult>?)
     data class TmdbResult(val id: Int?, val media_type: String?)
     data class TmdbMovieDetails(
