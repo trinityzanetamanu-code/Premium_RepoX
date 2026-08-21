@@ -6,7 +6,7 @@ import org.jsoup.nodes.Element
 
 class FourKHDHub : MainAPI() {
     override var name = "FourKHDHub"
-    override var mainUrl = "https://4khdhub.one" 
+    override var mainUrl = "https://4khdhub.one"
     override val hasMainPage = true
     override var lang = "en"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
@@ -26,7 +26,6 @@ class FourKHDHub : MainAPI() {
         "$mainUrl/category/jiohotstar/page/" to "JioHotstar"
     )
 
-    // Helper untuk memperbarui mainUrl dari remote
     private suspend fun updateMainUrl() {
         FourKHDHubProvider.getDomains()?.n4khdhub?.let { mainUrl = it }
     }
@@ -56,11 +55,11 @@ class FourKHDHub : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         updateMainUrl()
         val document = app.get(url).document
-        
+
         val rawTitle = document.selectFirst("title")?.text()?.substringBefore("-")?.trim() ?: ""
         val posterFallback = document.selectFirst("meta[property=og:image]")?.attr("content")
         var plot = document.selectFirst("meta[name=description]")?.attr("content")
-        
+
         val htmlTags = document.select("a[rel=tag]").map { it.text() }.filter { it.isNotBlank() }
 
         var score: Score? = null
@@ -94,14 +93,14 @@ class FourKHDHub : MainAPI() {
                 try {
                     val tvApi = "https://api.themoviedb.org/3/tv/$tmdbId?api_key=$tmdbApiKey&append_to_response=credits,videos"
                     val tvDetails = app.get(tvApi).parsedSafe<TmdbTv>()
-                    
+
                     if (tvDetails != null) {
                         plot = tvDetails.overview ?: plot
                         year = tvDetails.first_air_date?.substringBefore("-")?.toIntOrNull()
                         score = tvDetails.vote_average?.let { Score.from(it, 10) }
                         backdrop = tvDetails.backdrop_path?.let { "https://image.tmdb.org/t/p/original$it" }
                         poster = tvDetails.poster_path?.let { "https://image.tmdb.org/t/p/w500$it" } ?: poster
-                        
+
                         tmdbTags = tvDetails.genres?.mapNotNull { it.name } ?: emptyList()
                         tmdbActors = tvDetails.credits?.cast?.mapNotNull { cast ->
                             val imageUrl = cast.profile_path?.let { "https://image.tmdb.org/t/p/w500$it" }
@@ -119,18 +118,20 @@ class FourKHDHub : MainAPI() {
                             if (seasonNum > 0) {
                                 val seasonApi = "https://api.themoviedb.org/3/tv/$tmdbId/season/$seasonNum?api_key=$tmdbApiKey"
                                 val seasonDetails = app.get(seasonApi).parsedSafe<TmdbSeason>()
-                                
+
                                 seasonDetails?.episodes?.forEach { ep ->
-                                    // PERBAIKAN: gunakan newEpisode(url = ...) bukan newEpisode(data = ...)
-                                    episodes.add(newEpisode(url = url) {
-                                        this.name = ep.name
-                                        this.season = seasonNum
-                                        this.episode = ep.episode_number
-                                        this.description = ep.overview
-                                        this.posterUrl = ep.still_path?.let { "https://image.tmdb.org/t/p/w500$it" } ?: poster
-                                        ep.vote_average?.let { this.score = Score.from(it, 10) }
-                                        ep.air_date?.let { this.addDate(it) }
+                                    // PERBAIKAN: panggil newEpisode dengan posisi argumen dan initializer eksplisit
+                                    val episode = newEpisode(url, initializer = {
+                                        name = ep.name
+                                        season = seasonNum
+                                        episode = ep.episode_number
+                                        description = ep.overview
+                                        posterUrl = ep.still_path?.let { "https://image.tmdb.org/t/p/w500$it" } ?: poster
+                                        ep.vote_average?.let { score = Score.from(it, 10) }
+                                        // tambahkan format tanggal untuk menghilangkan ambiguitas
+                                        ep.air_date?.let { addDate(it, "yyyy-MM-dd") }
                                     })
+                                    episodes.add(episode)
                                 }
                             }
                         }
@@ -141,12 +142,12 @@ class FourKHDHub : MainAPI() {
             }
 
             if (episodes.isEmpty()) {
-                // PERBAIKAN: gunakan newEpisode(url = url)
-                episodes.add(newEpisode(url = url) {
-                    this.name = rawTitle
-                    this.season = 1
-                    this.episode = 1
+                val fallbackEpisode = newEpisode(url, initializer = {
+                    name = rawTitle
+                    season = 1
+                    episode = 1
                 })
+                episodes.add(fallbackEpisode)
             }
 
             val combinedTags = (tmdbTags + htmlTags).distinct()
@@ -164,7 +165,6 @@ class FourKHDHub : MainAPI() {
             }
 
         } else {
-            // Movie path
             var tmdbTags = listOf<String>()
             var tmdbActors = listOf<ActorData>()
             var tmdbTrailers = mutableListOf<TrailerData>()
@@ -175,14 +175,14 @@ class FourKHDHub : MainAPI() {
                 try {
                     val movieApi = "https://api.themoviedb.org/3/movie/$tmdbId?api_key=$tmdbApiKey&append_to_response=credits,videos"
                     val movieDetails = app.get(movieApi).parsedSafe<TmdbMovieDetails>()
-                    
+
                     if (movieDetails != null) {
                         plot = movieDetails.overview ?: plot
                         year = movieDetails.release_date?.substringBefore("-")?.toIntOrNull()
                         score = movieDetails.vote_average?.let { Score.from(it, 10) }
                         backdrop = movieDetails.backdrop_path?.let { "https://image.tmdb.org/t/p/original$it" }
                         poster = movieDetails.poster_path?.let { "https://image.tmdb.org/t/p/w500$it" } ?: poster
-                        
+
                         tmdbTags = movieDetails.genres?.mapNotNull { it.name } ?: emptyList()
                         tmdbActors = movieDetails.credits?.cast?.mapNotNull { cast ->
                             val imageUrl = cast.profile_path?.let { "https://image.tmdb.org/t/p/w500$it" }
@@ -223,11 +223,10 @@ class FourKHDHub : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val document = app.get(data).document
-        
+
         document.select("a[href], iframe[src]").forEach { element ->
             val link = element.attr("href").ifEmpty { element.attr("src") }
             if (link.isNotBlank()) {
-                // PERBAIKAN: ubah URL relatif menjadi absolut
                 val fixedLink = fixUrl(link)
                 if (fixedLink.contains("hubcloud") || fixedLink.contains("pixeldrain") || fixedLink.contains("hubdrive")) {
                     loadExtractor(fixedLink, mainUrl, subtitleCallback, callback)
@@ -237,7 +236,7 @@ class FourKHDHub : MainAPI() {
         return true
     }
 
-    // ===== TMDB DTOs (tidak berubah) =====
+    // DTOs TMDB (tidak berubah)
     data class TmdbSearch(val results: List<TmdbResult>?)
     data class TmdbResult(val id: Int?, val media_type: String?)
     data class TmdbMovieDetails(
