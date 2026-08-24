@@ -1,23 +1,34 @@
 package com.streamzy
 
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
+import com.fasterxml.jackson.annotation.JsonProperty
 
-@Serializable
 data class StreamzySearchResponse(
+    @param:JsonProperty("results")
     val results: List<StreamzySearchItem> = emptyList()
 )
 
-@Serializable
 data class StreamzySearchItem(
-    val id: Int,
-    @SerialName("media_type")
-    val mediaType: String,
-    val title: String,
-    @SerialName("release_date")
+    @param:JsonProperty("id")
+    val id: Int = 0,
+
+    @param:JsonProperty("media_type")
+    val mediaType: String = "",
+
+    @param:JsonProperty("title")
+    val title: String = "",
+
+    @param:JsonProperty("release_date")
     val releaseDate: String? = null,
-    @SerialName("poster_path")
+
+    @param:JsonProperty("poster_path")
     val posterPath: String? = null,
-    @SerialName("vote_average")
+
+    @param:JsonProperty("vote_average")
     val voteAverage: Double? = null
+)
+
+data class StreamzyEpisodeData(
+    val tvId: Int,
+    val season: Int,
+    val episode: Int
 )
