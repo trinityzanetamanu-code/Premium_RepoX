@@ -1,6 +1,7 @@
 package com.streamzy
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -12,14 +13,17 @@ class StreamzyProvider : MainAPI() {
     override var lang = "en"
 
     override val hasMainPage = true
+    override val hasQuickSearch = true
 
     override val supportedTypes = setOf(
         TvType.Movie,
         TvType.TvSeries
     )
 
-    private val tmdbImageBase =
-        "https://image.tmdb.org/t/p/w500"
+    companion object {
+        private const val TMDB_IMAGE_BASE =
+            "https://image.tmdb.org/t/p/w500"
+    }
 
     /*
      * ============================================================
@@ -28,29 +32,116 @@ class StreamzyProvider : MainAPI() {
      */
 
     override val mainPage = mainPageOf(
-        "$mainUrl/movies" to "Popular Movies",
-        "$mainUrl/tv" to "Popular TV Shows",
-        "$mainUrl/trending" to "Trending",
-        "$mainUrl/new-releases" to "New Movies",
-        "$mainUrl/new-releases?type=tv" to "New TV Shows",
-        "$mainUrl/top-rated" to "Top Rated Movies",
-        "$mainUrl/top-rated?type=tv" to "Top Rated TV Shows",
-        "$mainUrl/now-playing" to "Now Playing",
-        "$mainUrl/upcoming" to "Upcoming Movies",
 
-        "$mainUrl/genre/action?type=movie" to "Action Movies",
-        "$mainUrl/genre/drama?type=movie" to "Drama Movies",
-        "$mainUrl/genre/comedy?type=movie" to "Comedy Movies",
-        "$mainUrl/genre/horror?type=movie" to "Horror Movies",
-        "$mainUrl/genre/romance?type=movie" to "Romance Movies",
+        "$mainUrl/movies" to
+            "Popular Movies",
 
-        "$mainUrl/country/kr?type=movie" to "Korean Movies",
-        "$mainUrl/country/kr?type=tv" to "Korean TV Shows"
+        "$mainUrl/tv" to
+            "Popular TV Shows",
+
+        "$mainUrl/trending" to
+            "Trending",
+
+        "$mainUrl/new-releases" to
+            "New Movies",
+
+        "$mainUrl/new-releases?type=tv" to
+            "New TV Shows",
+
+        "$mainUrl/top-rated" to
+            "Top Rated Movies",
+
+        "$mainUrl/top-rated?type=tv" to
+            "Top Rated TV Shows",
+
+        "$mainUrl/now-playing" to
+            "Now Playing",
+
+        "$mainUrl/upcoming" to
+            "Upcoming Movies",
+
+        /*
+         * MOVIE GENRES
+         */
+
+        "$mainUrl/genre/action?type=movie" to
+            "Action Movies",
+
+        "$mainUrl/genre/adventure?type=movie" to
+            "Adventure Movies",
+
+        "$mainUrl/genre/comedy?type=movie" to
+            "Comedy Movies",
+
+        "$mainUrl/genre/crime?type=movie" to
+            "Crime Movies",
+
+        "$mainUrl/genre/drama?type=movie" to
+            "Drama Movies",
+
+        "$mainUrl/genre/fantasy?type=movie" to
+            "Fantasy Movies",
+
+        "$mainUrl/genre/horror?type=movie" to
+            "Horror Movies",
+
+        "$mainUrl/genre/mystery?type=movie" to
+            "Mystery Movies",
+
+        "$mainUrl/genre/romance?type=movie" to
+            "Romance Movies",
+
+        "$mainUrl/genre/sci-fi?type=movie" to
+            "Sci-Fi Movies",
+
+        "$mainUrl/genre/thriller?type=movie" to
+            "Thriller Movies",
+
+        /*
+         * TV GENRES
+         */
+
+        "$mainUrl/genre/action-adventure?type=tv" to
+            "Action & Adventure TV",
+
+        "$mainUrl/genre/comedy?type=tv" to
+            "Comedy TV Shows",
+
+        "$mainUrl/genre/crime?type=tv" to
+            "Crime TV Shows",
+
+        "$mainUrl/genre/mystery?type=tv" to
+            "Mystery TV Shows",
+
+        "$mainUrl/genre/reality?type=tv" to
+            "Reality TV Shows",
+
+        /*
+         * COUNTRIES
+         */
+
+        "$mainUrl/country/kr?type=movie" to
+            "Korean Movies",
+
+        "$mainUrl/country/kr?type=tv" to
+            "Korean TV Shows",
+
+        "$mainUrl/country/jp?type=movie" to
+            "Japanese Movies",
+
+        "$mainUrl/country/jp?type=tv" to
+            "Japanese TV Shows",
+
+        "$mainUrl/country/in?type=movie" to
+            "Indian Movies",
+
+        "$mainUrl/country/us?type=movie" to
+            "American Movies"
     )
 
     /*
      * ============================================================
-     * HELPERS
+     * URL HELPERS
      * ============================================================
      */
 
@@ -70,16 +161,7 @@ class StreamzyProvider : MainAPI() {
         }
     }
 
-    /*
-     * Ubah:
-     *
-     * https://www.youtube.com/embed/ABC123
-     *
-     * menjadi:
-     *
-     * https://www.youtube.com/watch?v=ABC123
-     */
-    private fun normalizeTrailerUrl(
+    private fun absoluteUrl(
         url: String?
     ): String? {
 
@@ -87,33 +169,35 @@ class StreamzyProvider : MainAPI() {
             return null
         }
 
-        val cleanUrl =
+        val clean =
             url.trim()
 
-        val embedId = Regex(
-            """(?:youtube\.com|youtube-nocookie\.com)/embed/([^?&/"']+)""",
-            RegexOption.IGNORE_CASE
-        )
-            .find(cleanUrl)
-            ?.groupValues
-            ?.getOrNull(1)
+        return when {
 
-        if (!embedId.isNullOrBlank()) {
-            return "https://www.youtube.com/watch?v=$embedId"
+            clean.startsWith(
+                "https://"
+            ) -> clean
+
+            clean.startsWith(
+                "http://"
+            ) -> clean
+
+            clean.startsWith(
+                "/"
+            ) -> "$mainUrl$clean"
+
+            else ->
+                "$mainUrl/$clean"
         }
-
-        return cleanUrl
     }
 
     /*
-     * Bersihkan metadata HTML yang kadang masih
-     * menyisakan entity rusak.
-     *
-     * Contoh:
-     *
-     * boss&#0
+     * ============================================================
+     * CLEAN DESCRIPTION
+     * ============================================================
      */
-    private fun cleanMetadataText(
+
+    private fun cleanText(
         input: String?
     ): String? {
 
@@ -122,8 +206,17 @@ class StreamzyProvider : MainAPI() {
         }
 
         return input
+            /*
+             * Streamzy kadang menghasilkan:
+             *
+             * boss&#0
+             */
             .replace(
                 Regex("""&#0;?"""),
+                ""
+            )
+            .replace(
+                "\u0000",
                 ""
             )
             .replace(
@@ -143,20 +236,16 @@ class StreamzyProvider : MainAPI() {
                 "'"
             )
             .replace(
+                "&nbsp;",
+                " "
+            )
+            .replace(
                 "&lt;",
                 "<"
             )
             .replace(
                 "&gt;",
                 ">"
-            )
-            .replace(
-                "&nbsp;",
-                " "
-            )
-            .replace(
-                Regex("""[\u0000-\u0008\u000B\u000C\u000E-\u001F]"""),
-                ""
             )
             .replace(
                 Regex("""\s+"""),
@@ -170,6 +259,143 @@ class StreamzyProvider : MainAPI() {
 
     /*
      * ============================================================
+     * YOUTUBE TRAILER
+     * ============================================================
+     */
+
+    private fun normalizeYoutubeUrl(
+        url: String?
+    ): String? {
+
+        if (url.isNullOrBlank()) {
+            return null
+        }
+
+        val source =
+            url.trim()
+
+        /*
+         * Streamzy:
+         *
+         * https://www.youtube.com/embed/VIDEO_ID
+         */
+        val embedId = Regex(
+            """(?:youtube\.com|youtube-nocookie\.com)/embed/([^?&/"']+)""",
+            RegexOption.IGNORE_CASE
+        )
+            .find(source)
+            ?.groupValues
+            ?.getOrNull(1)
+
+        if (!embedId.isNullOrBlank()) {
+
+            return "https://www.youtube.com/watch?v=$embedId"
+        }
+
+        /*
+         * youtube.com/watch?v=...
+         */
+        val watchId = Regex(
+            """[?&]v=([^?&/"']+)""",
+            RegexOption.IGNORE_CASE
+        )
+            .find(source)
+            ?.groupValues
+            ?.getOrNull(1)
+
+        if (!watchId.isNullOrBlank()) {
+
+            return "https://www.youtube.com/watch?v=$watchId"
+        }
+
+        /*
+         * youtu.be/...
+         */
+        val shortId = Regex(
+            """youtu\.be/([^?&/"']+)""",
+            RegexOption.IGNORE_CASE
+        )
+            .find(source)
+            ?.groupValues
+            ?.getOrNull(1)
+
+        if (!shortId.isNullOrBlank()) {
+
+            return "https://www.youtube.com/watch?v=$shortId"
+        }
+
+        return null
+    }
+
+    /*
+     * ============================================================
+     * GET STREAMZY TRAILER
+     * ============================================================
+     */
+
+    private fun getTrailer(
+        document: Document
+    ): String? {
+
+        /*
+         * Confirmed HTML Streamzy:
+         *
+         * <a
+         * href="https://www.youtube.com/embed/..."
+         * >
+         * Trailer
+         * </a>
+         */
+
+        val trailerElement =
+            document
+                .select(
+                    "a[href]"
+                )
+                .firstOrNull { element ->
+
+                    val href =
+                        element
+                            .attr(
+                                "href"
+                            )
+                            .trim()
+
+                    val text =
+                        element
+                            .text()
+                            .trim()
+
+                    text.contains(
+                        "Trailer",
+                        ignoreCase = true
+                    ) &&
+                        (
+                            href.contains(
+                                "youtube.com",
+                                ignoreCase = true
+                            ) ||
+                            href.contains(
+                                "youtu.be",
+                                ignoreCase = true
+                            )
+                        )
+                }
+
+        val rawUrl =
+            trailerElement
+                ?.attr(
+                    "href"
+                )
+                ?.trim()
+
+        return normalizeYoutubeUrl(
+            rawUrl
+        )
+    }
+
+    /*
+     * ============================================================
      * CARD PARSER
      * ============================================================
      */
@@ -178,43 +404,57 @@ class StreamzyProvider : MainAPI() {
         element: Element
     ): SearchResponse? {
 
-        val href = element
-            .attr("href")
-            .trim()
+        val href =
+            element
+                .attr(
+                    "href"
+                )
+                .trim()
 
         if (href.isBlank()) {
             return null
         }
 
-        val title = element
-            .selectFirst(
-                ".card-info h3"
-            )
-            ?.text()
-            ?.trim()
-            .orEmpty()
+        val title =
+            element
+                .selectFirst(
+                    ".card-info h3"
+                )
+                ?.text()
+                ?.trim()
+                .orEmpty()
 
         if (title.isBlank()) {
             return null
         }
 
-        val poster = element
-            .selectFirst(
-                ".card-img img"
-            )
-            ?.attr("src")
-            ?.trim()
-            ?.takeIf {
-                it.isNotBlank()
-            }
+        val poster =
+            element
+                .selectFirst(
+                    ".card-img img"
+                )
+                ?.attr(
+                    "src"
+                )
+                ?.trim()
+                ?.takeIf {
+                    it.isNotBlank()
+                }
 
-        val year = element
-            .selectFirst(
-                ".card-info span.text-zinc-500"
+        val year =
+            element
+                .selectFirst(
+                    ".card-info span.text-zinc-500"
+                )
+                ?.text()
+                ?.trim()
+                ?.toIntOrNull()
+
+        val targetUrl =
+            absoluteUrl(
+                href
             )
-            ?.text()
-            ?.trim()
-            ?.toIntOrNull()
+                ?: return null
 
         return when {
 
@@ -224,7 +464,7 @@ class StreamzyProvider : MainAPI() {
 
                 newMovieSearchResponse(
                     name = title,
-                    url = "$mainUrl$href",
+                    url = targetUrl,
                     type = TvType.Movie
                 ) {
 
@@ -242,7 +482,7 @@ class StreamzyProvider : MainAPI() {
 
                 newTvSeriesSearchResponse(
                     name = title,
-                    url = "$mainUrl$href",
+                    url = targetUrl,
                     type = TvType.TvSeries
                 ) {
 
@@ -260,7 +500,7 @@ class StreamzyProvider : MainAPI() {
 
     /*
      * ============================================================
-     * HOME PAGE
+     * MAIN PAGE LOADER
      * ============================================================
      */
 
@@ -269,24 +509,36 @@ class StreamzyProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
 
-        val url = buildPageUrl(
-            request.data,
-            page
-        )
-
-        val document = app
-            .get(url)
-            .document
-
-        val items = document
-            .select(
-                "a.card[href^=/movie/], " +
-                    "a.card[href^=/tv/]"
+        val url =
+            buildPageUrl(
+                request.data,
+                page
             )
-            .mapNotNull {
-                parseCard(it)
-            }
 
+        val document =
+            app
+                .get(
+                    url
+                )
+                .document
+
+        val items =
+            document
+                .select(
+                    "a.card[href^=/movie/], " +
+                        "a.card[href^=/tv/]"
+                )
+                .mapNotNull {
+
+                    parseCard(
+                        it
+                    )
+                }
+
+        /*
+         * Streamzy:
+         * 20 item / page
+         */
         val hasNext =
             items.size >= 20
 
@@ -303,55 +555,89 @@ class StreamzyProvider : MainAPI() {
      * ============================================================
      */
 
+    override suspend fun quickSearch(
+        query: String
+    ): List<SearchResponse>? {
+
+        return search(
+            query
+        )
+    }
+
     override suspend fun search(
         query: String
     ): List<SearchResponse> {
 
         if (query.isBlank()) {
+
             return emptyList()
         }
 
-        val response = app.get(
-            "$mainUrl/api/search",
-            params = mapOf(
-                "q" to query
+        /*
+         * Confirmed:
+         *
+         * GET:
+         *
+         * https://streamzy.org/api/search?q=...
+         */
+        val response =
+            app.get(
+                "$mainUrl/api/search",
+                params = mapOf(
+                    "q" to query
+                )
             )
-        )
 
-        val data = response
-            .parsedSafe<StreamzySearchResponse>()
-            ?: return emptyList()
+        val data =
+            response
+                .parsedSafe<
+                    StreamzySearchResponse
+                    >()
+                ?: return emptyList()
 
         return data
             .results
             .mapNotNull { item ->
 
                 val mediaType =
-                    item.mediaType
+                    item
+                        .mediaType
+                        .trim()
                         .lowercase()
 
-                val poster = item
-                    .posterPath
-                    ?.takeIf {
-                        it.isNotBlank()
-                    }
-                    ?.let {
-                        "$tmdbImageBase$it"
-                    }
+                val poster =
+                    item
+                        .posterPath
+                        ?.trim()
+                        ?.takeIf {
+                            it.isNotBlank()
+                        }
+                        ?.let {
 
-                val year = item
-                    .releaseDate
-                    ?.take(4)
-                    ?.toIntOrNull()
+                            "$TMDB_IMAGE_BASE$it"
+                        }
 
-                when (mediaType) {
+                val year =
+                    item
+                        .releaseDate
+                        ?.take(4)
+                        ?.toIntOrNull()
+
+                when (
+                    mediaType
+                ) {
 
                     "movie" -> {
 
                         newMovieSearchResponse(
-                            name = item.title,
-                            url = "$mainUrl/movie/${item.id}",
-                            type = TvType.Movie
+                            name =
+                                item.title,
+
+                            url =
+                                "$mainUrl/movie/${item.id}",
+
+                            type =
+                                TvType.Movie
                         ) {
 
                             posterUrl =
@@ -365,9 +651,14 @@ class StreamzyProvider : MainAPI() {
                     "tv" -> {
 
                         newTvSeriesSearchResponse(
-                            name = item.title,
-                            url = "$mainUrl/tv/${item.id}",
-                            type = TvType.TvSeries
+                            name =
+                                item.title,
+
+                            url =
+                                "$mainUrl/tv/${item.id}",
+
+                            type =
+                                TvType.TvSeries
                         ) {
 
                             posterUrl =
@@ -393,20 +684,26 @@ class StreamzyProvider : MainAPI() {
         url: String
     ): LoadResponse? {
 
-        val document = app
-            .get(url)
-            .document
+        val document =
+            app
+                .get(
+                    url
+                )
+                .document
 
-        val canonical = document
-            .selectFirst(
-                "link[rel=canonical]"
-            )
-            ?.attr("href")
-            ?.trim()
-            ?.takeIf {
-                it.isNotBlank()
-            }
-            ?: url
+        val canonical =
+            document
+                .selectFirst(
+                    "link[rel=canonical]"
+                )
+                ?.attr(
+                    "href"
+                )
+                ?.trim()
+                ?.takeIf {
+                    it.isNotBlank()
+                }
+                ?: url
 
         return when {
 
@@ -445,83 +742,75 @@ class StreamzyProvider : MainAPI() {
         document: Document
     ): LoadResponse? {
 
-        val title = document
-            .selectFirst("h1")
-            ?.text()
-            ?.trim()
-            ?: return null
-
-        val poster = document
-            .selectFirst(
-                "meta[property=og:image]"
-            )
-            ?.attr("content")
-            ?.trim()
-            ?.takeIf {
-                it.isNotBlank()
-            }
-
-        val backdrop = document
-            .selectFirst(
-                ".hero-bg img"
-            )
-            ?.attr("src")
-            ?.trim()
-            ?.takeIf {
-                it.isNotBlank()
-            }
+        /*
+         * TITLE
+         */
+        val title =
+            document
+                .selectFirst(
+                    "h1"
+                )
+                ?.text()
+                ?.trim()
+                ?: return null
 
         /*
-         * Bersihkan synopsis.
+         * POSTER
          */
-        val rawPlot = document
-            .selectFirst(
-                "meta[property=og:description]"
-            )
-            ?.attr("content")
+        val poster =
+            document
+                .selectFirst(
+                    "meta[property=og:image]"
+                )
+                ?.attr(
+                    "content"
+                )
+                ?.trim()
+                ?.takeIf {
+                    it.isNotBlank()
+                }
+
+        /*
+         * BACKDROP
+         */
+        val backdrop =
+            document
+                .selectFirst(
+                    ".hero-bg img"
+                )
+                ?.attr(
+                    "src"
+                )
+                ?.trim()
+                ?.takeIf {
+                    it.isNotBlank()
+                }
+
+        /*
+         * PLOT
+         */
+        val rawPlot =
+            document
+                .selectFirst(
+                    "meta[property=og:description]"
+                )
+                ?.attr(
+                    "content"
+                )
 
         val plot =
-            cleanMetadataText(rawPlot)
+            cleanText(
+                rawPlot
+            )
 
         /*
-         * ========================================================
          * TRAILER
-         * ========================================================
+         *
+         * Murni dari Streamzy.
          */
-
-        val rawTrailer = document
-            .select(
-                "a[href]"
-            )
-            .firstOrNull { anchor ->
-
-                val href =
-                    anchor.attr("href")
-
-                anchor
-                    .text()
-                    .trim()
-                    .equals(
-                        "Trailer",
-                        ignoreCase = true
-                    ) &&
-                    (
-                        href.contains(
-                            "youtube.com",
-                            ignoreCase = true
-                        ) ||
-                        href.contains(
-                            "youtu.be",
-                            ignoreCase = true
-                        )
-                    )
-            }
-            ?.attr("href")
-            ?.trim()
-
         val trailer =
-            normalizeTrailerUrl(
-                rawTrailer
+            getTrailer(
+                document
             )
 
         val pageText =
@@ -530,13 +819,18 @@ class StreamzyProvider : MainAPI() {
         /*
          * YEAR
          */
-        val year = Regex(
-            """Released:\s*(\d{4})"""
-        )
-            .find(pageText)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
+        val year =
+            Regex(
+                """Released:\s*(\d{4})"""
+            )
+                .find(
+                    pageText
+                )
+                ?.groupValues
+                ?.getOrNull(
+                    1
+                )
+                ?.toIntOrNull()
 
         /*
          * ========================================================
@@ -544,24 +838,30 @@ class StreamzyProvider : MainAPI() {
          * ========================================================
          */
 
-        val durationHoursMinutes =
+        val durationHour =
             Regex(
                 """Duration:\s*(\d+)h\s*(\d+)m"""
             )
-                .find(pageText)
+                .find(
+                    pageText
+                )
                 ?.let { match ->
 
                     val hours =
                         match
                             .groupValues
-                            .getOrNull(1)
+                            .getOrNull(
+                                1
+                            )
                             ?.toIntOrNull()
                             ?: 0
 
                     val minutes =
                         match
                             .groupValues
-                            .getOrNull(2)
+                            .getOrNull(
+                                2
+                            )
                             ?.toIntOrNull()
                             ?: 0
 
@@ -569,52 +869,67 @@ class StreamzyProvider : MainAPI() {
                         minutes
                 }
 
-        val durationMinutesOnly =
+        val durationMinute =
             Regex(
                 """Duration:\s*(\d+)\s*min"""
             )
-                .find(pageText)
+                .find(
+                    pageText
+                )
                 ?.groupValues
-                ?.getOrNull(1)
+                ?.getOrNull(
+                    1
+                )
                 ?.toIntOrNull()
 
         val duration =
-            durationHoursMinutes
-                ?: durationMinutesOnly
+            durationHour
+                ?: durationMinute
 
         /*
          * RATING
          */
-        val rating = Regex(
-            """IMDB:\s*([0-9.]+)"""
-        )
-            .find(pageText)
-            ?.groupValues
-            ?.getOrNull(1)
+        val rating =
+            Regex(
+                """IMDB:\s*([0-9.]+)"""
+            )
+                .find(
+                    pageText
+                )
+                ?.groupValues
+                ?.getOrNull(
+                    1
+                )
 
         /*
          * GENRES
          */
-        val genres = document
-            .select(
-                "a[href^=/genre/][href*=type=movie]"
-            )
-            .map {
-                it.text().trim()
-            }
-            .filter {
-                it.isNotBlank()
-            }
-            .distinct()
+        val genres =
+            document
+                .select(
+                    "a[href^=/genre/][href*=type=movie]"
+                )
+                .map {
+
+                    it.text()
+                        .trim()
+                }
+                .filter {
+
+                    it.isNotBlank()
+                }
+                .distinct()
 
         /*
-         * AGE RATING
+         * CONTENT RATING
          */
         val contentRating =
             Regex(
                 """\b(PG-13|NC-17|PG|R|G|NR)\b"""
             )
-                .find(pageText)
+                .find(
+                    pageText
+                )
                 ?.value
 
         /*
@@ -626,14 +941,20 @@ class StreamzyProvider : MainAPI() {
             )
 
         return newMovieLoadResponse(
-            name = title,
-            url = url,
-            type = TvType.Movie,
+            name =
+                title,
+
+            url =
+                url,
+
+            type =
+                TvType.Movie,
 
             /*
-             * Belum ada playback film utama.
+             * Playback utama belum dibuat.
              */
-            dataUrl = ""
+            dataUrl =
+                ""
         ) {
 
             posterUrl =
@@ -649,26 +970,37 @@ class StreamzyProvider : MainAPI() {
                 plot
 
             /*
-             * Jangan tampilkan
+             * Hilangkan label
              * "Segera hadir..."
              */
             comingSoon =
                 false
 
+            /*
+             * DURATION
+             */
             if (
                 duration != null
             ) {
+
                 this.duration =
                     duration
             }
 
+            /*
+             * GENRES
+             */
             if (
                 genres.isNotEmpty()
             ) {
+
                 tags =
                     genres
             }
 
+            /*
+             * CONTENT RATING
+             */
             if (
                 !contentRating
                     .isNullOrBlank()
@@ -678,6 +1010,9 @@ class StreamzyProvider : MainAPI() {
                     contentRating
             }
 
+            /*
+             * RATING
+             */
             if (
                 !rating
                     .isNullOrBlank()
@@ -690,6 +1025,9 @@ class StreamzyProvider : MainAPI() {
                     )
             }
 
+            /*
+             * CAST
+             */
             if (
                 actors.isNotEmpty()
             ) {
@@ -703,27 +1041,15 @@ class StreamzyProvider : MainAPI() {
              * TRAILER
              * ====================================================
              *
-             * URL sudah dinormalisasi:
+             * Mengikuti pola:
              *
-             * youtube.com/embed/ID
+             * Adicinemax21.kt
              *
-             * ->
-             *
-             * youtube.com/watch?v=ID
+             * addTrailer(trailer)
              */
-            if (
-                !trailer
-                    .isNullOrBlank()
-            ) {
-
-                trailers.add(
-                    TrailerData(
-                        trailer,
-                        null,
-                        false
-                    )
-                )
-            }
+            addTrailer(
+                trailer
+            )
         }
     }
 
@@ -738,41 +1064,76 @@ class StreamzyProvider : MainAPI() {
         document: Document
     ): LoadResponse? {
 
-        val title = document
-            .selectFirst("h1")
-            ?.text()
-            ?.trim()
-            ?: return null
+        /*
+         * TITLE
+         */
+        val title =
+            document
+                .selectFirst(
+                    "h1"
+                )
+                ?.text()
+                ?.trim()
+                ?: return null
 
-        val poster = document
-            .selectFirst(
-                "meta[property=og:image]"
-            )
-            ?.attr("content")
-            ?.trim()
-            ?.takeIf {
-                it.isNotBlank()
-            }
+        /*
+         * POSTER
+         */
+        val poster =
+            document
+                .selectFirst(
+                    "meta[property=og:image]"
+                )
+                ?.attr(
+                    "content"
+                )
+                ?.trim()
+                ?.takeIf {
+                    it.isNotBlank()
+                }
 
-        val backdrop = document
-            .selectFirst(
-                ".hero-bg img"
-            )
-            ?.attr("src")
-            ?.trim()
-            ?.takeIf {
-                it.isNotBlank()
-            }
+        /*
+         * BACKDROP
+         */
+        val backdrop =
+            document
+                .selectFirst(
+                    ".hero-bg img"
+                )
+                ?.attr(
+                    "src"
+                )
+                ?.trim()
+                ?.takeIf {
+                    it.isNotBlank()
+                }
 
-        val rawPlot = document
-            .selectFirst(
-                "meta[property=og:description]"
-            )
-            ?.attr("content")
+        /*
+         * PLOT
+         */
+        val rawPlot =
+            document
+                .selectFirst(
+                    "meta[property=og:description]"
+                )
+                ?.attr(
+                    "content"
+                )
 
         val plot =
-            cleanMetadataText(
+            cleanText(
                 rawPlot
+            )
+
+        /*
+         * Trailer TV kalau halaman
+         * Streamzy menyediakannya.
+         *
+         * Kalau tidak ada, null.
+         */
+        val trailer =
+            getTrailer(
+                document
             )
 
         val pageText =
@@ -781,38 +1142,52 @@ class StreamzyProvider : MainAPI() {
         /*
          * YEAR
          */
-        val year = Regex(
-            """Released:\s*(\d{4})"""
-        )
-            .find(pageText)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
+        val year =
+            Regex(
+                """Released:\s*(\d{4})"""
+            )
+                .find(
+                    pageText
+                )
+                ?.groupValues
+                ?.getOrNull(
+                    1
+                )
+                ?.toIntOrNull()
 
         /*
          * RATING
          */
-        val rating = Regex(
-            """IMDB:\s*([0-9.]+)"""
-        )
-            .find(pageText)
-            ?.groupValues
-            ?.getOrNull(1)
+        val rating =
+            Regex(
+                """IMDB:\s*([0-9.]+)"""
+            )
+                .find(
+                    pageText
+                )
+                ?.groupValues
+                ?.getOrNull(
+                    1
+                )
 
         /*
          * GENRES
          */
-        val genres = document
-            .select(
-                "a[href^=/genre/][href*=type=tv]"
-            )
-            .map {
-                it.text().trim()
-            }
-            .filter {
-                it.isNotBlank()
-            }
-            .distinct()
+        val genres =
+            document
+                .select(
+                    "a[href^=/genre/][href*=type=tv]"
+                )
+                .map {
+
+                    it.text()
+                        .trim()
+                }
+                .filter {
+
+                    it.isNotBlank()
+                }
+                .distinct()
 
         /*
          * CONTENT RATING
@@ -821,9 +1196,14 @@ class StreamzyProvider : MainAPI() {
             Regex(
                 """\b(TV-MA|TV-14|TV-PG|TV-G|TV-Y7|TV-Y)\b"""
             )
-                .find(pageText)
+                .find(
+                    pageText
+                )
                 ?.value
 
+        /*
+         * CAST
+         */
         val actors =
             parseActors(
                 document
@@ -831,8 +1211,17 @@ class StreamzyProvider : MainAPI() {
 
         /*
          * ========================================================
-         * SEASON METADATA
+         * SEASONS
          * ========================================================
+         *
+         * Streamzy detail:
+         *
+         * /watch/tv/{id}/1/1
+         * /watch/tv/{id}/2/1
+         * ...
+         *
+         * Saat ini hanya kita pakai
+         * untuk nama season.
          */
 
         val seasonNames =
@@ -842,29 +1231,31 @@ class StreamzyProvider : MainAPI() {
                 )
                 .mapNotNull { element ->
 
-                    val seasonText =
+                    val text =
                         element
                             .text()
                             .trim()
 
-                    val seasonNumber =
+                    val season =
                         Regex(
                             """Season\s+(\d+)"""
                         )
                             .find(
-                                seasonText
+                                text
                             )
                             ?.groupValues
-                            ?.getOrNull(1)
+                            ?.getOrNull(
+                                1
+                            )
                             ?.toIntOrNull()
                             ?: return@mapNotNull null
 
                     SeasonData(
                         season =
-                            seasonNumber,
+                            season,
 
                         name =
-                            "Season $seasonNumber"
+                            "Season $season"
                     )
                 }
                 .distinctBy {
@@ -872,16 +1263,23 @@ class StreamzyProvider : MainAPI() {
                 }
 
         /*
-         * Episode belum kita buat.
+         * Episode belum diimplementasikan.
          */
         val episodes =
             emptyList<Episode>()
 
         return newTvSeriesLoadResponse(
-            name = title,
-            url = url,
-            type = TvType.TvSeries,
-            episodes = episodes
+            name =
+                title,
+
+            url =
+                url,
+
+            type =
+                TvType.TvSeries,
+
+            episodes =
+                episodes
         ) {
 
             posterUrl =
@@ -899,6 +1297,9 @@ class StreamzyProvider : MainAPI() {
             comingSoon =
                 false
 
+            /*
+             * GENRES
+             */
             if (
                 genres.isNotEmpty()
             ) {
@@ -907,6 +1308,9 @@ class StreamzyProvider : MainAPI() {
                     genres
             }
 
+            /*
+             * CONTENT RATING
+             */
             if (
                 !contentRating
                     .isNullOrBlank()
@@ -916,6 +1320,9 @@ class StreamzyProvider : MainAPI() {
                     contentRating
             }
 
+            /*
+             * SCORE
+             */
             if (
                 !rating
                     .isNullOrBlank()
@@ -928,6 +1335,9 @@ class StreamzyProvider : MainAPI() {
                     )
             }
 
+            /*
+             * ACTORS
+             */
             if (
                 actors.isNotEmpty()
             ) {
@@ -936,6 +1346,9 @@ class StreamzyProvider : MainAPI() {
                     actors
             }
 
+            /*
+             * SEASON NAMES
+             */
             if (
                 seasonNames.isNotEmpty()
             ) {
@@ -943,6 +1356,14 @@ class StreamzyProvider : MainAPI() {
                 this.seasonNames =
                     seasonNames
             }
+
+            /*
+             * Trailer hanya ditambah
+             * kalau halaman TV punya trailer.
+             */
+            addTrailer(
+                trailer
+            )
         }
     }
 
@@ -962,19 +1383,33 @@ class StreamzyProvider : MainAPI() {
             )
             .mapNotNull { element ->
 
+                /*
+                 * Actor cards mempunyai image.
+                 *
+                 * Link Director/Writer tanpa image
+                 * dilewati.
+                 */
                 val imageElement =
                     element
-                        .selectFirst("img")
+                        .selectFirst(
+                            "img"
+                        )
                         ?: return@mapNotNull null
 
                 val image =
                     imageElement
-                        .attr("src")
+                        .attr(
+                            "src"
+                        )
                         .trim()
                         .takeIf {
+
                             it.isNotBlank()
                         }
 
+                /*
+                 * Nama actor.
+                 */
                 val actorName =
                     element
                         .selectFirst(
@@ -983,27 +1418,41 @@ class StreamzyProvider : MainAPI() {
                         ?.text()
                         ?.trim()
                         ?.takeIf {
+
                             it.isNotBlank()
                         }
+
                         ?: imageElement
-                            .attr("alt")
+                            .attr(
+                                "alt"
+                            )
                             .substringBefore(
                                 " in "
                             )
                             .trim()
                             .takeIf {
+
                                 it.isNotBlank()
                             }
+
                         ?: return@mapNotNull null
 
+                /*
+                 * Role/character.
+                 */
                 val role =
                     element
-                        .select("p")
-                        .drop(1)
+                        .select(
+                            "p"
+                        )
+                        .drop(
+                            1
+                        )
                         .firstOrNull()
                         ?.text()
                         ?.trim()
                         ?.takeIf {
+
                             it.isNotBlank()
                         }
 
@@ -1022,6 +1471,7 @@ class StreamzyProvider : MainAPI() {
                 )
             }
             .distinctBy {
+
                 it.actor.name
             }
     }
@@ -1031,19 +1481,20 @@ class StreamzyProvider : MainAPI() {
      * LOAD LINKS
      * ============================================================
      *
-     * Playback film/episode utama belum diimplementasikan.
+     * Film/episode utama BELUM kita implementasikan.
+     *
+     * Trailer tidak lewat loadLinks().
+     * Trailer lewat addTrailer().
      * ============================================================
      */
 
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
-        subtitleCallback: (
-            SubtitleFile
-        ) -> Unit,
-        callback: (
-            ExtractorLink
-        ) -> Unit
+        subtitleCallback:
+            (SubtitleFile) -> Unit,
+        callback:
+            (ExtractorLink) -> Unit
     ): Boolean {
 
         return false
