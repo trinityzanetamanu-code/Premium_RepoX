@@ -20,38 +20,14 @@ class StreamzyProvider : MainAPI() {
         TvType.TvSeries
     )
 
-    /*
-     * Streamzy /api/search mengembalikan poster_path seperti:
-     * /f1VCQIG2iCyOookdgOzwtUpwWC0.jpg
-     *
-     * Ini hanya base CDN gambar.
-     * Tidak memakai TMDB API dan tidak membutuhkan API key.
-     */
     companion object {
         private const val POSTER_CDN =
             "https://image.tmdb.org/t/p/w500"
     }
 
-    /*
-     * ============================================================
-     * SEARCH MODELS
-     * ============================================================
-     *
-     * Berdasarkan hasil probe:
-     *
-     * {
-     *   "results": [
-     *     {
-     *       "id": 108978,
-     *       "media_type": "tv",
-     *       "title": "Reacher",
-     *       "release_date": "2022-02-03",
-     *       "poster_path": "...",
-     *       "vote_average": 8.1
-     *     }
-     *   ]
-     * }
-     */
+    // ============================================================
+    // SEARCH MODELS
+    // ============================================================
 
     data class SearchApiResponse(
         @param:JsonProperty("results")
@@ -78,22 +54,14 @@ class StreamzyProvider : MainAPI() {
         val voteAverage: Double? = null
     )
 
-    /*
-     * ============================================================
-     * INTERNAL SEASON INFO
-     * ============================================================
-     */
-
     private data class StreamzySeasonInfo(
         val season: Int,
         val episodeCount: Int
     )
 
-    /*
-     * ============================================================
-     * MAIN PAGE
-     * ============================================================
-     */
+    // ============================================================
+    // MAIN PAGE
+    // ============================================================
 
     override val mainPage = mainPageOf(
         "$mainUrl/movies" to "Popular Movies",
@@ -148,11 +116,9 @@ class StreamzyProvider : MainAPI() {
         "$mainUrl/country/us?type=movie" to "American Movies"
     )
 
-    /*
-     * ============================================================
-     * BASIC HELPERS
-     * ============================================================
-     */
+    // ============================================================
+    // HELPERS
+    // ============================================================
 
     private fun buildPageUrl(
         baseUrl: String,
@@ -171,6 +137,34 @@ class StreamzyProvider : MainAPI() {
     }
 
     private fun absoluteUrl(
+        url: String?
+    ): String? {
+
+        if (url.isNullOrBlank()) {
+            return null
+        }
+
+        val clean = url.trim()
+
+        return when {
+            clean.startsWith("https://") ->
+                clean
+
+            clean.startsWith("http://") ->
+                clean
+
+            clean.startsWith("//") ->
+                "https:$clean"
+
+            clean.startsWith("/") ->
+                "$mainUrl$clean"
+
+            else ->
+                "$mainUrl/$clean"
+        }
+    }
+
+    private fun absolutePosterUrl(
         url: String?
     ): String? {
 
@@ -226,11 +220,9 @@ class StreamzyProvider : MainAPI() {
             }
     }
 
-    /*
-     * ============================================================
-     * MAIN PAGE CARD
-     * ============================================================
-     */
+    // ============================================================
+    // MAIN PAGE CARD
+    // ============================================================
 
     private fun parseCard(
         element: Element
@@ -254,13 +246,16 @@ class StreamzyProvider : MainAPI() {
             return null
         }
 
-        val poster = element
+        val rawPoster = element
             .selectFirst(".card-img img")
             ?.attr("src")
             ?.trim()
             ?.takeIf {
                 it.isNotBlank()
             }
+
+        val poster =
+            absolutePosterUrl(rawPoster)
 
         val year = element
             .selectFirst(
@@ -304,11 +299,9 @@ class StreamzyProvider : MainAPI() {
         }
     }
 
-    /*
-     * ============================================================
-     * GET MAIN PAGE
-     * ============================================================
-     */
+    // ============================================================
+    // MAIN PAGE
+    // ============================================================
 
     override suspend fun getMainPage(
         page: Int,
@@ -339,11 +332,9 @@ class StreamzyProvider : MainAPI() {
         )
     }
 
-    /*
-     * ============================================================
-     * SEARCH
-     * ============================================================
-     */
+    // ============================================================
+    // QUICK SEARCH
+    // ============================================================
 
     override suspend fun quickSearch(
         query: String
@@ -351,6 +342,10 @@ class StreamzyProvider : MainAPI() {
 
         return search(query)
     }
+
+    // ============================================================
+    // SEARCH
+    // ============================================================
 
     override suspend fun search(
         query: String
@@ -447,11 +442,9 @@ class StreamzyProvider : MainAPI() {
             }
     }
 
-    /*
-     * ============================================================
-     * LOAD
-     * ============================================================
-     */
+    // ============================================================
+    // LOAD
+    // ============================================================
 
     override suspend fun load(
         url: String
@@ -490,11 +483,9 @@ class StreamzyProvider : MainAPI() {
         }
     }
 
-    /*
-     * ============================================================
-     * MOVIE
-     * ============================================================
-     */
+    // ============================================================
+    // MOVIE
+    // ============================================================
 
     private suspend fun loadMovie(
         url: String,
@@ -532,6 +523,9 @@ class StreamzyProvider : MainAPI() {
                 ?.takeIf {
                     it.isNotBlank()
                 }
+                ?.let {
+                    absolutePosterUrl(it)
+                }
 
         val plot =
             cleanText(
@@ -545,9 +539,7 @@ class StreamzyProvider : MainAPI() {
         val pageText =
             document.text()
 
-        /*
-         * YEAR
-         */
+        // YEAR
 
         val year =
             Regex(
@@ -559,13 +551,7 @@ class StreamzyProvider : MainAPI() {
                 ?.getOrNull(1)
                 ?.toIntOrNull()
 
-        /*
-         * DURATION
-         *
-         * Examples:
-         * 2h 28m
-         * 95 min
-         */
+        // DURATION: 2h 28m
 
         val hourMinuteDuration =
             Regex(
@@ -590,6 +576,8 @@ class StreamzyProvider : MainAPI() {
                     hours * 60 + minutes
                 }
 
+        // DURATION: 95 min
+
         val minuteDuration =
             Regex(
                 """Duration:\s*(\d+)\s*min""",
@@ -604,9 +592,7 @@ class StreamzyProvider : MainAPI() {
             hourMinuteDuration
                 ?: minuteDuration
 
-        /*
-         * RATING
-         */
+        // RATING
 
         val rating =
             Regex(
@@ -617,9 +603,7 @@ class StreamzyProvider : MainAPI() {
                 ?.groupValues
                 ?.getOrNull(1)
 
-        /*
-         * GENRES
-         */
+        // GENRES
 
         val genres =
             document
@@ -634,9 +618,7 @@ class StreamzyProvider : MainAPI() {
                 }
                 .distinct()
 
-        /*
-         * CONTENT RATING
-         */
+        // CONTENT RATING
 
         val contentRating =
             Regex(
@@ -645,9 +627,7 @@ class StreamzyProvider : MainAPI() {
                 .find(pageText)
                 ?.value
 
-        /*
-         * ACTORS
-         */
+        // ACTORS
 
         val actors =
             parseActors(document)
@@ -665,11 +645,6 @@ class StreamzyProvider : MainAPI() {
             this.year = year
             this.plot = plot
 
-            /*
-             * Detail page benar-benar ada,
-             * jadi jangan ditandai coming soon hanya
-             * karena dataUrl kosong.
-             */
             comingSoon = false
 
             if (duration != null) {
@@ -699,39 +674,12 @@ class StreamzyProvider : MainAPI() {
             if (actors.isNotEmpty()) {
                 this.actors = actors
             }
-
-            /*
-             * TRAILER SENGAJA TIDAK DIPAKAI.
-             *
-             * Tidak ada addTrailer().
-             */
         }
     }
 
-    /*
-     * ============================================================
-     * SEASON / EPISODE PARSER
-     * ============================================================
-     *
-     * Dari hasil V2 Reacher:
-     *
-     * /watch/tv/108978/1/1
-     * /watch/tv/108978/2/1
-     * /watch/tv/108978/3/1
-     * /watch/tv/108978/4/1
-     *
-     * Halaman detail hanya mengekspos E01,
-     * tetapi kartu season menyatakan:
-     *
-     * Season 1 8 Episodes
-     * Season 2 8 Episodes
-     * ...
-     *
-     * Karena itu kita pakai public link hanya
-     * untuk menemukan season yang benar.
-     *
-     * Jumlah episode diambil dari teks halaman.
-     */
+    // ============================================================
+    // SEASON PARSER
+    // ============================================================
 
     private fun parseSeasonInfo(
         document: Document,
@@ -740,11 +688,6 @@ class StreamzyProvider : MainAPI() {
 
         val pageText =
             document.text()
-
-        /*
-         * Cari season dari link yang benar-benar
-         * terdapat pada halaman detail.
-         */
 
         val seasonNumbers =
             document
@@ -770,43 +713,29 @@ class StreamzyProvider : MainAPI() {
                 .sorted()
 
         return seasonNumbers
-            .map { season ->
-
-                /*
-                 * Coba cari:
-                 *
-                 * Season 1 8 Episodes
-                 */
+            .map { seasonNumber ->
 
                 val episodeCount =
                     Regex(
-                        """Season\s+$season\b.{0,120}?(\d+)\s+Episodes?""",
+                        """Season\s+$seasonNumber\b.{0,150}?(\d+)\s+Episodes?""",
                         RegexOption.IGNORE_CASE
                     )
                         .find(pageText)
                         ?.groupValues
                         ?.getOrNull(1)
                         ?.toIntOrNull()
-
-                        /*
-                         * Kalau jumlah episode tidak ditemukan,
-                         * setidaknya E01 memang secara eksplisit
-                         * tersedia pada halaman detail.
-                         */
                         ?: 1
 
                 StreamzySeasonInfo(
-                    season = season,
+                    season = seasonNumber,
                     episodeCount = episodeCount
                 )
             }
     }
 
-    /*
-     * ============================================================
-     * TV SERIES
-     * ============================================================
-     */
+    // ============================================================
+    // TV SERIES
+    // ============================================================
 
     private suspend fun loadTv(
         url: String,
@@ -844,6 +773,9 @@ class StreamzyProvider : MainAPI() {
                 ?.takeIf {
                     it.isNotBlank()
                 }
+                ?.let {
+                    absolutePosterUrl(it)
+                }
 
         val plot =
             cleanText(
@@ -857,9 +789,7 @@ class StreamzyProvider : MainAPI() {
         val pageText =
             document.text()
 
-        /*
-         * STREAMZY TV ID
-         */
+        // TV ID
 
         val tvId =
             Regex(
@@ -870,9 +800,7 @@ class StreamzyProvider : MainAPI() {
                 ?.getOrNull(1)
                 ?.toIntOrNull()
 
-        /*
-         * YEAR
-         */
+        // YEAR
 
         val year =
             Regex(
@@ -884,9 +812,7 @@ class StreamzyProvider : MainAPI() {
                 ?.getOrNull(1)
                 ?.toIntOrNull()
 
-        /*
-         * RATING
-         */
+        // RATING
 
         val rating =
             Regex(
@@ -897,9 +823,7 @@ class StreamzyProvider : MainAPI() {
                 ?.groupValues
                 ?.getOrNull(1)
 
-        /*
-         * GENRES
-         */
+        // GENRES
 
         val genres =
             document
@@ -914,9 +838,7 @@ class StreamzyProvider : MainAPI() {
                 }
                 .distinct()
 
-        /*
-         * CONTENT RATING
-         */
+        // CONTENT RATING
 
         val contentRating =
             Regex(
@@ -925,16 +847,12 @@ class StreamzyProvider : MainAPI() {
                 .find(pageText)
                 ?.value
 
-        /*
-         * ACTORS
-         */
+        // ACTORS
 
         val actors =
             parseActors(document)
 
-        /*
-         * SEASON INFO
-         */
+        // SEASONS
 
         val seasonInfo =
             tvId
@@ -946,10 +864,6 @@ class StreamzyProvider : MainAPI() {
                 }
                 .orEmpty()
 
-        /*
-         * NAMA SEASON
-         */
-
         val seasonNames =
             seasonInfo.map {
                 SeasonData(
@@ -958,48 +872,52 @@ class StreamzyProvider : MainAPI() {
                 )
             }
 
-        /*
-         * ========================================================
-         * BUILD EPISODE LIST
-         * ========================================================
-         *
-         * Kita TIDAK membuat /watch URL palsu untuk E02 dst.
-         *
-         * Data episode berupa internal identifier saja:
-         *
-         * streamzy://episode/108978/1/2
-         *
-         * loadLinks() tetap false.
-         */
+        // ========================================================
+        // EPISODES
+        // ========================================================
+        //
+        // Penting:
+        //
+        // Signature Cloudstream:
+        //
+        // newEpisode(
+        //     url,
+        //     initializer,
+        //     fix
+        // )
+        //
+        // Jadi initializer harus ditulis di dalam argument.
+        // ========================================================
 
-        val episodes =
+        val episodes: List<Episode> =
             if (tvId != null) {
 
-                seasonInfo.flatMap { season ->
+                seasonInfo.flatMap { seasonInfoItem ->
 
-                    (1..season.episodeCount)
+                    (1..seasonInfoItem.episodeCount)
                         .map { episodeNumber ->
 
                             val episodeData =
                                 "streamzy://episode/" +
                                     "$tvId/" +
-                                    "${season.season}/" +
+                                    "${seasonInfoItem.season}/" +
                                     episodeNumber
 
                             newEpisode(
                                 url = episodeData,
+                                initializer = {
+
+                                    name =
+                                        "Episode $episodeNumber"
+
+                                    season =
+                                        seasonInfoItem.season
+
+                                    episode =
+                                        episodeNumber
+                                },
                                 fix = false
-                            ) {
-
-                                name =
-                                    "Episode $episodeNumber"
-
-                                this.season =
-                                    season.season
-
-                                this.episode =
-                                    episodeNumber
-                            }
+                            )
                         }
                 }
 
@@ -1050,18 +968,12 @@ class StreamzyProvider : MainAPI() {
                 this.seasonNames =
                     seasonNames
             }
-
-            /*
-             * TRAILER SENGAJA TIDAK DIPAKAI.
-             */
         }
     }
 
-    /*
-     * ============================================================
-     * ACTORS
-     * ============================================================
-     */
+    // ============================================================
+    // ACTORS
+    // ============================================================
 
     private fun parseActors(
         document: Document
@@ -1083,6 +995,9 @@ class StreamzyProvider : MainAPI() {
                         .trim()
                         .takeIf {
                             it.isNotBlank()
+                        }
+                        ?.let {
+                            absolutePosterUrl(it)
                         }
 
                 val actorName =
@@ -1128,23 +1043,15 @@ class StreamzyProvider : MainAPI() {
             }
     }
 
-    /*
-     * ============================================================
-     * LOAD LINKS
-     * ============================================================
-     *
-     * Belum ada playback.
-     */
+    // ============================================================
+    // LOAD LINKS
+    // ============================================================
 
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
-        subtitleCallback: (
-            SubtitleFile
-        ) -> Unit,
-        callback: (
-            ExtractorLink
-        ) -> Unit
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
     ): Boolean {
 
         return false
