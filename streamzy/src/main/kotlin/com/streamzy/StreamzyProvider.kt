@@ -192,6 +192,117 @@ class StreamzyProvider : MainAPI() {
         }
     }
 
+    private fun buildWatchUrl(
+        data: String
+    ): String? {
+
+        val clean = data.trim()
+
+        Regex(
+            """^streamzy://movie/(\d+)$""",
+            RegexOption.IGNORE_CASE
+        )
+            .matchEntire(clean)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let { movieId ->
+                return "$mainUrl/watch/movie/$movieId"
+            }
+
+        Regex(
+            """^streamzy://episode/(\d+)/(\d+)/(\d+)$""",
+            RegexOption.IGNORE_CASE
+        )
+            .matchEntire(clean)
+            ?.let { match ->
+
+                val tvId =
+                    match.groupValues[1]
+
+                val season =
+                    match.groupValues[2]
+
+                val episode =
+                    match.groupValues[3]
+
+                return "$mainUrl/watch/tv/" +
+                    "$tvId/$season/$episode"
+            }
+
+        Regex(
+            """/watch/movie/(\d+)""",
+            RegexOption.IGNORE_CASE
+        )
+            .find(clean)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let { movieId ->
+                return "$mainUrl/watch/movie/$movieId"
+            }
+
+        Regex(
+            """/watch/tv/(\d+)/(\d+)/(\d+)""",
+            RegexOption.IGNORE_CASE
+        )
+            .find(clean)
+            ?.let { match ->
+
+                val tvId =
+                    match.groupValues[1]
+
+                val season =
+                    match.groupValues[2]
+
+                val episode =
+                    match.groupValues[3]
+
+                return "$mainUrl/watch/tv/" +
+                    "$tvId/$season/$episode"
+            }
+
+        Regex(
+            """/movie/(\d+)""",
+            RegexOption.IGNORE_CASE
+        )
+            .find(clean)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let { movieId ->
+                return "$mainUrl/watch/movie/$movieId"
+            }
+
+        return null
+    }
+
+    private fun getIframeUrls(
+        document: Document
+    ): List<String> {
+
+        return document
+            .select(
+                "iframe[src], iframe[data-src]"
+            )
+            .mapNotNull { iframe ->
+
+                val rawUrl =
+                    iframe
+                        .attr("src")
+                        .trim()
+                        .ifBlank {
+                            iframe
+                                .attr("data-src")
+                                .trim()
+                        }
+
+                absoluteUrl(rawUrl)
+            }
+            .filter { iframeUrl ->
+                iframeUrl.startsWith("https://") ||
+                    iframeUrl.startsWith("http://")
+            }
+            .distinct()
+    }
+
     private fun cleanText(
         input: String?
     ): String? {
@@ -492,6 +603,18 @@ class StreamzyProvider : MainAPI() {
         document: Document
     ): LoadResponse? {
 
+        val movieData =
+            Regex(
+                """/movie/(\d+)"""
+            )
+                .find(url)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.let { movieId ->
+                    "streamzy://movie/$movieId"
+                }
+                ?: url
+
         val title =
             document
                 .selectFirst("h1")
@@ -636,7 +759,7 @@ class StreamzyProvider : MainAPI() {
             title,
             url,
             TvType.Movie,
-            dataUrl = ""
+            dataUrl = movieData
         ) {
 
             posterUrl = poster
@@ -1054,6 +1177,95 @@ class StreamzyProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        return false
+        val watchUrl =
+            buildWatchUrl(data)
+                ?: return false
+
+        val firstDocument =
+            try {
+                app.get(watchUrl).document
+            } catch (_: Exception) {
+                return false
+            }
+
+        val serverPageUrls =
+            mutableListOf(watchUrl)
+
+        serverPageUrls.addAll(
+            firstDocument
+                .select(
+                    "a[href*='?server='], " +
+                        "a[href*='&server=']"
+                )
+                .mapNotNull { serverLink ->
+                    absoluteUrl(
+                        serverLink
+                            .attr("href")
+                            .trim()
+                    )
+                }
+        )
+
+        val testedIframeUrls =
+            mutableSetOf<String>()
+
+        var emittedLink = false
+
+        val forwardingCallback:
+            (ExtractorLink) -> Unit = { link ->
+
+                emittedLink = true
+                callback(link)
+            }
+
+        for (
+            serverPageUrl in
+            serverPageUrls.distinct()
+        ) {
+
+            val serverDocument =
+                if (serverPageUrl == watchUrl) {
+                    firstDocument
+                } else {
+                    try {
+                        app.get(serverPageUrl).document
+                    } catch (_: Exception) {
+                        continue
+                    }
+                }
+
+            val iframeUrls =
+                getIframeUrls(serverDocument)
+
+            for (iframeUrl in iframeUrls) {
+
+                if (
+                    !testedIframeUrls.add(
+                        iframeUrl
+                    )
+                ) {
+                    continue
+                }
+
+                try {
+                    loadExtractor(
+                        url = iframeUrl,
+                        referer = serverPageUrl,
+                        subtitleCallback =
+                            subtitleCallback,
+                        callback =
+                            forwardingCallback
+                    )
+                } catch (_: Exception) {
+                    // Try the next public server.
+                }
+
+                if (emittedLink) {
+                    return true
+                }
+            }
+        }
+
+        return emittedLink
     }
 }
