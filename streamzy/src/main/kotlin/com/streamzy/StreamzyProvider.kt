@@ -78,7 +78,8 @@ class StreamzyProvider(
 
     private data class PlayerRuntimeConfig(
         val playerUrl: String,
-        val streamBase: String,
+        val exactApi: String?,
+        val streamBase: String?,
         val metaApi: String?,
         val season: String,
         val episode: String
@@ -1255,11 +1256,37 @@ class StreamzyProvider(
         playerUrl: String
     ): PlayerRuntimeConfig? {
 
+        val exactApi =
+            getConfigString(
+                html,
+                "api"
+            )
+
         val streamBase =
             getConfigString(
                 html,
                 "streamBase"
-            ) ?: return null
+            )
+
+        if (
+            exactApi == null &&
+            streamBase == null
+        ) {
+            if (
+                playerUrl.contains(
+                    "/embed/player/",
+                    true
+                )
+            ) {
+                logMarker(
+                    "PLAYER_CONFIG|RESULT=missing|" +
+                        "API_PRESENT=no|STREAM_BASE_PRESENT=no|" +
+                        "PLAYER_HOST=${safeHost(playerUrl)}"
+                )
+            }
+
+            return null
+        }
 
         val tvPath =
             Regex(
@@ -1287,6 +1314,7 @@ class StreamzyProvider(
 
         return PlayerRuntimeConfig(
             playerUrl = playerUrl,
+            exactApi = exactApi,
             streamBase = streamBase,
             metaApi =
                 getConfigString(
@@ -1302,9 +1330,17 @@ class StreamzyProvider(
         config: PlayerRuntimeConfig
     ): String {
 
+        config.exactApi?.let { exactApi ->
+            return exactApi
+        }
+
+        val streamBase =
+            config.streamBase
+                ?: return ""
+
         // Exact apiFor() shape proven by player.js. The final
         // stream_urls parameter is deliberately bare, not =1.
-        return config.streamBase +
+        return streamBase +
             "&season=${encodeComponent(config.season)}" +
             "&episode=${encodeComponent(config.episode)}" +
             "&stream_urls"
@@ -1423,13 +1459,24 @@ class StreamzyProvider(
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
+        val sourceApiMode =
+            if (config.exactApi != null) {
+                "config-exact"
+            } else {
+                "apiFor"
+            }
+
         logMarker(
             "PLAYER_CONFIG|PLAYER_HOST=" +
                 safeHost(config.playerUrl) +
                 "|STREAM_API_HOST=" +
-                safeHost(config.streamBase) +
+                safeHost(
+                    config.exactApi
+                        ?: config.streamBase
+                ) +
                 "|META_API_HOST=" +
                 safeHost(config.metaApi) +
+                "|SOURCE_API_MODE=$sourceApiMode" +
                 "|SEASON_PRESENT=" +
                 config.season.isNotBlank() +
                 "|EPISODE_PRESENT=" +
@@ -1439,10 +1486,25 @@ class StreamzyProvider(
         val sourceApiUrl =
             buildSourceApiUrl(config)
 
+        if (sourceApiUrl.isBlank()) {
+            logMarker(
+                "STREAM_API|DERIVATION=failed|" +
+                    "REASON=missing-api-and-stream-base"
+            )
+
+            return false
+        }
+
+        val hasBareStreamUrls =
+            Regex(
+                "(?:[?&])stream_urls(?:[=&]|$)",
+                RegexOption.IGNORE_CASE
+            ).containsMatchIn(sourceApiUrl)
+
         logMarker(
-            "STREAM_API|DERIVATION=apiFor|" +
+            "STREAM_API|DERIVATION=$sourceApiMode|" +
                 "HOST=${safeHost(sourceApiUrl)}|" +
-                "BARE_STREAM_URLS=yes"
+                "BARE_STREAM_URLS=${if (hasBareStreamUrls) "yes" else "no"}"
         )
 
         val streamUrls =
@@ -2694,7 +2756,40 @@ class StreamzyProvider(
 
         val firstHtml =
             try {
-                app.get(watchUrl).text
+                val response =
+                    app.get(watchUrl)
+
+                val html = response.text
+
+                logMarker(
+                    "STREAMZY_RESOLVE|STAGE=watch-fetch|" +
+                        "CONTENT=$contentKind|" +
+                        "HTTP=${response.okhttpResponse.code}|" +
+                        "EFFECTIVE_HOST=" +
+                        safeHost(
+                            response
+                                .okhttpResponse
+                                .request
+                                .url
+                                .toString()
+                        ) +
+                        "|" +
+                        "CONTENT_TYPE=" +
+                        response
+                            .okhttpResponse
+                            .header("Content-Type")
+                            .orEmpty()
+                            .take(80)
+                )
+
+                logMarker(
+                    "STREAMZY_RESOLVE|STAGE=watch-body|" +
+                        "CONTENT=$contentKind|" +
+                        "BYTES=${html.toByteArray(Charsets.UTF_8).size}|" +
+                        "SHA256_PREFIX=${sha256Prefix(html)}"
+                )
+
+                html
             } catch (error: Exception) {
                 if (error is CancellationException) {
                     throw error
@@ -2714,6 +2809,39 @@ class StreamzyProvider(
                 firstHtml,
                 watchUrl
             )
+
+        val primaryIframeUrls =
+            getIframeUrls(
+                firstDocument,
+                watchUrl
+            )
+
+        val primaryVidsrcUrl =
+            primaryIframeUrls
+                .firstOrNull { iframeUrl ->
+                    safeHost(iframeUrl) == "vidsrc.mov"
+                }
+
+        logMarker(
+            "STREAMZY_RESOLVE|STAGE=watch-parse|" +
+                "CONTENT=$contentKind|" +
+                "IFRAME_TAGS=${firstDocument.select("iframe").size}|" +
+                "PARSER_MATCHES=${primaryIframeUrls.size}|" +
+                "VIDSRC_MATCH=${if (primaryVidsrcUrl == null) "no" else "yes"}"
+        )
+
+        val primaryIframeResult =
+            if (primaryVidsrcUrl != null) {
+                "FOUND=yes|HOST=${safeHost(primaryVidsrcUrl)}"
+            } else {
+                "FOUND=no|REASON=no-vidsrc-in-primary-watch"
+            }
+
+        logMarker(
+            "STREAMZY_RESOLVE|STAGE=watch-iframe|" +
+                "CONTENT=$contentKind|" +
+                primaryIframeResult
+        )
 
         val serverPageUrls =
             mutableListOf(watchUrl)
@@ -2765,9 +2893,17 @@ class StreamzyProvider(
             }
 
         for (
-            serverPageUrl in
-            distinctServerPages
+            (serverZeroIndex, serverPageUrl) in
+            distinctServerPages.withIndex()
         ) {
+
+            val serverIndex = serverZeroIndex + 1
+            val serverRole =
+                if (serverPageUrl == watchUrl) {
+                    "primary-watch"
+                } else {
+                    "alternative"
+                }
 
             val serverDocument =
                 if (serverPageUrl == watchUrl) {
@@ -2805,6 +2941,8 @@ class StreamzyProvider(
 
             logMarker(
                 "STREAMZY_RESOLVE|STAGE=server|" +
+                    "INDEX=$serverIndex|" +
+                    "ROLE=$serverRole|" +
                     "HOST=${safeHost(serverPageUrl)}|" +
                     "IFRAMES=${iframeUrls.size}"
             )
