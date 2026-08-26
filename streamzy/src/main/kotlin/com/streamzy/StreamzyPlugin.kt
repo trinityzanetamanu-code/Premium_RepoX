@@ -9,7 +9,9 @@ class StreamzyPlugin : Plugin() {
 
     override fun load(context: Context) {
         registerMainAPI(
-            StreamzyProvider()
+            StreamzyProvider(
+                context.applicationContext
+            )
         )
     }
 }
