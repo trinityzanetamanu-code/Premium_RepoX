@@ -18,6 +18,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
@@ -850,6 +851,37 @@ class StreamzyProvider(
         }
     }
 
+    private fun queryValue(
+        url: String,
+        key: String
+    ): String? {
+        return try {
+            URI(url)
+                .rawQuery
+                ?.split("&")
+                ?.firstOrNull { part ->
+                    part.substringBefore("=") == key
+                }
+                ?.substringAfter(
+                    delimiter = "=",
+                    missingDelimiterValue = ""
+                )
+                ?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun sha256Prefix(value: String): String {
+        return MessageDigest
+            .getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte ->
+                "%02x".format(byte.toInt() and 0xff)
+            }
+            .take(12)
+    }
+
     private fun hasWasmMagic(bytes: ByteArray): Boolean {
         return bytes.size >= 8 &&
             bytes[0] == 0x00.toByte() &&
@@ -1299,6 +1331,11 @@ class StreamzyProvider(
             val index = zeroBasedIndex + 1
 
             logMarker(
+                "STREAM_CANDIDATE_SOURCE|INDEX=$index|" +
+                    "SOURCE=stream_urls"
+            )
+
+            logMarker(
                 "STREAM_CANDIDATE|INDEX=$index|" +
                     "HOST=${safeHost(rawUrl)}|" +
                     "STAGE=raw"
@@ -1418,11 +1455,48 @@ class StreamzyProvider(
             return false
         }
 
+        logMarker(
+            "STREAM_API|CANDIDATE_SOURCE=stream_urls|" +
+                "COUNT=${streamUrls.size}|" +
+                "METADATA_MEDIA=excluded"
+        )
+
         val selected =
             selectMediaCandidate(
                 streamUrls,
                 config.playerUrl
             ) ?: return false
+
+        if (selected.type == ExtractorLinkType.M3U8) {
+            val token =
+                queryValue(
+                    selected.url,
+                    "token"
+                )
+
+            logMarker(
+                "HLS_PLAYBACK|MASTER|" +
+                    "HOST=${safeHost(selected.url)}|" +
+                    "TOKEN_PRESENT=${if (token == null) "no" else "yes"}|" +
+                    "TOKEN_HASH=${token?.let(::sha256Prefix) ?: "none"}"
+            )
+
+            logMarker(
+                "HLS_URI_ACTUAL|TYPE=master|" +
+                    "SCOPE=provider-handoff|" +
+                    "QUERY_TOKEN=${if (token == null) "no" else "yes"}"
+            )
+
+            logMarker(
+                "TOKEN_PROPAGATION|VARIANT=UNKNOWN|SEGMENT=UNKNOWN|" +
+                    "REASON=player-requests-not-exposed-to-provider"
+            )
+
+            logMarker(
+                "NETWORK_FAMILY|STATUS=UNKNOWN|" +
+                    "REASON=socket-route-not-exposed-to-provider"
+            )
+        }
 
         callback(
             newExtractorLink(
