@@ -20,6 +20,7 @@ import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import java.net.URI
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
 import java.security.Signature
@@ -427,6 +428,19 @@ open class Lk21TurboExtractor : ExtractorApi() {
     override var mainUrl = "https://turbovidhls.com"
     override val requiresReferer = false
 
+    companion object {
+        private const val DEBUG_TAG = "LAYARKACA_DEBUG"
+        private const val TURBO_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36"
+    }
+
+    private fun originOf(value: String): String? = try {
+        val uri = URI(value)
+        if (uri.scheme.isNullOrBlank() || uri.host.isNullOrBlank()) null
+        else "${uri.scheme}://${uri.host}${if (uri.port > 0) ":${uri.port}" else ""}"
+    } catch (_: Exception) {
+        null
+    }
+
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -435,22 +449,53 @@ open class Lk21TurboExtractor : ExtractorApi() {
     ) {
         try {
             val id = url.substringAfter("/t/").substringBefore("?")
-            if (id.isEmpty()) return
+            if (id.isEmpty() || !url.contains("/t/")) {
+                Log.w(DEBUG_TAG, "extractor=TurboVIP stop=invalid_player_url url=$url")
+                return
+            }
 
-            val headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
-                "Referer"    to "https://playeriframe.sbs/"
+            // Untuk jalur videonode, `url` adalah iframe aktual dari wrapper
+            // (emturbovid atau turbovidhls), bukan ID opaque pada data-url.
+            val playerUrl = if (url.startsWith("http://") || url.startsWith("https://")) {
+                url
+            } else {
+                "$mainUrl/t/$id"
+            }
+            val wrapperReferer = referer ?: "https://playeriframe.sbs/"
+
+            val pageHeaders = mutableMapOf(
+                "User-Agent" to TURBO_UA,
+                "Accept" to "text/html,application/xhtml+xml,*/*;q=0.8",
+                "Referer" to wrapperReferer
+            ).apply {
+                originOf(wrapperReferer)?.let { put("Origin", it) }
+            }
+
+            Log.d(DEBUG_TAG, "extractor=TurboVIP request player=$playerUrl referer=$wrapperReferer")
+            val playerResponse = app.get(playerUrl, headers = pageHeaders)
+            val finalPlayerUrl = playerResponse.url
+            val html = playerResponse.text
+            Log.d(
+                DEBUG_TAG,
+                "extractor=TurboVIP status=${playerResponse.code} requested=$playerUrl final=$finalPlayerUrl"
             )
-
-            val html = app.get("$mainUrl/t/$id", headers = headers).text
 
             var m3u8Url = Regex("""data-hash="([^"]+)"""").find(html)?.groupValues?.get(1)
             if (m3u8Url.isNullOrBlank()) {
                 m3u8Url = Regex("""urlPlay\s*=\s*'([^']+)'""").find(html)?.groupValues?.get(1)
             }
-            if (m3u8Url.isNullOrBlank()) return
+            if (m3u8Url.isNullOrBlank()) {
+                Log.w(DEBUG_TAG, "extractor=TurboVIP stop=media_not_found final=$finalPlayerUrl")
+                return
+            }
 
-            val type = if (m3u8Url.endsWith(".mp4", ignoreCase = true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+            Log.d(DEBUG_TAG, "extractor=TurboVIP media=$m3u8Url player=$finalPlayerUrl")
+
+            val type = if (m3u8Url.substringBefore("?").endsWith(".mp4", ignoreCase = true)) {
+                ExtractorLinkType.VIDEO
+            } else {
+                ExtractorLinkType.M3U8
+            }
 
             callback(
                 newExtractorLink(
@@ -459,16 +504,15 @@ open class Lk21TurboExtractor : ExtractorApi() {
                     url    = m3u8Url,
                     type   = type
                 ) {
-                    this.referer = "$mainUrl/"
                     this.quality = Qualities.Unknown.value
-                    this.headers = mapOf(
-                        "Origin"  to mainUrl,
-                        "Referer" to "$mainUrl/"
-                    )
                 }
             )
+            Log.d(
+                DEBUG_TAG,
+                "extractor=TurboVIP callback media=$m3u8Url type=$type mediaHeaders=none"
+            )
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(DEBUG_TAG, "extractor=TurboVIP exception url=$url", e)
         }
     }
 }
