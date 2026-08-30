@@ -18,6 +18,7 @@ import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -578,6 +579,9 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
         private const val CLICK_X = 180
         private const val CLICK_Y = 101
         private const val TAP_DELAY_MS = 120L
+        private const val CHALLENGE_MAX_ATTEMPTS = 2
+        private const val CHALLENGE_RETRY_DELAY_MS = 500L
+        private const val ERROR_BODY_LOG_LIMIT = 500
     }
 
     private class SessionCookieJar : CookieJar {
@@ -619,6 +623,11 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
         .header("Origin", PLAYCDN_ORIGIN)
         .header("Referer", referer)
 
+    private fun responseBodyForLog(body: String): String = body
+        .replace('\n', ' ')
+        .replace('\r', ' ')
+        .take(ERROR_BODY_LOG_LIMIT)
+
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -630,6 +639,10 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
             val client = app.baseClient.newBuilder()
                 .cookieJar(cookieJar)
                 .followRedirects(true)
+                .build()
+            val challengeClient = client.newBuilder()
+                .protocols(listOf(Protocol.HTTP_1_1))
+                .retryOnConnectionFailure(true)
                 .build()
 
             val pageRequest = Request.Builder()
@@ -658,32 +671,76 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
                 ?: throw IllegalStateException("data.token kosong")
             val tokenHash = sha256Hex(token)
 
-            val challengeUrl = "$mainUrl/backend.php".toHttpUrl().newBuilder()
-                .addQueryParameter("action", "get_challenge")
-                .addQueryParameter("id", id)
-                .addQueryParameter("token_hash", tokenHash)
-                .addQueryParameter("w", CANVAS_WIDTH.toString())
-                .addQueryParameter("h", CANVAS_HEIGHT.toString())
-                .addQueryParameter("t", System.currentTimeMillis().toString())
-                .build()
+            var challenge: PlayCdnChallengeResponse? = null
+            var challengeFailure = "challenge tidak menghasilkan respons"
 
-            Log.d(DEBUG_TAG, "extractor=PlayCDN challenge id=$id player=$playerUrl")
-            val challengeRequest = requestBuilder(challengeUrl.toString(), playerUrl)
-                .post(ByteArray(0).toRequestBody(contentType = null))
-                .build()
-            val challenge = client.newCall(challengeRequest).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IllegalStateException("challenge HTTP ${response.code}")
-                }
-                jsonMapper.readValue(
-                    response.body?.string().orEmpty(),
-                    PlayCdnChallengeResponse::class.java
+            for (attempt in 1..CHALLENGE_MAX_ATTEMPTS) {
+                val challengeUrl = "$mainUrl/backend.php".toHttpUrl().newBuilder()
+                    .addQueryParameter("action", "get_challenge")
+                    .addQueryParameter("id", id)
+                    .addQueryParameter("token_hash", tokenHash)
+                    .addQueryParameter("w", CANVAS_WIDTH.toString())
+                    .addQueryParameter("h", CANVAS_HEIGHT.toString())
+                    .addQueryParameter("t", System.currentTimeMillis().toString())
+                    .build()
+
+                Log.d(
+                    DEBUG_TAG,
+                    "extractor=PlayCDN challenge attempt=$attempt id=$id " +
+                        "player=$playerUrl url=$challengeUrl"
                 )
+                val challengeRequest = requestBuilder(challengeUrl.toString(), playerUrl)
+                    .header("Connection", "close")
+                    .post(ByteArray(0).toRequestBody(contentType = null))
+                    .build()
+
+                var shouldRetry = false
+                challengeClient.newCall(challengeRequest).execute().use { response ->
+                    val responseBody = response.body?.string().orEmpty()
+                    val server = response.header("Server").orEmpty()
+                    val cfRay = response.header("CF-RAY").orEmpty()
+
+                    Log.d(
+                        DEBUG_TAG,
+                        "extractor=PlayCDN challengeResponse attempt=$attempt " +
+                            "code=${response.code} protocol=${response.protocol} " +
+                            "finalUrl=${response.request.url} server=$server cfRay=$cfRay " +
+                            "body=${responseBodyForLog(responseBody)}"
+                    )
+
+                    if (response.isSuccessful) {
+                        challenge = jsonMapper.readValue(
+                            responseBody,
+                            PlayCdnChallengeResponse::class.java
+                        )
+                    } else {
+                        challengeFailure =
+                            "challenge HTTP ${response.code}; body=${responseBodyForLog(responseBody)}"
+                        shouldRetry = response.code == 502 ||
+                            response.code == 503 ||
+                            response.code == 504
+                    }
+                }
+
+                if (challenge != null) break
+                if (!shouldRetry || attempt == CHALLENGE_MAX_ATTEMPTS) {
+                    throw IllegalStateException(challengeFailure)
+                }
+
+                Log.w(
+                    DEBUG_TAG,
+                    "extractor=PlayCDN challenge gateway failure; retry satu kali " +
+                        "setelah ${CHALLENGE_RETRY_DELAY_MS}ms"
+                )
+                Thread.sleep(CHALLENGE_RETRY_DELAY_MS)
             }
-            if (!challenge.status.equals("success", ignoreCase = true)) {
-                throw IllegalStateException("challenge status=${challenge.status}")
+
+            val challengeData = challenge
+                ?: throw IllegalStateException(challengeFailure)
+            if (!challengeData.status.equals("success", ignoreCase = true)) {
+                throw IllegalStateException("challenge status=${challengeData.status}")
             }
-            val challengeToken = challenge.challengeToken?.takeIf { it.isNotBlank() }
+            val challengeToken = challengeData.challengeToken?.takeIf { it.isNotBlank() }
                 ?: throw IllegalStateException("challenge_token kosong")
 
             val downTime = System.currentTimeMillis()
@@ -701,7 +758,7 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
                 token = token,
                 challengeToken = challengeToken,
                 tokenHash = tokenHash,
-                cidToken = challenge.cidToken
+                cidToken = challengeData.cidToken
             )
 
             val verifyBody = jsonMapper.writeValueAsString(payload)
