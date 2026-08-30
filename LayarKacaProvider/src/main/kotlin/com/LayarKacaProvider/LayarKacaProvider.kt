@@ -522,6 +522,26 @@ class LayarKacaProvider : MainAPI() {
                         Log.e(DEBUG_TAG, "extractor=TurboVIP legacy failed id=$id", e)
                     }
                 }
+
+                // Stage 6 CONFIRMED: videonode P2P resolve ke player PlayCDN,
+                // lalu challenge + verify menghasilkan fileUrl HLS absolut.
+                hostMatches(resolvedUrl, "playcdn.de") &&
+                    runCatching { URI(resolvedUrl).path == "/video.php" }.getOrDefault(false) -> {
+                    routedPlayers++
+                    Log.d(
+                        DEBUG_TAG,
+                        "extractor=PlayCDN resolvedIframe=$resolvedUrl referer=$extractorReferer"
+                    )
+                    try {
+                        PlayCdnP2PExtractor().getUrl(
+                            resolvedUrl, extractorReferer, subtitleCallback, tracedCallback
+                        )
+                    } catch (e: Exception) {
+                        Log.e(DEBUG_TAG, "extractor=PlayCDN failed resolvedIframe=$resolvedUrl", e)
+                    }
+                }
+
+                // Pertahankan HowNetwork hanya untuk format P2P lama.
                 resolvedUrl.contains("/iframe/p2p/") -> {
                     routedPlayers++
                     val id = resolvedUrl.substringAfter("/iframe/p2p/").substringBefore("/")
