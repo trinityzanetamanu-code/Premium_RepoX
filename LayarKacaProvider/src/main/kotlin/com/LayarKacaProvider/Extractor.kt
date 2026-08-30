@@ -646,7 +646,7 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
                 response.request.url.toString() to response.body?.string().orEmpty()
             }
 
-            val dataJson = Regex("""\bvar\s+data\s*=\s*(\{[\s\S]*?})\s*;""")
+            val dataJson = Regex("""\bvar\s+data\s*=\s*(\{[\s\S]*?\})\s*;""")
                 .find(playerHtml)
                 ?.groupValues
                 ?.getOrNull(1)
