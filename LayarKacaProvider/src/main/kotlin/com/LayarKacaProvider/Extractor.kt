@@ -16,7 +16,6 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -79,35 +78,15 @@ data class PlayCdnPlayerData(
     @JsonProperty("token") val token: String? = null
 )
 
-data class PlayCdnChallengeResponse(
-    @JsonProperty("status") val status: String? = null,
-    @JsonProperty("challenge_token") val challengeToken: String? = null,
-    @JsonProperty("cid_token") val cidToken: String? = null,
-    @JsonProperty("image") val image: String? = null
-)
-
 data class PlayCdnVerifyResponse(
     @JsonProperty("status") val status: String? = null,
     @JsonProperty("fileUrl") val fileUrl: String? = null,
     @JsonProperty("message") val message: String? = null
 )
 
-data class PlayCdnTrajectoryPoint(
-    @JsonProperty("x") val x: Int,
-    @JsonProperty("y") val y: Int,
-    @JsonProperty("t") val t: Long
-)
-
 data class PlayCdnVerifyPayload(
-    @JsonProperty("click_x") val clickX: Int,
-    @JsonProperty("click_y") val clickY: Int,
-    @JsonProperty("trajectory") val trajectory: List<PlayCdnTrajectoryPoint>,
-    @JsonProperty("canvas_width") val canvasWidth: Int,
-    @JsonProperty("canvas_height") val canvasHeight: Int,
     @JsonProperty("token") val token: String,
-    @JsonProperty("challenge_token") val challengeToken: String,
-    @JsonProperty("token_hash") val tokenHash: String,
-    @JsonProperty("cid_token") val cidToken: String?
+    @JsonProperty("is_ios") val isIos: Boolean
 )
 
 data class CastChalResp(
@@ -564,7 +543,7 @@ open class Lk21TurboExtractor : ExtractorApi() {
 // =========================================================================
 open class PlayCdnP2PExtractor : ExtractorApi() {
     override var name = "LK21 PlayCDN P2P"
-    override var mainUrl = "https://challenge.playcdn.de"
+    override var mainUrl = "https://playcdn.de"
     override val requiresReferer = false
 
     companion object {
@@ -573,11 +552,6 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
         private const val PLAYCDN_UA =
             "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36"
-        private const val CANVAS_WIDTH = 360
-        private const val CANVAS_HEIGHT = 203
-        private const val CLICK_X = 180
-        private const val CLICK_Y = 101
-        private const val TAP_DELAY_MS = 120L
     }
 
     private class SessionCookieJar : CookieJar {
@@ -607,15 +581,10 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
         }
     }
 
-    private fun sha256Hex(value: String): String = MessageDigest
-        .getInstance("SHA-256")
-        .digest(value.toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
-
     private fun requestBuilder(url: String, referer: String): Request.Builder = Request.Builder()
         .url(url)
         .header("User-Agent", PLAYCDN_UA)
-        .header("Accept", "application/json, text/plain, */*")
+        .header("Accept", "*/*")
         .header("Origin", PLAYCDN_ORIGIN)
         .header("Referer", referer)
 
@@ -646,7 +615,10 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
                 response.request.url.toString() to response.body?.string().orEmpty()
             }
 
-            val dataJson = Regex("""\bvar\s+data\s*=\s*(\{[\s\S]*?\})\s*;""")
+            val dataJson = Regex(
+                """\bvar\s+data\s*=\s*(\{.*?\})\s*;""",
+                RegexOption.DOT_MATCHES_ALL
+            )
                 .find(playerHtml)
                 ?.groupValues
                 ?.getOrNull(1)
@@ -656,52 +628,16 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
                 ?: throw IllegalStateException("data.id kosong")
             val token = playerData.token?.takeIf { it.isNotBlank() }
                 ?: throw IllegalStateException("data.token kosong")
-            val tokenHash = sha256Hex(token)
+            Log.d(
+                DEBUG_TAG,
+                "extractor=PlayCDN player id=$id playerHost=" +
+                    runCatching { URI(playerUrl).host }.getOrNull() +
+                    " tokenLength=${token.length}"
+            )
 
-            val challengeUrl = "$mainUrl/backend.php".toHttpUrl().newBuilder()
-                .addQueryParameter("action", "get_challenge")
-                .addQueryParameter("id", id)
-                .addQueryParameter("token_hash", tokenHash)
-                .addQueryParameter("w", CANVAS_WIDTH.toString())
-                .addQueryParameter("h", CANVAS_HEIGHT.toString())
-                .addQueryParameter("t", System.currentTimeMillis().toString())
-                .build()
-
-            Log.d(DEBUG_TAG, "extractor=PlayCDN challenge id=$id player=$playerUrl")
-            val challengeRequest = requestBuilder(challengeUrl.toString(), playerUrl)
-                .post(ByteArray(0).toRequestBody(contentType = null))
-                .build()
-            val challenge = client.newCall(challengeRequest).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IllegalStateException("challenge HTTP ${response.code}")
-                }
-                jsonMapper.readValue(
-                    response.body?.string().orEmpty(),
-                    PlayCdnChallengeResponse::class.java
-                )
-            }
-            if (!challenge.status.equals("success", ignoreCase = true)) {
-                throw IllegalStateException("challenge status=${challenge.status}")
-            }
-            val challengeToken = challenge.challengeToken?.takeIf { it.isNotBlank() }
-                ?: throw IllegalStateException("challenge_token kosong")
-
-            val downTime = System.currentTimeMillis()
-            Thread.sleep(TAP_DELAY_MS)
-            val upTime = System.currentTimeMillis()
             val payload = PlayCdnVerifyPayload(
-                clickX = CLICK_X,
-                clickY = CLICK_Y,
-                trajectory = listOf(
-                    PlayCdnTrajectoryPoint(CLICK_X, CLICK_Y, downTime),
-                    PlayCdnTrajectoryPoint(CLICK_X, CLICK_Y, upTime)
-                ),
-                canvasWidth = CANVAS_WIDTH,
-                canvasHeight = CANVAS_HEIGHT,
                 token = token,
-                challengeToken = challengeToken,
-                tokenHash = tokenHash,
-                cidToken = challenge.cidToken
+                isIos = false
             )
 
             val verifyBody = jsonMapper.writeValueAsString(payload)
@@ -709,13 +645,12 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
             val verifyRequest = requestBuilder("$mainUrl/verify.php", playerUrl)
                 .post(verifyBody)
                 .build()
-            val verify = client.newCall(verifyRequest).execute().use { response ->
+            val (verifyHttpStatus, verify) = client.newCall(verifyRequest).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw IllegalStateException("verify HTTP ${response.code}")
                 }
-                jsonMapper.readValue(
-                    response.body?.string().orEmpty(),
-                    PlayCdnVerifyResponse::class.java
+                response.code to jsonMapper.readValue(
+                    response.body?.string().orEmpty(), PlayCdnVerifyResponse::class.java
                 )
             }
             if (!verify.status.equals("success", ignoreCase = true)) {
@@ -733,12 +668,6 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
             } else {
                 ExtractorLinkType.M3U8
             }
-            val mediaHeaders = mapOf(
-                "User-Agent" to PLAYCDN_UA,
-                "Origin" to PLAYCDN_ORIGIN,
-                "Referer" to playerUrl
-            )
-
             callback(
                 newExtractorLink(
                     source = name,
@@ -746,14 +675,13 @@ open class PlayCdnP2PExtractor : ExtractorApi() {
                     url = mediaUrl,
                     type = mediaType
                 ) {
-                    this.referer = playerUrl
                     this.quality = Qualities.Unknown.value
-                    this.headers = mediaHeaders
                 }
             )
             Log.d(
                 DEBUG_TAG,
-                "extractor=PlayCDN success id=$id type=$mediaType mediaHost=" +
+                "extractor=PlayCDN verify status=${verify.status} http=$verifyHttpStatus " +
+                    "id=$id type=$mediaType mediaHost=" +
                     runCatching { URI(mediaUrl).host }.getOrNull()
             )
         } catch (e: Exception) {
