@@ -756,6 +756,14 @@ open class CastExtractor : ExtractorApi() {
     override var mainUrl = "https://weneverbeenfree.com"
     override val requiresReferer = false
 
+    companion object {
+        private const val DEBUG_TAG = "LAYARKACA_DEBUG"
+        private const val CAST_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36"
+        private const val CAST_MEDIA_UA =
+            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36"
+    }
+
     private fun re(t: Long, e: Int): Long = ((t shl e) or (t ushr (32 - e))) and 0xFFFFFFFFL
     private fun ht(t: Long, e: Long): Long = (t * e) and 0xFFFFFFFFL
 
@@ -872,22 +880,43 @@ open class CastExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val videoId = url.substringAfterLast("/").substringBefore("?")
+        val playerUri = try {
+            URI(url)
+        } catch (e: Exception) {
+            Log.e(DEBUG_TAG, "extractor=Cast invalidPlayerUrl url=$url", e)
+            return
+        }
+        val playerOrigin = if (
+            !playerUri.scheme.isNullOrBlank() && !playerUri.host.isNullOrBlank()
+        ) {
+            "${playerUri.scheme}://${playerUri.host}" +
+                if (playerUri.port > 0) ":${playerUri.port}" else ""
+        } else {
+            Log.e(DEBUG_TAG, "extractor=Cast missingPlayerOrigin url=$url")
+            return
+        }
+        val videoId = playerUri.path?.trimEnd('/')?.substringAfterLast('/')
+            ?.takeIf { it.isNotBlank() } ?: return
+        val isCurrentGn1r5n = playerUri.host.equals("gn1r5n.org", ignoreCase = true) ||
+            playerUri.host?.endsWith(".gn1r5n.org", ignoreCase = true) == true
 
         val commonHeaders = mapOf(
-            "User-Agent"       to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
-            "Origin"           to mainUrl,
+            "User-Agent"       to CAST_UA,
+            "Origin"           to playerOrigin,
             "Referer"          to url,
-            "X-Embed-Origin"   to "playeriframe.sbs",
+            "X-Embed-Origin"   to if (isCurrentGn1r5n) "videonode.de" else "playeriframe.sbs",
             "X-Embed-Parent"   to url,
-            "X-Embed-Referer"  to "https://playeriframe.sbs/"
+            "X-Embed-Referer"  to if (isCurrentGn1r5n) "https://videonode.de/" else "https://playeriframe.sbs/"
         )
 
         try {
-            app.get("$mainUrl/api/videos/$videoId/embed/details", headers = commonHeaders)
-            app.get("$mainUrl/api/videos/$videoId/embed/settings", headers = commonHeaders)
+            Log.d(DEBUG_TAG, "extractor=Cast called player=$url origin=$playerOrigin videoId=$videoId")
+            val detailsRes = app.get("$playerOrigin/api/videos/$videoId/embed/details", headers = commonHeaders)
+            val settingsRes = app.get("$playerOrigin/api/videos/$videoId/embed/settings", headers = commonHeaders)
+            Log.d(DEBUG_TAG, "extractor=Cast detailsStatus=${detailsRes.code} settingsStatus=${settingsRes.code}")
 
-            val chalRes  = app.post("$mainUrl/api/videos/access/challenge", headers = commonHeaders)
+            val chalRes  = app.post("$playerOrigin/api/videos/access/challenge", headers = commonHeaders)
+            Log.d(DEBUG_TAG, "extractor=Cast challengeStatus=${chalRes.code}")
             val chalJson = jsonMapper.readValue(chalRes.text, CastChalResp::class.java)
 
             val nonce = chalJson.nonce ?: return
@@ -925,7 +954,8 @@ open class CastExtractor : ExtractorApi() {
                 "attributes" to mapOf("entropy" to "high")
             )
 
-            val attestRes  = app.post("$mainUrl/api/videos/access/attest", headers = commonHeaders, json = attestPayload)
+            val attestRes  = app.post("$playerOrigin/api/videos/access/attest", headers = commonHeaders, json = attestPayload)
+            Log.d(DEBUG_TAG, "extractor=Cast attestStatus=${attestRes.code}")
             val attestJson = jsonMapper.readValue(attestRes.text, CastAttestResp::class.java)
             val sViewerId  = attestJson.viewer_id ?: return
             val sDeviceId  = attestJson.device_id ?: return
@@ -939,7 +969,8 @@ open class CastExtractor : ExtractorApi() {
             )
 
             val captchaPayload = mapOf("fingerprint" to fingerprintObj)
-            val captchaRes     = app.post("$mainUrl/api/videos/$videoId/embed/captcha", headers = commonHeaders, json = captchaPayload)
+            val captchaRes     = app.post("$playerOrigin/api/videos/$videoId/embed/captcha", headers = commonHeaders, json = captchaPayload)
+            Log.d(DEBUG_TAG, "extractor=Cast captchaStatus=${captchaRes.code}")
             val captchaJson    = jsonMapper.readValue(captchaRes.text, CastCaptchaResp::class.java)
 
             val powToken   = captchaJson.pow_token ?: return
@@ -947,13 +978,15 @@ open class CastExtractor : ExtractorApi() {
             val difficulty = captchaJson.pow_difficulty ?: 8
 
             val solution = solvePow(powToken, powNonce, difficulty) ?: return
+            Log.d(DEBUG_TAG, "extractor=Cast powSolved=true difficulty=$difficulty")
 
             val verifyPayload = mapOf(
                 "pow_token"   to powToken,
                 "solution"    to solution,
                 "fingerprint" to fingerprintObj
             )
-            val verifyRes = app.post("$mainUrl/api/videos/$videoId/embed/captcha/verify", headers = commonHeaders, json = verifyPayload)
+            val verifyRes = app.post("$playerOrigin/api/videos/$videoId/embed/captcha/verify", headers = commonHeaders, json = verifyPayload)
+            Log.d(DEBUG_TAG, "extractor=Cast captchaVerifyStatus=${verifyRes.code}")
             val verifyJson = jsonMapper.readValue(verifyRes.text, CastVerifyResp::class.java)
             val finalCaptchaToken = verifyJson.captcha_token ?: verifyJson.token ?: return
 
@@ -963,7 +996,8 @@ open class CastExtractor : ExtractorApi() {
                 put("Cookie", "byse_viewer_id=$sViewerId; byse_device_id=$sDeviceId")
             }
 
-            val pbRes     = app.post("$mainUrl/api/videos/$videoId/embed/playback", headers = playbackHeaders, json = pbPayload)
+            val pbRes     = app.post("$playerOrigin/api/videos/$videoId/embed/playback", headers = playbackHeaders, json = pbPayload)
+            Log.d(DEBUG_TAG, "extractor=Cast playbackStatus=${pbRes.code}")
             val pbResp   = jsonMapper.readValue(pbRes.text, CastPbResp::class.java)?.playback ?: return
             val iv       = b64urlDecode(pbResp.iv ?: return)
             val payload  = b64urlDecode(pbResp.payload ?: return)
@@ -1007,30 +1041,32 @@ open class CastExtractor : ExtractorApi() {
                 } catch (e: Exception) {}
             }
 
-            try {
-                app.post("$mainUrl/api/videos/$videoId/embed/view", headers = playbackHeaders, json = pbPayload)
-            } catch (e: Exception) {}
-
-            if (realUrl != null) {
+            val finalMediaUrl = realUrl
+            if (finalMediaUrl != null) {
+                Log.d(
+                    DEBUG_TAG,
+                    "extractor=Cast aesDecryptSuccess=true mediaHost=" +
+                        runCatching { URI(finalMediaUrl).host }.getOrNull()
+                )
                 callback(
                     newExtractorLink(
                         source = "CAST HD",
                         name   = "CAST $qualityLabel",
-                        url    = realUrl,
+                        url    = finalMediaUrl,
                         type   = ExtractorLinkType.M3U8
                     ) {
-                        this.referer = "$mainUrl/"
+                        this.referer = "$playerOrigin/"
                         this.quality = Qualities.Unknown.value
                         this.headers = mapOf(
-                            "Origin"     to mainUrl,
-                            "Referer"    to "$mainUrl/",
-                            "User-Agent" to commonHeaders["User-Agent"]!!
+                            "Referer"    to "$playerOrigin/",
+                            "User-Agent" to CAST_MEDIA_UA
                         )
                     }
                 )
+                Log.d(DEBUG_TAG, "extractor=Cast callbackMedia=true referer=$playerOrigin/")
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(DEBUG_TAG, "extractor=Cast failed player=$url", e)
         }
     }
 }

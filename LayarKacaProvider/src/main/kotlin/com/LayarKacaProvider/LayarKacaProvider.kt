@@ -553,6 +553,27 @@ class LayarKacaProvider : MainAPI() {
                         Log.e(DEBUG_TAG, "extractor=HowNetwork legacy failed id=$id", e)
                     }
                 }
+                // Current CAST: actual iframe URL is the source of truth. The
+                // videonode wrapper ID is not the CAST player ID.
+                hostMatches(resolvedUrl, "gn1r5n.org") &&
+                    runCatching {
+                        Regex("^/e/[A-Za-z0-9_-]+/?$").matches(URI(resolvedUrl).path)
+                    }.getOrDefault(false) -> {
+                    routedPlayers++
+                    Log.d(
+                        DEBUG_TAG,
+                        "extractor=Cast resolvedIframe=$resolvedUrl referer=$extractorReferer"
+                    )
+                    try {
+                        CastExtractor().getUrl(
+                            resolvedUrl, extractorReferer, subtitleCallback, tracedCallback
+                        )
+                    } catch (e: Exception) {
+                        Log.e(DEBUG_TAG, "extractor=Cast failed resolvedIframe=$resolvedUrl", e)
+                    }
+                }
+
+                // Pertahankan jalur CAST lama untuk wrapper non-videonode lama.
                 resolvedUrl.contains("/iframe/cast/") -> {
                     routedPlayers++
                     val id = resolvedUrl.substringAfter("/iframe/cast/").substringBefore("/")
