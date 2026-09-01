@@ -297,6 +297,7 @@ object HydraxProxy {
     }
 
     fun start() {
+        Log.i("HydraxProxy", "H3_DYNAMIC_MULTIPART_BUILD=20260901_H3_V1")
         if (isRunning) return
         try {
             serverSocket = ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
@@ -412,7 +413,7 @@ object HydraxProxy {
             val serverRangeHeader = "bytes=$localOffset-$localEnd"
             Log.i(
                 "HydraxProxy",
-                "[$clientId] rangeMap sourceId=$sourceId globalStart=$reqStart " +
+                "[$clientId] H3_MAP globalStart=$reqStart sourceId=$sourceId " +
                     "mappedPart=$partIndex partStart=$partStart localOffset=$localOffset " +
                     "virtualTotal=${partMap.virtualTotalSize}"
             )
@@ -616,8 +617,8 @@ open class AbyssExtractor : ExtractorApi() {
                             "&key=$fnKeyHex&size=$sizeParam&sid=$sourceId"
                     Log.i(
                         "HydraxProxy",
-                        "sourceRegistered sourceId=$sourceId label=$label " +
-                            "codec=${src.codec.orEmpty()} virtualTotal=${src.size ?: "UNKNOWN"}"
+                        "H3_SOURCE_REGISTER label=$label codec=${src.codec.orEmpty()} " +
+                            "virtualTotal=${src.size ?: "UNKNOWN"} sourceId=$sourceId"
                     )
 
                     callback(
