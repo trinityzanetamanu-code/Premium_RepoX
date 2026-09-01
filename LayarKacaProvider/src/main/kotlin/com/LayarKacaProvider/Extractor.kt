@@ -31,6 +31,7 @@ import java.security.MessageDigest
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 import java.security.interfaces.ECPublicKey
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
@@ -63,7 +64,8 @@ data class HydraxSource(
     @JsonProperty("label") val label: String? = null,
     @JsonProperty("codec") val codec: String? = null,
     @JsonProperty("path") val path: String? = null,
-    @JsonProperty("url") val url: String? = null
+    @JsonProperty("url") val url: String? = null,
+    @JsonProperty("size") val size: Long? = null
 )
 
 data class HowNetworkResponse(
@@ -132,6 +134,15 @@ object HydraxProxy {
     @Volatile private var isRunning = false
     private var serverSocket: ServerSocket? = null
 
+    private data class PartMap(
+        val partSizes: List<Long>,
+        val cumulativeStarts: List<Long>,
+        val virtualTotalSize: Long
+    )
+
+    private val partMapCache = ConcurrentHashMap<String, PartMap>()
+    private const val MAX_DISCOVERY_PARTS = 32
+
     private val proxyClient by lazy {
         app.baseClient.newBuilder()
             .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
@@ -141,6 +152,148 @@ object HydraxProxy {
                 maxRequestsPerHost = 100
             })
             .build()
+    }
+
+    fun sourceId(realUrl: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(realUrl.toByteArray(Charsets.UTF_8))
+            .take(6)
+            .joinToString("") { "%02x".format(it) }
+
+    private fun physicalPartUrl(realUrl: String, partIndex: Int): String =
+        if (partIndex == 0) realUrl else "$realUrl$partIndex"
+
+    private fun discoverPartMap(
+        realUrl: String,
+        expectedVirtualSize: Long?,
+        sourceId: String
+    ): PartMap? {
+        val sizes = mutableListOf<Long>()
+        var total = 0L
+
+        for (partIndex in 0 until MAX_DISCOVERY_PARTS) {
+            val probe = Request.Builder()
+                .url(physicalPartUrl(realUrl, partIndex))
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .header("Referer", "https://abyssplayer.com/")
+                .header("Origin", "https://abyssplayer.com")
+                .header("Accept-Encoding", "identity")
+                .header("Range", "bytes=0-0")
+                .build()
+
+            val partSize = try {
+                proxyClient.newCall(probe).execute().use { probeResponse ->
+                    if (probeResponse.code !in 200..299) {
+                        if (expectedVirtualSize == null && sizes.isNotEmpty() &&
+                            probeResponse.code in setOf(404, 416)
+                        ) {
+                            null
+                        } else {
+                            Log.e(
+                                "HydraxProxy",
+                                "sourceMapFailed sourceId=$sourceId part=$partIndex " +
+                                    "status=${probeResponse.code}"
+                            )
+                            return null
+                        }
+                    } else {
+                        val physicalRange = probeResponse.header("Content-Range").orEmpty()
+                        Regex("(?i)^bytes\\s+\\d+-\\d+/(\\d+)$")
+                            .find(physicalRange)?.groupValues?.getOrNull(1)?.toLongOrNull()
+                            ?: if (probeResponse.code == 200) {
+                                probeResponse.header("Content-Length")?.toLongOrNull()
+                            } else {
+                                null
+                            }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(
+                    "HydraxProxy",
+                    "sourceMapFailed sourceId=$sourceId part=$partIndex " +
+                        "error=${e.javaClass.simpleName}"
+                )
+                return null
+            }
+
+            if (partSize == null) {
+                if (expectedVirtualSize == null && sizes.isNotEmpty()) break
+                Log.e("HydraxProxy", "sourceMapFailed sourceId=$sourceId reason=part_size_missing")
+                return null
+            }
+            if (partSize <= 0L) {
+                Log.e("HydraxProxy", "sourceMapFailed sourceId=$sourceId reason=invalid_part_size")
+                return null
+            }
+
+            sizes.add(partSize)
+            total += partSize
+
+            if (expectedVirtualSize != null) {
+                when {
+                    total == expectedVirtualSize -> break
+                    total > expectedVirtualSize -> {
+                        Log.e(
+                            "HydraxProxy",
+                            "sourceMapFailed sourceId=$sourceId reason=parts_exceed_metadata " +
+                                "sum=$total expected=$expectedVirtualSize"
+                        )
+                        return null
+                    }
+                }
+            }
+        }
+
+        if (sizes.isEmpty()) return null
+        if (expectedVirtualSize != null && total != expectedVirtualSize) {
+            Log.e(
+                "HydraxProxy",
+                "sourceMapFailed sourceId=$sourceId reason=metadata_not_reached " +
+                    "sum=$total expected=$expectedVirtualSize"
+            )
+            return null
+        }
+
+        val virtualTotal = expectedVirtualSize ?: total
+        val starts = ArrayList<Long>(sizes.size)
+        var cumulative = 0L
+        sizes.forEach { size ->
+            starts.add(cumulative)
+            cumulative += size
+        }
+        val map = PartMap(sizes.toList(), starts, virtualTotal)
+        Log.i(
+            "HydraxProxy",
+            "sourceMap sourceId=$sourceId virtualTotal=${map.virtualTotalSize} " +
+                "partCount=${map.partSizes.size} partSizes=${map.partSizes}"
+        )
+        return map
+    }
+
+    private fun getPartMap(
+        realUrl: String,
+        expectedVirtualSize: Long?,
+        sourceId: String
+    ): PartMap? {
+        partMapCache[realUrl]?.let { return it }
+        return synchronized(partMapCache) {
+            partMapCache[realUrl] ?: discoverPartMap(
+                realUrl,
+                expectedVirtualSize,
+                sourceId
+            )?.also { partMapCache[realUrl] = it }
+        }
+    }
+
+    private fun writeRangeNotSatisfiable(
+        output: java.io.OutputStream,
+        virtualTotalSize: Long
+    ) {
+        output.write("HTTP/1.1 416 Range Not Satisfiable\r\n".toByteArray())
+        output.write("Content-Range: bytes */$virtualTotalSize\r\n".toByteArray())
+        output.write("Content-Length: 0\r\n".toByteArray())
+        output.write("Connection: close\r\n\r\n".toByteArray())
+        output.flush()
     }
 
     fun start() {
@@ -198,6 +351,9 @@ object HydraxProxy {
             val encodedUrl = params["url"] ?: return
             val keyHex = params["key"] ?: return
             val realUrl = String(Base64.decode(encodedUrl, Base64.URL_SAFE))
+            val expectedVirtualSize = params["size"]?.toLongOrNull()?.takeIf { it > 0L }
+            val sourceId = params["sid"]?.takeIf { it.matches(Regex("[a-fA-F0-9]{12}")) }
+                ?: HydraxProxy.sourceId(realUrl)
 
             var rangeHeader: String? = null
             while (true) {
@@ -208,15 +364,58 @@ object HydraxProxy {
                 }
             }
 
-            val reqStart = rangeHeader?.replace("bytes=", "")?.split("-")?.get(0)?.toLongOrNull() ?: 0L
+            val requestedRange = rangeHeader
+                ?.removePrefix("bytes=")
+                ?.substringBefore(",")
+                ?.split("-", limit = 2)
+            val reqStart = requestedRange?.getOrNull(0)?.toLongOrNull() ?: 0L
+            val reqEnd = requestedRange?.getOrNull(1)?.toLongOrNull()
             Log.i("HydraxProxy", "[$clientId] [->] EXO MINTA RANGE : ${rangeHeader ?: "FULL (bytes=0-)"}")
 
-            val LIMIT_512MB = 536870912L
-            val partIndex = reqStart / LIMIT_512MB
-            val localOffset = reqStart % LIMIT_512MB
+            val partMap = getPartMap(realUrl, expectedVirtualSize, sourceId)
+            if (partMap == null) {
+                Log.e("HydraxProxy", "[$clientId] sourceMapUnavailable sourceId=$sourceId")
+                output.write("HTTP/1.1 503 Service Unavailable\r\n".toByteArray())
+                output.write("Content-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+                output.flush()
+                return
+            }
+            if (reqStart < 0L || reqStart >= partMap.virtualTotalSize ||
+                (reqEnd != null && reqEnd < reqStart)
+            ) {
+                Log.w(
+                    "HydraxProxy",
+                    "[$clientId] invalidGlobalRange sourceId=$sourceId globalStart=$reqStart " +
+                        "virtualTotal=${partMap.virtualTotalSize}"
+                )
+                writeRangeNotSatisfiable(output, partMap.virtualTotalSize)
+                return
+            }
 
-            val targetUrl = if (partIndex > 0) "$realUrl$partIndex" else realUrl
-            val serverRangeHeader = "bytes=$localOffset-"
+            val partIndex = partMap.cumulativeStarts.indices.firstOrNull { index ->
+                val start = partMap.cumulativeStarts[index]
+                reqStart >= start && reqStart < start + partMap.partSizes[index]
+            }
+            if (partIndex == null) {
+                Log.e("HydraxProxy", "[$clientId] sourceMapGap sourceId=$sourceId globalStart=$reqStart")
+                writeRangeNotSatisfiable(output, partMap.virtualTotalSize)
+                return
+            }
+
+            val partStart = partMap.cumulativeStarts[partIndex]
+            val partSize = partMap.partSizes[partIndex]
+            val localOffset = reqStart - partStart
+            val requestedLocalEnd = reqEnd?.minus(partStart)
+            val localEnd = minOf(partSize - 1L, requestedLocalEnd ?: (partSize - 1L))
+
+            val targetUrl = physicalPartUrl(realUrl, partIndex)
+            val serverRangeHeader = "bytes=$localOffset-$localEnd"
+            Log.i(
+                "HydraxProxy",
+                "[$clientId] rangeMap sourceId=$sourceId globalStart=$reqStart " +
+                    "mappedPart=$partIndex partStart=$partStart localOffset=$localOffset " +
+                    "virtualTotal=${partMap.virtualTotalSize}"
+            )
 
             val request = Request.Builder()
                 .url(targetUrl)
@@ -228,35 +427,41 @@ object HydraxProxy {
                 .build()
 
             val startTime = System.currentTimeMillis()
-            Log.d("HydraxProxy", "[$clientId] [*] Meneruskan request ke Hydrax Part $partIndex...")
+            Log.d(
+                "HydraxProxy",
+                "[$clientId] upstreamRequest sourceId=$sourceId physicalRange=$serverRangeHeader"
+            )
 
             response = proxyClient.newCall(request).execute()
             val timeTaken = System.currentTimeMillis() - startTime
 
             val code = response.code
-            var contentRange = response.header("Content-Range") ?: "Kosong"
-            var contentLength = response.header("Content-Length") ?: "Kosong"
-            var spoofedContentRange = contentRange
+            val contentRange = response.header("Content-Range") ?: "Kosong"
+            val contentLength = response.header("Content-Length") ?: "Kosong"
+            var translatedContentRange: String? = null
 
             if (code == 206 && contentRange != "Kosong") {
                 try {
-                    val rangeData = contentRange.replace("bytes ", "", ignoreCase = true).split("/")
-                    if (rangeData.size == 2) {
-                        val rangePositions = rangeData[0].split("-")
-                        if (rangePositions.size == 2) {
-                            val serverStart = rangePositions[0].toLong()
-                            val serverEnd = rangePositions[1].toLong()
-                            val spoofedStart = serverStart + (partIndex * LIMIT_512MB)
-                            val spoofedEnd = serverEnd + (partIndex * LIMIT_512MB)
-                            spoofedContentRange = "bytes $spoofedStart-$spoofedEnd/*"
-                        }
+                    val match = Regex("(?i)^bytes\\s+(\\d+)-(\\d+)/(\\d+)$").find(contentRange)
+                    val physicalStart = match?.groupValues?.getOrNull(1)?.toLongOrNull()
+                    val physicalEnd = match?.groupValues?.getOrNull(2)?.toLongOrNull()
+                    if (physicalStart != null && physicalEnd != null) {
+                        val globalStart = partStart + physicalStart
+                        val globalEnd = partStart + physicalEnd
+                        translatedContentRange =
+                            "bytes $globalStart-$globalEnd/${partMap.virtualTotalSize}"
                     }
                 } catch (e: Exception) {
-                    Log.w("HydraxProxy", "[$clientId] Gagal memanipulasi Content-Range: ${e.message}")
+                    Log.w("HydraxProxy", "[$clientId] contentRangeTranslateFailed: ${e.message}")
                 }
             }
 
-            Log.i("HydraxProxy", "[$clientId] [<-] RESPON HYDRAX : HTTP $code | Waktu: ${timeTaken}ms | C-Range: $spoofedContentRange | C-Length: $contentLength")
+            Log.i(
+                "HydraxProxy",
+                "[$clientId] upstreamStatus=$code sourceId=$sourceId " +
+                    "physicalRange=$contentRange virtualRange=${translatedContentRange ?: "NONE"} " +
+                    "virtualTotal=${partMap.virtualTotalSize} timeMs=$timeTaken contentLength=$contentLength"
+            )
 
             output.write("HTTP/1.1 $code ${response.message}\r\n".toByteArray())
             for ((key, value) in response.headers) {
@@ -267,8 +472,8 @@ object HydraxProxy {
                 output.write("$key: $value\r\n".toByteArray())
             }
 
-            if (code == 206 && spoofedContentRange != "Kosong") {
-                output.write("Content-Range: $spoofedContentRange\r\n".toByteArray())
+            if (code == 206 && translatedContentRange != null) {
+                output.write("Content-Range: $translatedContentRange\r\n".toByteArray())
             }
 
             output.write("Connection: close\r\n\r\n".toByteArray())
@@ -400,11 +605,20 @@ open class AbyssExtractor : ExtractorApi() {
                     val filename = path.substringAfterLast("/")
                     val fnHash = MessageDigest.getInstance("MD5").digest(filename.toByteArray(Charsets.UTF_8))
                     val fnKeyHex = fnHash.joinToString("") { "%02x".format(it) }
+                    val sourceId = HydraxProxy.sourceId(srcUrl)
 
                     HydraxProxy.start()
 
                     val encodedUrl = Base64.encodeToString(srcUrl.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP)
-                    val localProxyUrl = "http://127.0.0.1:${HydraxProxy.port}/?url=$encodedUrl&key=$fnKeyHex"
+                    val sizeParam = src.size?.takeIf { it > 0L }?.toString().orEmpty()
+                    val localProxyUrl =
+                        "http://127.0.0.1:${HydraxProxy.port}/?url=$encodedUrl" +
+                            "&key=$fnKeyHex&size=$sizeParam&sid=$sourceId"
+                    Log.i(
+                        "HydraxProxy",
+                        "sourceRegistered sourceId=$sourceId label=$label " +
+                            "codec=${src.codec.orEmpty()} virtualTotal=${src.size ?: "UNKNOWN"}"
+                    )
 
                     callback(
                         newExtractorLink(
