@@ -1048,22 +1048,79 @@ open class CastExtractor : ExtractorApi() {
                     "extractor=Cast aesDecryptSuccess=true mediaHost=" +
                         runCatching { URI(finalMediaUrl).host }.getOrNull()
                 )
-                callback(
-                    newExtractorLink(
-                        source = "CAST HD",
-                        name   = "CAST $qualityLabel",
-                        url    = finalMediaUrl,
-                        type   = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "$playerOrigin/"
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "Referer"    to "$playerOrigin/",
-                            "User-Agent" to CAST_MEDIA_UA
-                        )
-                    }
+
+                val mediaHeaders = mapOf(
+                    "Referer" to "$playerOrigin/",
+                    "User-Agent" to CAST_MEDIA_UA
                 )
-                Log.d(DEBUG_TAG, "extractor=Cast callbackMedia=true referer=$playerOrigin/")
+                val normalVariants = mutableListOf<Pair<String, String>>()
+                var hlsMasterStatus = "FETCH_FAILED"
+                var iframeVariantCount = 0
+
+                try {
+                    val masterRes = app.get(finalMediaUrl, headers = mediaHeaders)
+                    hlsMasterStatus = masterRes.code.toString()
+                    val masterText = masterRes.text
+                    val lines = masterText.lines().map { it.trim() }
+                    val validMaster = masterRes.code in 200..299 &&
+                        masterText.trimStart().startsWith("#EXTM3U")
+
+                    iframeVariantCount = lines.count {
+                        it.startsWith("#EXT-X-I-FRAME-STREAM-INF:")
+                    }
+
+                    if (validMaster) {
+                        lines.forEachIndexed { index, line ->
+                            if (!line.startsWith("#EXT-X-STREAM-INF:")) return@forEachIndexed
+
+                            val childUri = lines.drop(index + 1).firstOrNull {
+                                it.isNotBlank() && !it.startsWith("#")
+                            } ?: return@forEachIndexed
+                            val absoluteChild = runCatching {
+                                URI(finalMediaUrl).resolve(childUri).toString()
+                            }.getOrNull() ?: return@forEachIndexed
+                            val height = Regex("RESOLUTION=\\d+x(\\d+)")
+                                .find(line)?.groupValues?.getOrNull(1)
+                            val variantLabel = height?.let { "${it}p" } ?: qualityLabel
+                            normalVariants.add(absoluteChild to variantLabel)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(DEBUG_TAG, "extractor=Cast hlsMasterParseFallback reason=${e.javaClass.simpleName}")
+                }
+
+                Log.d(DEBUG_TAG, "extractor=Cast hlsMasterStatus=$hlsMasterStatus")
+                Log.d(DEBUG_TAG, "extractor=Cast normalVariantCount=${normalVariants.size}")
+                Log.d(DEBUG_TAG, "extractor=Cast iframeVariantCount=$iframeVariantCount")
+                Log.d(DEBUG_TAG, "extractor=Cast iframeVariantIgnored=${iframeVariantCount > 0}")
+
+                val playableVariants = normalVariants.ifEmpty {
+                    mutableListOf(finalMediaUrl to qualityLabel)
+                }
+
+                playableVariants.forEach { (mediaUrl, variantLabel) ->
+                    val selectedPath = runCatching {
+                        URI(mediaUrl).let { "${it.host}${it.path}" }
+                    }.getOrDefault("invalid")
+                    Log.d(DEBUG_TAG, "extractor=Cast selectedNormalVariant=$selectedPath")
+                    callback(
+                        newExtractorLink(
+                            source = "CAST HD",
+                            name   = "CAST $variantLabel",
+                            url    = mediaUrl,
+                            type   = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = "$playerOrigin/"
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mediaHeaders
+                        }
+                    )
+                    Log.d(
+                        DEBUG_TAG,
+                        "extractor=Cast callbackMedia=true referer=$playerOrigin/ " +
+                            "fallback=${normalVariants.isEmpty()}"
+                    )
+                }
             }
         } catch (e: Exception) {
             Log.e(DEBUG_TAG, "extractor=Cast failed player=$url", e)
