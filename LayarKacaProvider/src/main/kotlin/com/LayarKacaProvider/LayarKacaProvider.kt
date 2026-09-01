@@ -585,6 +585,30 @@ class LayarKacaProvider : MainAPI() {
                         Log.e(DEBUG_TAG, "extractor=Cast legacy failed id=$id", e)
                     }
                 }
+
+                // Current Hydrax: gunakan actual nested iframe dari videonode.
+                // Wrapper ID bukan slug Abyss dan tidak boleh dipakai extractor.
+                hostMatches(resolvedUrl, "abyssplayer.com") &&
+                    runCatching {
+                        Regex("^/[A-Za-z0-9_-]{6,20}/?$").matches(URI(resolvedUrl).path)
+                    }.getOrDefault(false) -> {
+                    routedPlayers++
+                    val resolvedHost = runCatching { URI(resolvedUrl).host }.getOrNull().orEmpty()
+                    Log.d(
+                        DEBUG_TAG,
+                        "routing=HydraxModern hydraxResolvedUrl=$resolvedUrl " +
+                            "hydraxResolvedHost=$resolvedHost"
+                    )
+                    try {
+                        AbyssExtractor().getUrl(
+                            resolvedUrl, currentUrl, subtitleCallback, tracedCallback
+                        )
+                    } catch (e: Exception) {
+                        Log.e(DEBUG_TAG, "extractor=Abyss modern failed resolvedIframe=$resolvedUrl", e)
+                    }
+                }
+
+                // Pertahankan jalur Hydrax lama untuk wrapper non-videonode lama.
                 resolvedUrl.contains("/iframe/hydrax/") -> {
                     routedPlayers++
                     val id = resolvedUrl.substringAfter("/iframe/hydrax/").substringBefore("/")
