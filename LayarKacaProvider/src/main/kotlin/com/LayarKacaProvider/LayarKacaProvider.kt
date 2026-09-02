@@ -241,7 +241,7 @@ class LayarKacaProvider : MainAPI() {
                 val cleanTitle = getCleanTitle(rawTitle)
                 val href = fixUrl(slug)
 
-                val rawPoster = item.poster?.let { "https://poster.showcdnx.com/wp-content/uploads/$it" }
+                val rawPoster = item.poster?.let { "https://poster.assetsy.de/wp-content/uploads/$it" }
                 val posterUrl = fixPosterUrl(rawPoster)
 
                 val quality = getQualityFromString(item.quality)
