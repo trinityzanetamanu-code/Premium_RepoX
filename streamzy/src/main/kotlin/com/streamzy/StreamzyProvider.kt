@@ -3241,7 +3241,7 @@ class StreamzyProvider(
 
         for (
             (serverZeroIndex, serverPageUrl) in
-            listOf(watchUrl).withIndex()
+            distinctServerPages.withIndex()
         ) {
 
             val serverIndex = serverZeroIndex + 1
