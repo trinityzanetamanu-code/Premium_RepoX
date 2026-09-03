@@ -102,6 +102,33 @@ class StreamzyProvider(
         var pages: Int = 0
     )
 
+    private data class PeachifyApiResponse(
+        @param:JsonProperty("sources")
+        val sources: List<PeachifySource> = emptyList(),
+
+        @param:JsonProperty("subtitles")
+        val subtitles: Any? = null
+    )
+
+    private data class PeachifySource(
+        @param:JsonProperty("url")
+        val url: String? = null,
+
+        @param:JsonProperty("type")
+        val type: String? = null,
+
+        @param:JsonProperty("dub")
+        val dub: String? = null,
+
+        @param:JsonProperty("headers")
+        val upstreamHeaders: Map<String, String>? = null
+    )
+
+    private data class PeachifyContent(
+        val kind: String,
+        val apiPath: String
+    )
+
     private class WasmBridge(
         private val successCallback: (String) -> Unit,
         private val failureCallback: (String) -> Unit
@@ -380,6 +407,250 @@ class StreamzyProvider(
         } catch (_: Exception) {
             "invalid"
         }
+    }
+
+    private fun getPeachifyContent(
+        embedUrl: String
+    ): PeachifyContent? {
+
+        val parsed =
+            try {
+                URI(embedUrl)
+            } catch (_: Exception) {
+                return null
+            }
+
+        if (!parsed.host.equals("peachify.top", true)) {
+            return null
+        }
+
+        val path = parsed.path.orEmpty()
+
+        Regex(
+            """^/embed/movie/(\d+)/?$""",
+            RegexOption.IGNORE_CASE
+        )
+            .matchEntire(path)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let { tmdbId ->
+                return PeachifyContent(
+                    kind = "movie",
+                    apiPath = "movie/$tmdbId"
+                )
+            }
+
+        Regex(
+            """^/embed/tv/(\d+)/(\d+)/(\d+)/?$""",
+            RegexOption.IGNORE_CASE
+        )
+            .matchEntire(path)
+            ?.let { match ->
+                return PeachifyContent(
+                    kind = "series",
+                    apiPath =
+                        "tv/${match.groupValues[1]}/" +
+                            "${match.groupValues[2]}/" +
+                            match.groupValues[3]
+                )
+            }
+
+        return null
+    }
+
+    private fun isPeachifyServerPage(
+        url: String
+    ): Boolean {
+
+        return try {
+            URI(url)
+                .rawQuery
+                ?.split("&")
+                ?.any { part ->
+                    part
+                        .substringBefore("=")
+                        .equals("server", true) &&
+                        part
+                            .substringAfter(
+                                delimiter = "=",
+                                missingDelimiterValue = ""
+                            )
+                            .equals("peachify", true)
+                } == true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun peachifyLabel(
+        value: String?
+    ): String {
+
+        val clean =
+            value
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: "Source"
+
+        return clean.replaceFirstChar { character ->
+            if (character.isLowerCase()) {
+                character.titlecase()
+            } else {
+                character.toString()
+            }
+        }
+    }
+
+    private suspend fun resolvePeachify(
+        embedUrl: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+
+        val content =
+            getPeachifyContent(embedUrl)
+                ?: return false
+
+        logMarker(
+            "STREAMZY_PEACHIFY|STAGE=iframe|" +
+                "CONTENT=${content.kind}|" +
+                "HOST=${safeHost(embedUrl)}"
+        )
+
+        val outerHeaders =
+            mapOf(
+                "Referer" to embedUrl,
+                "Origin" to "https://peachify.top"
+            )
+
+        var callbackCount = 0
+        val emittedUrls = mutableSetOf<String>()
+
+        for (route in listOf("air", "holly")) {
+            val apiUrl =
+                "https://none.eat-peach.sbs/" +
+                    "$route/${content.apiPath}"
+
+            val response =
+                try {
+                    app.get(
+                        url = apiUrl,
+                        headers = mapOf(
+                            "Accept" to "application/json"
+                        ),
+                        referer = embedUrl
+                    )
+                } catch (error: Exception) {
+                    if (error is CancellationException) {
+                        throw error
+                    }
+
+                    logMarker(
+                        "STREAMZY_PEACHIFY|STAGE=api|" +
+                            "CONTENT=${content.kind}|" +
+                            "ROUTE=$route|" +
+                            "RESULT=fail|" +
+                            "ERROR=${error.javaClass.simpleName}"
+                    )
+
+                    continue
+                }
+
+            val httpCode =
+                response.okhttpResponse.code
+
+            val payload =
+                if (httpCode in 200..299) {
+                    response.parsedSafe<PeachifyApiResponse>()
+                } else {
+                    null
+                }
+
+            val sources =
+                payload
+                    ?.sources
+                    .orEmpty()
+
+            logMarker(
+                "STREAMZY_PEACHIFY|STAGE=api|" +
+                    "CONTENT=${content.kind}|" +
+                    "ROUTE=$route|" +
+                    "HTTP=$httpCode|" +
+                    "SOURCE_COUNT=${sources.size}"
+            )
+
+            val hlsSources =
+                sources
+                    .filter { source ->
+                        !source.url.isNullOrBlank() &&
+                            source.type.equals(
+                                "hls",
+                                true
+                            )
+                    }
+
+            logMarker(
+                "STREAMZY_PEACHIFY|STAGE=parse|" +
+                    "CONTENT=${content.kind}|" +
+                    "ROUTE=$route|" +
+                    "SOURCE_COUNT=${sources.size}|" +
+                    "HLS_COUNT=${hlsSources.size}|" +
+                    "SUBTITLES_PRESENT=${payload?.subtitles != null}"
+            )
+
+            for (source in hlsSources) {
+                val sourceUrl =
+                    source
+                        .url
+                        ?.takeIf { it.isNotBlank() }
+                        ?: continue
+
+                if (!emittedUrls.add(sourceUrl)) {
+                    continue
+                }
+
+                val label =
+                    peachifyLabel(source.dub)
+
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "Peachify - $label",
+                        url = sourceUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        referer = embedUrl
+                        quality = Qualities.Unknown.value
+                        headers = outerHeaders
+                    }
+                )
+
+                callbackCount += 1
+
+                logMarker(
+                    "STREAMZY_PEACHIFY|STAGE=callback|" +
+                        "CONTENT=${content.kind}|" +
+                        "ROUTE=$route|" +
+                        "COUNT=$callbackCount|" +
+                        "HOST=${safeHost(sourceUrl)}|" +
+                        "TYPE=hls|" +
+                        "LABEL=$label|" +
+                        "UPSTREAM_HEADERS_FORWARDED=false"
+                )
+            }
+
+            if (callbackCount > 0) {
+                break
+            }
+        }
+
+        logMarker(
+            "STREAMZY_PEACHIFY|STAGE=done|" +
+                "CONTENT=${content.kind}|" +
+                "CALLBACKS=$callbackCount|" +
+                "RESULT=${if (callbackCount > 0) "success" else "no-links"}"
+        )
+
+        return callbackCount > 0
     }
 
     private fun resolveHttpUrl(
@@ -2892,9 +3163,85 @@ class StreamzyProvider(
                 }
             }
 
+        val peachifyServerPageUrl =
+            distinctServerPages
+                .firstOrNull(::isPeachifyServerPage)
+
+        if (peachifyServerPageUrl != null) {
+            val peachifyDocument =
+                try {
+                    Jsoup.parse(
+                        app.get(
+                            url = peachifyServerPageUrl,
+                            referer = watchUrl
+                        ).text,
+                        peachifyServerPageUrl
+                    )
+                } catch (error: Exception) {
+                    if (error is CancellationException) {
+                        throw error
+                    }
+
+                    logMarker(
+                        "STREAMZY_PEACHIFY|STAGE=iframe|" +
+                            "CONTENT=$contentKind|" +
+                            "RESULT=server-page-fail|" +
+                            "ERROR=${error.javaClass.simpleName}"
+                    )
+
+                    null
+                }
+
+            val peachifyIframeUrl =
+                peachifyDocument
+                    ?.let { document ->
+                        getIframeUrls(
+                            document,
+                            peachifyServerPageUrl
+                        )
+                    }
+                    ?.firstOrNull { iframeUrl ->
+                        getPeachifyContent(iframeUrl) != null
+                    }
+
+            if (peachifyIframeUrl != null) {
+                testedIframeUrls.add(peachifyIframeUrl)
+
+                try {
+                    resolvePeachify(
+                        embedUrl = peachifyIframeUrl,
+                        callback = forwardingCallback
+                    )
+                } catch (error: Exception) {
+                    if (error is CancellationException) {
+                        throw error
+                    }
+
+                    logMarker(
+                        "STREAMZY_PEACHIFY|STAGE=done|" +
+                            "CONTENT=$contentKind|" +
+                            "RESULT=exception|" +
+                            "ERROR=${error.javaClass.simpleName}"
+                    )
+                }
+            } else {
+                logMarker(
+                    "STREAMZY_PEACHIFY|STAGE=iframe|" +
+                        "CONTENT=$contentKind|" +
+                        "RESULT=not-found"
+                )
+            }
+        } else {
+            logMarker(
+                "STREAMZY_PEACHIFY|STAGE=iframe|" +
+                    "CONTENT=$contentKind|" +
+                    "RESULT=server-page-not-found"
+            )
+        }
+
         for (
             (serverZeroIndex, serverPageUrl) in
-            distinctServerPages.withIndex()
+            listOf(watchUrl).withIndex()
         ) {
 
             val serverIndex = serverZeroIndex + 1
