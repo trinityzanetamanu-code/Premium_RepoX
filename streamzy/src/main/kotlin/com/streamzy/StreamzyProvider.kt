@@ -104,10 +104,7 @@ class StreamzyProvider(
 
     private data class PeachifyApiResponse(
         @param:JsonProperty("sources")
-        val sources: List<PeachifySource> = emptyList(),
-
-        @param:JsonProperty("subtitles")
-        val subtitles: Any? = null
+        val sources: List<PeachifySource> = emptyList()
     )
 
     private data class PeachifySource(
@@ -122,6 +119,23 @@ class StreamzyProvider(
 
         @param:JsonProperty("headers")
         val upstreamHeaders: Map<String, String>? = null
+    )
+
+    private data class PeachifySubtitle(
+        @param:JsonProperty("url")
+        val url: String? = null,
+
+        @param:JsonProperty("display")
+        val display: String? = null,
+
+        @param:JsonProperty("language")
+        val language: String? = null,
+
+        @param:JsonProperty("format")
+        val format: String? = null,
+
+        @param:JsonProperty("isHearingImpaired")
+        val isHearingImpaired: Boolean? = null
     )
 
     private data class PeachifyContent(
@@ -589,17 +603,137 @@ class StreamzyProvider(
                 ?.takeIf { it.isNotBlank() }
                 ?: "Source"
 
-        return clean.replaceFirstChar { character ->
-            if (character.isLowerCase()) {
-                character.titlecase()
-            } else {
-                character.toString()
+        return clean
+            .replace(Regex("\\s+"), " ")
+            .replace("|", " ")
+            .take(80)
+            .replaceFirstChar { character ->
+                if (character.isLowerCase()) {
+                    character.titlecase()
+                } else {
+                    character.toString()
+                }
             }
+    }
+
+    private fun validHttpUrl(
+        value: String?
+    ): String? {
+
+        val raw = value ?: return null
+
+        if (
+            raw.isBlank() ||
+            raw != raw.trim()
+        ) {
+            return null
         }
+
+        return try {
+            val parsed = URI(raw)
+            raw.takeIf {
+                parsed.host != null &&
+                    (
+                        parsed.scheme.equals("https", true) ||
+                            parsed.scheme.equals("http", true)
+                        )
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun resolvePeachifySubtitles(
+        embedUrl: String,
+        content: PeachifyContent,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ): Int {
+
+        val subtitleUrl =
+            "https://none.eat-peach.sbs/subs/" +
+                content.apiPath
+
+        val response =
+            try {
+                app.get(
+                    url = subtitleUrl,
+                    headers = mapOf(
+                        "Accept" to "application/json"
+                    ),
+                    referer = embedUrl
+                )
+            } catch (error: Exception) {
+                if (error is CancellationException) {
+                    throw error
+                }
+
+                logMarker(
+                    "STREAMZY_PEACHIFY|STAGE=subtitle|" +
+                        "CONTENT=${content.kind}|" +
+                        "SUBTITLE_HTTP=FAILED|" +
+                        "SUBTITLE_COUNT=0|" +
+                        "SUBTITLE_CALLBACKS=0|" +
+                        "ERROR=${error.javaClass.simpleName}"
+                )
+
+                return 0
+            }
+
+        val httpCode = response.okhttpResponse.code
+        val subtitles =
+            if (httpCode in 200..299) {
+                response
+                    .parsedSafe<List<PeachifySubtitle>>()
+                    .orEmpty()
+            } else {
+                emptyList()
+            }
+
+        val emittedUrls = mutableSetOf<String>()
+        var subtitleCallbacks = 0
+
+        subtitles.forEachIndexed { index, subtitle ->
+            val url =
+                validHttpUrl(subtitle.url)
+                    ?: return@forEachIndexed
+
+            if (!emittedUrls.add(url)) {
+                return@forEachIndexed
+            }
+
+            val label =
+                peachifyLabel(
+                    subtitle.display
+                        ?.takeIf { it.isNotBlank() }
+                        ?: subtitle.language
+                            ?.takeIf { it.isNotBlank() }
+                        ?: "Subtitle ${index + 1}"
+                )
+
+            subtitleCallback(
+                SubtitleFile(
+                    label,
+                    url
+                )
+            )
+
+            subtitleCallbacks += 1
+        }
+
+        logMarker(
+            "STREAMZY_PEACHIFY|STAGE=subtitle|" +
+                "CONTENT=${content.kind}|" +
+                "SUBTITLE_HTTP=$httpCode|" +
+                "SUBTITLE_COUNT=${subtitles.size}|" +
+                "SUBTITLE_CALLBACKS=$subtitleCallbacks"
+        )
+
+        return subtitleCallbacks
     }
 
     private suspend fun resolvePeachify(
         embedUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
@@ -690,23 +824,51 @@ class StreamzyProvider(
                     "CONTENT=${content.kind}|" +
                     "ROUTE=$route|" +
                     "SOURCE_COUNT=${sources.size}|" +
-                    "HLS_COUNT=${hlsSources.size}|" +
-                    "SUBTITLES_PRESENT=${payload?.subtitles != null}"
+                    "HLS_COUNT=${hlsSources.size}"
             )
 
-            for (source in hlsSources) {
-                val sourceUrl =
-                    source
-                        .url
-                        ?.takeIf { it.isNotBlank() }
-                        ?: continue
+            val uniqueHlsSources =
+                hlsSources
+                    .filter { source ->
+                        val sourceUrl = source.url
+                        sourceUrl != null &&
+                            sourceUrl !in emittedUrls
+                    }
+                    .distinctBy { source ->
+                        source.url
+                    }
 
-                if (!emittedUrls.add(sourceUrl)) {
-                    continue
+            val baseLabels =
+                uniqueHlsSources.map { source ->
+                    peachifyLabel(source.dub)
                 }
 
+            val labelCounts =
+                baseLabels.groupingBy { label ->
+                    label
+                }.eachCount()
+
+            val labelOccurrences = mutableMapOf<String, Int>()
+
+            uniqueHlsSources.forEachIndexed { index, source ->
+                val sourceUrl = source.url ?: return@forEachIndexed
+
+                if (!emittedUrls.add(sourceUrl)) {
+                    return@forEachIndexed
+                }
+
+                val baseLabel = baseLabels[index]
+                val occurrence =
+                    (labelOccurrences[baseLabel] ?: 0) + 1
+
+                labelOccurrences[baseLabel] = occurrence
+
                 val label =
-                    peachifyLabel(source.dub)
+                    if ((labelCounts[baseLabel] ?: 0) > 1) {
+                        "$baseLabel $occurrence"
+                    } else {
+                        baseLabel
+                    }
 
                 callback(
                     newExtractorLink(
@@ -731,6 +893,7 @@ class StreamzyProvider(
                         "HOST=${safeHost(sourceUrl)}|" +
                         "TYPE=hls|" +
                         "LABEL=$label|" +
+                        "LABEL_GROUP_COUNT=${labelCounts[baseLabel] ?: 1}|" +
                         "UPSTREAM_HEADERS_FORWARDED=false"
                 )
             }
@@ -738,6 +901,27 @@ class StreamzyProvider(
             if (callbackCount > 0) {
                 break
             }
+        }
+
+        try {
+            resolvePeachifySubtitles(
+                embedUrl = embedUrl,
+                content = content,
+                subtitleCallback = subtitleCallback
+            )
+        } catch (error: Exception) {
+            if (error is CancellationException) {
+                throw error
+            }
+
+            logMarker(
+                "STREAMZY_PEACHIFY|STAGE=subtitle|" +
+                    "CONTENT=${content.kind}|" +
+                    "SUBTITLE_HTTP=FAILED|" +
+                    "SUBTITLE_COUNT=0|" +
+                    "SUBTITLE_CALLBACKS=0|" +
+                    "ERROR=${error.javaClass.simpleName}"
+            )
         }
 
         logMarker(
@@ -3408,6 +3592,7 @@ class StreamzyProvider(
                 try {
                     resolvePeachify(
                         embedUrl = peachifyIframeUrl,
+                        subtitleCallback = subtitleCallback,
                         callback = forwardingCallback
                     )
                 } catch (error: Exception) {
