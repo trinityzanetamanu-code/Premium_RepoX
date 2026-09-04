@@ -9,6 +9,7 @@ import java.net.URI
 import kotlin.coroutines.cancellation.CancellationException
 
 internal class PeachifyResolver(
+    private val sourceName: String,
     private val mainUrl: () -> String,
     private val logMarkerCallback: (String) -> Unit,
     private val safeHostCallback: (String?) -> String,
@@ -718,7 +719,7 @@ internal class PeachifyResolver(
 
                 callback(
                     newExtractorLink(
-                        source = name,
+                        source = sourceName,
                         name = "Peachify - $label",
                         url = sourceUrl,
                         type = ExtractorLinkType.M3U8

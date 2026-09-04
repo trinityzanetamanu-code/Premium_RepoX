@@ -22,6 +22,7 @@ import kotlin.coroutines.resume
 
 internal class VidSrcResolver(
     private val applicationContext: Context,
+    private val sourceName: String,
     private val logMarkerCallback: (String) -> Unit,
     private val safeHostCallback: (String?) -> String,
     private val resolveHttpUrlCallback: (String, String?) -> String?,
@@ -1237,8 +1238,8 @@ internal class VidSrcResolver(
 
         callback(
             newExtractorLink(
-                source = name,
-                name = "$name ${safeHost(selected.url)}",
+                source = sourceName,
+                name = "$sourceName ${safeHost(selected.url)}",
                 url = selected.url,
                 type = selected.type
             ) {

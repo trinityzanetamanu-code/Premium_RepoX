@@ -384,6 +384,7 @@ class StreamzyProvider(
 
     private val peachifyResolver =
         PeachifyResolver(
+            sourceName = name,
             mainUrl = { mainUrl },
             logMarkerCallback = ::logMarker,
             safeHostCallback = ::safeHost,
@@ -394,6 +395,7 @@ class StreamzyProvider(
     private val vidSrcResolver =
         VidSrcResolver(
             applicationContext = applicationContext,
+            sourceName = name,
             logMarkerCallback = ::logMarker,
             safeHostCallback = ::safeHost,
             resolveHttpUrlCallback = ::resolveHttpUrl,
