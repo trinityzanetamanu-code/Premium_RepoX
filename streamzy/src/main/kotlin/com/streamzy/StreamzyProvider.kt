@@ -643,6 +643,96 @@ class StreamzyProvider(
         }
     }
 
+    private fun parsePeachifySubtitleItem(
+        value: Any?
+    ): PeachifySubtitle? {
+
+        val item =
+            value as? Map<*, *>
+                ?: return null
+
+        val rawUrl = item["url"]
+        val rawDisplay = item["display"]
+        val rawLanguage = item["language"]
+        val rawFormat = item["format"]
+        val rawHearingImpaired = item["isHearingImpaired"]
+
+        if (
+            rawUrl !is String ||
+            (rawDisplay != null && rawDisplay !is String) ||
+            (rawLanguage != null && rawLanguage !is String) ||
+            (rawFormat != null && rawFormat !is String) ||
+            (
+                rawHearingImpaired != null &&
+                    rawHearingImpaired !is Boolean
+                )
+        ) {
+            return null
+        }
+
+        return PeachifySubtitle(
+            url = rawUrl,
+            display = rawDisplay as? String,
+            language = rawLanguage as? String,
+            format = rawFormat as? String,
+            isHearingImpaired =
+                rawHearingImpaired as? Boolean
+        )
+    }
+
+    private fun peachifySubtitleRootType(
+        value: Any?
+    ): String {
+
+        return when (value) {
+            is List<*> -> "ROOT_ARRAY"
+            is Map<*, *> -> "ROOT_OBJECT"
+            is String -> "ROOT_STRING"
+            is Number -> "ROOT_NUMBER"
+            is Boolean -> "ROOT_BOOLEAN"
+            null -> "ROOT_NULL"
+            else -> "ROOT_OTHER"
+        }
+    }
+
+    private fun isPeachifyIndonesianSubtitle(
+        subtitle: PeachifySubtitle
+    ): Boolean {
+
+        val language =
+            subtitle.language
+                ?.trim()
+                ?.lowercase()
+                ?.replace("_", "-")
+                .orEmpty()
+
+        if (
+            language == "id" ||
+            language.startsWith("id-") ||
+            language in setOf(
+                "ind",
+                "indonesian",
+                "indonesia",
+                "bahasa indonesia"
+            )
+        ) {
+            return true
+        }
+
+        val display =
+            subtitle.display
+                ?.trim()
+                ?.lowercase()
+                ?.replace(Regex("\\s+"), " ")
+                .orEmpty()
+
+        return Regex(
+            "^(?:bahasa indonesia|indonesian|indonesia)" +
+                "(?:\\s*\\([^)]*\\))?$",
+            RegexOption.IGNORE_CASE
+        ).matches(display)
+    }
+
     private suspend fun resolvePeachifySubtitles(
         embedUrl: String,
         content: PeachifyContent,
@@ -680,26 +770,115 @@ class StreamzyProvider(
             }
 
         val httpCode = response.okhttpResponse.code
+
+        if (httpCode !in 200..299) {
+            logMarker(
+                "STREAMZY_PEACHIFY|STAGE=subtitle|" +
+                    "CONTENT=${content.kind}|" +
+                    "ENDPOINT=/subs/${content.apiPath}|" +
+                    "SUBTITLE_HTTP=$httpCode|" +
+                    "ROOT_TYPE=NOT_PARSED|" +
+                    "RAW_ITEMS=0|" +
+                    "CONVERTED_ITEMS=0|" +
+                    "MALFORMED_ITEMS=0|" +
+                    "VALID_URLS=0|" +
+                    "DEDUPED=0|" +
+                    "SUBTITLE_CALLBACKS=0|" +
+                    "INDONESIAN_ITEMS=0|" +
+                    "INDONESIAN_CALLBACKS=0|" +
+                    "ERROR=HttpStatus"
+            )
+
+            return 0
+        }
+
+        val root: Any? =
+            try {
+                response.parsed<Any>()
+            } catch (error: Exception) {
+                if (error is CancellationException) {
+                    throw error
+                }
+
+                logMarker(
+                    "STREAMZY_PEACHIFY|STAGE=subtitle|" +
+                        "CONTENT=${content.kind}|" +
+                        "ENDPOINT=/subs/${content.apiPath}|" +
+                        "SUBTITLE_HTTP=$httpCode|" +
+                        "ROOT_TYPE=PARSE_FAILED|" +
+                        "RAW_ITEMS=0|" +
+                        "CONVERTED_ITEMS=0|" +
+                        "MALFORMED_ITEMS=0|" +
+                        "VALID_URLS=0|" +
+                        "DEDUPED=0|" +
+                        "SUBTITLE_CALLBACKS=0|" +
+                        "INDONESIAN_ITEMS=0|" +
+                        "INDONESIAN_CALLBACKS=0|" +
+                        "ERROR=${error.javaClass.simpleName}"
+                )
+
+                return 0
+            }
+
+        val rootType =
+            peachifySubtitleRootType(root)
+
+        val rawItems =
+            root as? List<*>
+
+        if (rawItems == null) {
+            logMarker(
+                "STREAMZY_PEACHIFY|STAGE=subtitle|" +
+                    "CONTENT=${content.kind}|" +
+                    "ENDPOINT=/subs/${content.apiPath}|" +
+                    "SUBTITLE_HTTP=$httpCode|" +
+                    "ROOT_TYPE=$rootType|" +
+                    "RAW_ITEMS=0|" +
+                    "CONVERTED_ITEMS=0|" +
+                    "MALFORMED_ITEMS=0|" +
+                    "VALID_URLS=0|" +
+                    "DEDUPED=0|" +
+                    "SUBTITLE_CALLBACKS=0|" +
+                    "INDONESIAN_ITEMS=0|" +
+                    "INDONESIAN_CALLBACKS=0|" +
+                    "ERROR=UnexpectedRootType"
+            )
+
+            return 0
+        }
+
         val subtitles =
-            if (httpCode in 200..299) {
-                response
-                    .parsedSafe<List<PeachifySubtitle>>()
-                    .orEmpty()
-            } else {
-                emptyList()
+            rawItems.mapNotNull { item ->
+                parsePeachifySubtitleItem(item)
             }
 
-        val emittedUrls = mutableSetOf<String>()
-        var subtitleCallbacks = 0
+        val malformedItems =
+            rawItems.size - subtitles.size
 
-        subtitles.forEachIndexed { index, subtitle ->
-            val url =
+        val validSubtitles =
+            subtitles.mapNotNull { subtitle ->
                 validHttpUrl(subtitle.url)
-                    ?: return@forEachIndexed
-
-            if (!emittedUrls.add(url)) {
-                return@forEachIndexed
+                    ?.let { url ->
+                        subtitle to url
+                    }
             }
+
+        val deduplicatedSubtitles =
+            validSubtitles.distinctBy { (_, url) ->
+                url
+            }
+
+        val indonesianItems =
+            subtitles.count(
+                ::isPeachifyIndonesianSubtitle
+            )
+
+        var subtitleCallbacks = 0
+        var indonesianCallbacks = 0
+
+        deduplicatedSubtitles.forEachIndexed {
+                index,
+                (subtitle, url) ->
 
             val label =
                 peachifyLabel(
@@ -718,14 +897,31 @@ class StreamzyProvider(
             )
 
             subtitleCallbacks += 1
+
+            if (
+                isPeachifyIndonesianSubtitle(
+                    subtitle
+                )
+            ) {
+                indonesianCallbacks += 1
+            }
         }
 
         logMarker(
             "STREAMZY_PEACHIFY|STAGE=subtitle|" +
                 "CONTENT=${content.kind}|" +
+                "ENDPOINT=/subs/${content.apiPath}|" +
                 "SUBTITLE_HTTP=$httpCode|" +
-                "SUBTITLE_COUNT=${subtitles.size}|" +
-                "SUBTITLE_CALLBACKS=$subtitleCallbacks"
+                "ROOT_TYPE=$rootType|" +
+                "RAW_ITEMS=${rawItems.size}|" +
+                "CONVERTED_ITEMS=${subtitles.size}|" +
+                "MALFORMED_ITEMS=$malformedItems|" +
+                "VALID_URLS=${validSubtitles.size}|" +
+                "DEDUPED=${deduplicatedSubtitles.size}|" +
+                "SUBTITLE_CALLBACKS=$subtitleCallbacks|" +
+                "INDONESIAN_ITEMS=$indonesianItems|" +
+                "INDONESIAN_CALLBACKS=$indonesianCallbacks|" +
+                "ERROR=NONE"
         )
 
         return subtitleCallbacks
