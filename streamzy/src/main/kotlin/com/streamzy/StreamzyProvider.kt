@@ -129,6 +129,11 @@ class StreamzyProvider(
         val apiPath: String
     )
 
+    private data class PeachifyServerLink(
+        val hrefForm: String,
+        val resolvedUrl: String
+    )
+
     private class WasmBridge(
         private val successCallback: (String) -> Unit,
         private val failureCallback: (String) -> Unit
@@ -482,6 +487,98 @@ class StreamzyProvider(
         }
     }
 
+    private fun peachifyHrefForm(
+        href: String
+    ): String {
+
+        val clean = href.trim()
+
+        return when {
+            clean.startsWith("?") ->
+                "query-relative"
+
+            clean.startsWith("https://", true) ||
+                clean.startsWith("http://", true) ||
+                clean.startsWith("//") ->
+                "absolute"
+
+            else ->
+                "path-relative"
+        }
+    }
+
+    private fun peachifyWatchPathKind(
+        url: String
+    ): String {
+
+        val path =
+            try {
+                URI(url).path.orEmpty()
+            } catch (_: Exception) {
+                return "other"
+            }
+
+        return when {
+            Regex(
+                """^/watch/movie/\d+/?$""",
+                RegexOption.IGNORE_CASE
+            ).matches(path) ->
+                "movie"
+
+            Regex(
+                """^/watch/tv/\d+/\d+/\d+/?$""",
+                RegexOption.IGNORE_CASE
+            ).matches(path) ->
+                "tv"
+
+            else ->
+                "other"
+        }
+    }
+
+    private fun getPeachifyFallbackEmbed(
+        watchUrl: String
+    ): String? {
+
+        val parsed =
+            try {
+                URI(watchUrl)
+            } catch (_: Exception) {
+                return null
+            }
+
+        if (!parsed.host.equals(URI(mainUrl).host, true)) {
+            return null
+        }
+
+        val path = parsed.path.orEmpty()
+
+        Regex(
+            """^/watch/movie/(\d+)/?$""",
+            RegexOption.IGNORE_CASE
+        )
+            .matchEntire(path)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let { tmdbId ->
+                return "https://peachify.top/embed/movie/$tmdbId"
+            }
+
+        Regex(
+            """^/watch/tv/(\d+)/(\d+)/(\d+)/?$""",
+            RegexOption.IGNORE_CASE
+        )
+            .matchEntire(path)
+            ?.let { match ->
+                return "https://peachify.top/embed/tv/" +
+                    "${match.groupValues[1]}/" +
+                    "${match.groupValues[2]}/" +
+                    match.groupValues[3]
+            }
+
+        return null
+    }
+
     private fun peachifyLabel(
         value: String?
     ): String {
@@ -675,6 +772,17 @@ class StreamzyProvider(
                 when {
                     uriSafe.startsWith("//") ->
                         "https:$uriSafe"
+
+                    uriSafe.startsWith("?") -> {
+                        val base = URI(baseUrl)
+                        URI(
+                            base.scheme,
+                            base.authority,
+                            base.path,
+                            null,
+                            null
+                        ).toString() + uriSafe
+                    }
 
                     else ->
                         URI(baseUrl).resolve(uriSafe).toString()
@@ -3163,18 +3271,74 @@ class StreamzyProvider(
                 }
             }
 
+        val peachifyServerLink =
+            firstDocument
+                .select(
+                    "a[href*='?server='], " +
+                        "a[href*='&server=']"
+                )
+                .mapNotNull { anchor ->
+                    val rawHref =
+                        anchor
+                            .attr("href")
+                            .trim()
+
+                    val resolvedUrl =
+                        resolveHttpUrl(
+                            baseUrl = watchUrl,
+                            value = rawHref
+                        )
+                            ?: return@mapNotNull null
+
+                    if (!isPeachifyServerPage(resolvedUrl)) {
+                        return@mapNotNull null
+                    }
+
+                    PeachifyServerLink(
+                        hrefForm = peachifyHrefForm(rawHref),
+                        resolvedUrl = resolvedUrl
+                    )
+                }
+                .firstOrNull()
+
         val peachifyServerPageUrl =
-            distinctServerPages
-                .firstOrNull(::isPeachifyServerPage)
+            peachifyServerLink?.resolvedUrl
+
+        logMarker(
+            "STREAMZY_PEACHIFY|STAGE=server-link|" +
+                "CONTENT=$contentKind|" +
+                "LINK_FOUND=${peachifyServerLink != null}|" +
+                "HREF_FORM=${peachifyServerLink?.hrefForm ?: "none"}|" +
+                "RESOLVED_HOST=${peachifyServerPageUrl?.let(::safeHost) ?: "none"}|" +
+                "RESOLVED_PATH_KIND=${peachifyServerPageUrl?.let(::peachifyWatchPathKind) ?: "other"}"
+        )
 
         if (peachifyServerPageUrl != null) {
+            var serverPageHttp = "FAILED"
+            var serverPageBytes = 0
+
             val peachifyDocument =
                 try {
-                    Jsoup.parse(
+                    val response =
                         app.get(
                             url = peachifyServerPageUrl,
                             referer = watchUrl
-                        ).text,
+                        )
+
+                    serverPageHttp =
+                        response
+                            .okhttpResponse
+                            .code
+                            .toString()
+
+                    val html = response.text
+                    serverPageBytes =
+                        html
+                            .toByteArray()
+                            .size
+
+                    Jsoup.parse(
+                        html,
                         peachifyServerPageUrl
                     )
                 } catch (error: Exception) {
@@ -3183,16 +3347,18 @@ class StreamzyProvider(
                     }
 
                     logMarker(
-                        "STREAMZY_PEACHIFY|STAGE=iframe|" +
+                        "STREAMZY_PEACHIFY|STAGE=server-page|" +
                             "CONTENT=$contentKind|" +
-                            "RESULT=server-page-fail|" +
-                            "ERROR=${error.javaClass.simpleName}"
+                            "HTTP=FAILED|" +
+                            "BODY_BYTES=0|" +
+                            "IFRAME_COUNT=0|" +
+                            "PEACHIFY_IFRAME_MATCH=false"
                     )
 
                     null
                 }
 
-            val peachifyIframeUrl =
+            val peachifyIframeUrls =
                 peachifyDocument
                     ?.let { document ->
                         getIframeUrls(
@@ -3200,9 +3366,41 @@ class StreamzyProvider(
                             peachifyServerPageUrl
                         )
                     }
-                    ?.firstOrNull { iframeUrl ->
+                    .orEmpty()
+
+            val staticPeachifyIframeUrl =
+                peachifyIframeUrls
+                    .firstOrNull { iframeUrl ->
                         getPeachifyContent(iframeUrl) != null
                     }
+
+            if (peachifyDocument != null) {
+                logMarker(
+                    "STREAMZY_PEACHIFY|STAGE=server-page|" +
+                        "CONTENT=$contentKind|" +
+                        "HTTP=$serverPageHttp|" +
+                        "BODY_BYTES=$serverPageBytes|" +
+                        "IFRAME_COUNT=${peachifyIframeUrls.size}|" +
+                        "PEACHIFY_IFRAME_MATCH=${staticPeachifyIframeUrl != null}"
+                )
+            }
+
+            val fallbackPeachifyIframeUrl =
+                if (staticPeachifyIframeUrl == null) {
+                    getPeachifyFallbackEmbed(watchUrl)
+                } else {
+                    null
+                }
+
+            logMarker(
+                "STREAMZY_PEACHIFY|STAGE=fallback|" +
+                    "CONTENT=$contentKind|" +
+                    "FALLBACK_USED=${fallbackPeachifyIframeUrl != null}"
+            )
+
+            val peachifyIframeUrl =
+                staticPeachifyIframeUrl
+                    ?: fallbackPeachifyIframeUrl
 
             if (peachifyIframeUrl != null) {
                 testedIframeUrls.add(peachifyIframeUrl)
