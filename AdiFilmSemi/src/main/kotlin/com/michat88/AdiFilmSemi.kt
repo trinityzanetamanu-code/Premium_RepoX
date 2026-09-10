@@ -1,5 +1,6 @@
 package com.michat88
 
+import android.util.Log                                            // [PEACHIFY]
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.michat88.AdiFilmSemiExtractor.invokeAdiDewasa
 import com.michat88.AdiFilmSemiExtractor.invokeKisskh 
@@ -29,6 +30,8 @@ import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import java.net.URI                                            // [PEACHIFY]
+import kotlin.coroutines.cancellation.CancellationException   // [PEACHIFY]
 
 open class AdiFilmSemi : TmdbProvider() {
     override var name = "AdiFilmSemi"
@@ -43,6 +46,37 @@ open class AdiFilmSemi : TmdbProvider() {
     )
 
     val wpRedisInterceptor by lazy { CloudflareKiller() }
+
+    // ============================================================
+    // [PEACHIFY] PEACHIFY PLAYBACK SOURCE
+    // ============================================================
+    // Sumber tambahan, TIDAK menggantikan source AdiFilmSemi yang sudah ada.
+    // Menggunakan PeachifyResolver yang identik dengan baseline Adicinemax21
+    // dan AdiDrakor yang sudah runtime-working.
+    private val peachifyResolver = PeachifyResolver(
+        sourceName = name,
+        logMarkerCallback = ::logMarker,
+        safeHostCallback = ::safeHost
+    )
+
+    private fun logMarker(message: String) {
+        Log.d("AdiFilmSemiPF", message)
+    }
+
+    private fun safeHost(url: String?): String {
+        if (url.isNullOrBlank()) {
+            return "-"
+        }
+
+        return try {
+            URI(url).host?.lowercase() ?: "invalid"
+        } catch (_: Exception) {
+            "invalid"
+        }
+    }
+    // ============================================================
+    // [/PEACHIFY]
+    // ============================================================
 
     /** AUTHOR : Hexated & AdiFilmSemi (Modified) */
     companion object {
@@ -473,6 +507,27 @@ open class AdiFilmSemi : TmdbProvider() {
                     subtitleCallback,
                     callback
                 )
+            },
+            // [PEACHIFY] Sumber tambahan — tidak menggantikan source existing.
+            {
+                val tmdbId = res.id ?: return@runAllAsync
+                try {
+                    peachifyResolver.resolveFromTmdbId(
+                        tmdbId = tmdbId,
+                        type = res.type,
+                        season = res.season,
+                        episode = res.episode,
+                        subtitleCallback = subtitleCallback,
+                        callback = callback
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(
+                        "AdiFilmSemiPF",
+                        "[PEACHIFY] uncaught ${e.javaClass.simpleName}: ${e.message}"
+                    )
+                }
             }
         )
 
