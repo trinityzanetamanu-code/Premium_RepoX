@@ -2,13 +2,13 @@
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Adicinemax21.cs3",
         "status": 1,
-        "version": 14,
+        "version": 22,
         "name": "Adicinemax21",
         "internalName": "Adicinemax21",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 148109,
+        "fileSize": 229918,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -18,18 +18,18 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
         "apiVersion": 1,
-        "fileHash": "sha256-c7b9153b3d32e575c0707a737ea271497cc0fba7641f33d9ed97f7f50faad691"
+        "fileHash": "sha256-2ddabb45556b13d0f4a5f1b8cf514f34b6e4541e40f1521cd9d27fc108353146"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiDrakor.cs3",
         "status": 1,
-        "version": 8,
+        "version": 17,
         "name": "AdiDrakor",
         "internalName": "AdiDrakor",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 147462,
+        "fileSize": 229428,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -39,18 +39,18 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
         "apiVersion": 1,
-        "fileHash": "sha256-2e1ab6937b21cab760e8b934ba2f01c1a36a66aaeef758f69143227a09a74808"
+        "fileHash": "sha256-50c4b2315aa2a35e5080d46501d8a9c7b3a23fb12c4b75f4603d4ea47785630e"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiFilmSemi.cs3",
         "status": 1,
-        "version": 6,
+        "version": 15,
         "name": "AdiFilmSemi",
         "internalName": "AdiFilmSemi",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 257171,
+        "fileSize": 229659,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -60,7 +60,7 @@
         ],
         "iconUrl": "https://klikxxi.me/wp-content/uploads/2024/02/cropped-site-icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-070263abdee36ac5da2fe31f314e389899795668c514f13b13d967af842379a3"
+        "fileHash": "sha256-f8a5d1a08011199e70ce1f0b107e5e3ef4887b6bb59a5a38a03258aa6fc454a4"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Adimoviebox.cs3",
@@ -71,7 +71,7 @@
         "authors": [
             "aldry84"
         ],
-        "fileSize": 31578,
+        "fileSize": 31682,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -81,18 +81,18 @@
         ],
         "iconUrl": "https://moviebox.ph/favicon.ico",
         "apiVersion": 1,
-        "fileHash": "sha256-e7ac7371cc3283df530cac54a60ff815767f646612b3ba0a6ffcf2a9ee73d7ac"
+        "fileHash": "sha256-9840ad25f26d86fcd429067226c74701012afc8b5011d871dea7057c17a5ef29"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiXtream.cs3",
         "status": 1,
-        "version": 12,
+        "version": 21,
         "name": "AdiXtream",
         "internalName": "AdiXtream",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 69923,
+        "fileSize": 212971,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -102,7 +102,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
         "apiVersion": 1,
-        "fileHash": "sha256-ae1ecb6fbe31781de5d5a8c73ea95afaac22c8966d0bd4ba4b7b4c009318e778"
+        "fileHash": "sha256-2898d5ff38ddc268eb85d105844bfbab56737f9d63ceb9a629ea94cb810a41c3"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Cinemacity.cs3",
@@ -113,7 +113,7 @@
         "authors": [
             "aldry84"
         ],
-        "fileSize": 36587,
+        "fileSize": 36794,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -123,7 +123,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
         "apiVersion": 1,
-        "fileHash": "sha256-a40fe717e4e07171e8be370d93798af90f09d8f7adc46cdf45e380ab6aaa2dbf"
+        "fileHash": "sha256-e03f28ba941798dd96fbf521df836049a1469c7749cc1b05365c5de0899b8578"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/DramaBox.cs3",
@@ -134,7 +134,7 @@
         "authors": [
             "AdiManu"
         ],
-        "fileSize": 33551,
+        "fileSize": 33755,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -145,7 +145,7 @@
         ],
         "iconUrl": "https://www.dramabox.com/images/logo.png",
         "apiVersion": 1,
-        "fileHash": "sha256-0c41130d253bd17b631eadf6256677646b671fd5437c37ca5fae518a3bb31656"
+        "fileHash": "sha256-cd174b271a9354c49a529a0886fb2695d271e80ae84e6d0d8b17da9e478472ff"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Eporner.cs3",
@@ -157,7 +157,7 @@
             "AdiManu"
         ],
         "description": "Eporner",
-        "fileSize": 15092,
+        "fileSize": 15062,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "en",
         "tvTypes": [
@@ -165,7 +165,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/phisher98/TVVVV/main/eporner.ico",
         "apiVersion": 1,
-        "fileHash": "sha256-a6432977bf3e16070f5ac62dafef72fb1f568cfccce08a40525242433cfbd671"
+        "fileHash": "sha256-4b1c1fb0416ddfb377f4eadbe453a3400f9a72fb48b3c771b8e1e9def4e8d6fc"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/FourKHDHub.cs3",
@@ -176,7 +176,7 @@
         "authors": [
             "aldry84"
         ],
-        "fileSize": 39768,
+        "fileSize": 39931,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -186,7 +186,7 @@
         ],
         "iconUrl": "https://www.google.com/s2/favicons?domain=4khdhub.one&sz=256",
         "apiVersion": 1,
-        "fileHash": "sha256-c48237f57374bb07545800672a32bf050bf65ab818079af978cd72abe63296cb"
+        "fileHash": "sha256-70a0ad06e884fa9f820e51bf22ed6fe321ab46c85f45e2c472c7460274fcba95"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/FreeReels.cs3",
@@ -197,7 +197,7 @@
         "authors": [
             "AdiManu"
         ],
-        "fileSize": 37443,
+        "fileSize": 37710,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -208,7 +208,7 @@
         ],
         "iconUrl": "https://free-reels.com/free-reels.png",
         "apiVersion": 1,
-        "fileHash": "sha256-61cbfdda055c7c832613ff9cb528f412c03a3f7486d9923b6d9ad0a7f6d9d426"
+        "fileHash": "sha256-9c40db0b7b1b3124a9fde9e5ba325bbc6f96d797ebb4d3aee6cc5dec3957f0d2"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/IdlixProvider.cs3",
@@ -219,7 +219,7 @@
         "authors": [
             "AdiManu"
         ],
-        "fileSize": 50622,
+        "fileSize": 50948,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -230,7 +230,7 @@
         ],
         "iconUrl": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://idlixian.com&size=16",
         "apiVersion": 1,
-        "fileHash": "sha256-e6a55056e4540a6472fb6e27b233dfb075c072098c669b5ea7c5317a14d1cef8"
+        "fileHash": "sha256-8fab9ac3fc72e354bf0af1e2b6a8128774046b2ac5f259d88ae11c919d39e911"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/IndoAsia.cs3",
@@ -242,7 +242,7 @@
             "aldry84"
         ],
         "description": "Jangan Coli Yaa",
-        "fileSize": 21260,
+        "fileSize": 21269,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -250,7 +250,7 @@
         ],
         "iconUrl": "https://homecookingrocks.com/wp-content/uploads/2024/10/cropped-indomax21-favicon-color-1.png",
         "apiVersion": 1,
-        "fileHash": "sha256-8d19d011d470ceb87ecf2014205da1b9099f8c1eb99aaa19554c762001a0d744"
+        "fileHash": "sha256-7b7729ef25c463255f2aae2926dad5dabfa0bd0d10e5d64a4bbe3e0ad6372a19"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/IndoTV.cs3",
@@ -261,7 +261,7 @@
         "authors": [
             "AdiManu"
         ],
-        "fileSize": 14998,
+        "fileSize": 15059,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -269,7 +269,7 @@
         ],
         "iconUrl": "https://www.dramabox.com/images/logo.png",
         "apiVersion": 1,
-        "fileHash": "sha256-53ddc936a2aeb40a9fb9e529652a9249dd1e6a97f824d520d2596586c18e9e22"
+        "fileHash": "sha256-4dbea36943ce15eb913d89243cce6315b2d79d1db13685ceb6548a387e7d4067"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/JavHey.cs3",
@@ -281,7 +281,7 @@
             "aldey84"
         ],
         "description": "Best Japan AV porn site, free forever, high speed, no lag, over 100,000 videos, daily update, no ads while playing video.",
-        "fileSize": 23028,
+        "fileSize": 23083,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -289,7 +289,7 @@
         ],
         "iconUrl": "https://missav.ws/missav/logo-square.png",
         "apiVersion": 1,
-        "fileHash": "sha256-290dc870da0e179bcbc7511aa6e0af9d6c7c92eb5c7b61162ccc6426ac112d17"
+        "fileHash": "sha256-ef4f7be886ecceaf084c1328541c7fd3f020bd3da5e3f2bdbe6f127ec0e56b1c"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Javtiful.cs3",
@@ -301,7 +301,7 @@
             "aldey84"
         ],
         "description": "Best Japan AV porn site, free forever, high speed, no lag, over 100,000 videos, daily update, no ads while playing video.",
-        "fileSize": 32962,
+        "fileSize": 33060,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "en",
         "tvTypes": [
@@ -309,7 +309,7 @@
         ],
         "iconUrl": "https://javtiful.com/uploads/site/icon/2026/04/27/new_jt_icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-7a206cd99916b539017013d1530760a79411bf32d6c5eea790d9d5e024482d55"
+        "fileHash": "sha256-67405094eff5779c14d0836fd5cec96473f948b559d6d333da52e707d21071fa"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/JuraganFilm.cs3",
@@ -320,7 +320,7 @@
         "authors": [
             "aldry84"
         ],
-        "fileSize": 23393,
+        "fileSize": 23377,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -330,7 +330,7 @@
         ],
         "iconUrl": "https://tv44.juragan.film/wp-content/uploads/2019/05/faviconjf-60x60.png",
         "apiVersion": 1,
-        "fileHash": "sha256-a1d3afd0a991b5a59d50d87055c5e0f6c445634656d9d83e61516edefdb7a62b"
+        "fileHash": "sha256-27bd481902ac5d033f04a9b742fb294133befd979ece37d383139a8be7087c1c"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/KisskhProvider.cs3",
@@ -341,7 +341,7 @@
         "authors": [
             "michat88"
         ],
-        "fileSize": 39762,
+        "fileSize": 39823,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "en",
         "tvTypes": [
@@ -352,10 +352,10 @@
         ],
         "iconUrl": "https://www.google.com/s2/favicons?domain=kisskh.co&sz=%size%",
         "apiVersion": 1,
-        "fileHash": "sha256-18f8b63d89628aafefb37cd1fea3246ec14c40b1fb886f475c1a01c8d2cd73dd",
-        "jarFileSize": 155236,
+        "fileHash": "sha256-faafaad905575b02d4d95886f1400749367128be9189e5b641187c9fc2f4c758",
+        "jarFileSize": 158110,
         "jarUrl": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/KisskhProvider.jar",
-        "jarHash": "sha256-8fa93942b824c58cef8d79c60f6375a8ef1d712f38514f578f66a54b37e538d4"
+        "jarHash": "sha256-19297f4d2ace9de3b2dcbff7125a15a504202220e7f4c4ed80db54c33733ed4f"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/KlikXXI.cs3",
@@ -367,7 +367,7 @@
             "aldry84"
         ],
         "description": "request @ian_hiro",
-        "fileSize": 33643,
+        "fileSize": 33786,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -377,7 +377,7 @@
         ],
         "iconUrl": "https://klikxxi.me/wp-content/uploads/2024/02/cropped-site-icon-60x60.png",
         "apiVersion": 1,
-        "fileHash": "sha256-0bfd34d69e57338a9627bdf06b2748e596d18db36f8dfec3e5c7ed4d16163b34"
+        "fileHash": "sha256-ae48e97eddc343df81fa56b1fd848d51f1c7c2369999550b94376eeabcace91c"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/LayarKacaProvider.cs3",
@@ -388,7 +388,7 @@
         "authors": [
             "aldry84"
         ],
-        "fileSize": 102926,
+        "fileSize": 112543,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -398,7 +398,7 @@
         ],
         "iconUrl": "https://assets.lk21.party/favicons/apple-icon-144x144.png",
         "apiVersion": 1,
-        "fileHash": "sha256-de89bcbec288e3f675399886f20465c04121021983058de91ac998069a8705c9"
+        "fileHash": "sha256-57c5379a1059c7778eca2cccb1cdca0babe6778515c7f6f8e73bf45360193dd1"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Mangoporn.cs3",
@@ -410,7 +410,7 @@
             "AmanHnB"
         ],
         "description": "MangoPorn",
-        "fileSize": 19014,
+        "fileSize": 19005,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "en",
         "tvTypes": [
@@ -418,7 +418,7 @@
         ],
         "iconUrl": "http://mangoporn.net/wp-content/uploads/2024/07/mangoporn.net_.png",
         "apiVersion": 1,
-        "fileHash": "sha256-f8cfa2d84d2628698109149d62428d89ca534126f7fa296100c259a653cf8864"
+        "fileHash": "sha256-bcb18f3e2198e7971b8e1bb3a6edd675d79b2ddebd1e77cfa89cf4136d9ed2bd"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/MissAv.cs3",
@@ -430,7 +430,7 @@
             "aldey84"
         ],
         "description": "Best Japan AV porn site, free forever, high speed, no lag, over 100,000 videos, daily update, no ads while playing video.",
-        "fileSize": 17587,
+        "fileSize": 18440,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "en",
         "tvTypes": [
@@ -438,18 +438,18 @@
         ],
         "iconUrl": "https://missav.ws/missav/logo-square.png",
         "apiVersion": 1,
-        "fileHash": "sha256-430923302162cef220080ce3ce2cdb198acec8d86739fddfadd26a4824306892"
+        "fileHash": "sha256-b8eea2575c986f35e2be5d63c195955610943f42ad5860f510186d0db2e626b5"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Moviebox.cs3",
         "status": 1,
-        "version": 9,
+        "version": 12,
         "name": "Moviebox",
         "internalName": "Moviebox",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 47229,
+        "fileSize": 78774,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -459,7 +459,7 @@
         ],
         "iconUrl": "https://moviebox.ph/favicon.ico",
         "apiVersion": 1,
-        "fileHash": "sha256-15d6115d799bef42d5dc52083185bb9475e359dad276afb053cf2cbb39f426a8"
+        "fileHash": "sha256-caa20e6bae2e1fd0b9b3929a4baf58702f8cbe7417d510f8606bb55ccae2271d"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/NgeFilm.cs3",
@@ -470,7 +470,7 @@
         "authors": [
             "aldry84"
         ],
-        "fileSize": 26001,
+        "fileSize": 26121,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -480,7 +480,7 @@
         ],
         "iconUrl": "https://new31.ngefilm.site/wp-content/uploads/2023/08/cropped-imageedit_8_4481000408-60x60.png",
         "apiVersion": 1,
-        "fileHash": "sha256-39d80fe5c42f8674dfde2b987892cfb8f16289c0245505b843ab412fd46a468f"
+        "fileHash": "sha256-38d0a85b77288593221d8bd88c13dc229b0427b84136aeb57e00d20edeb35146"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/OppaDrama.cs3",
@@ -492,7 +492,7 @@
             "Aldry84"
         ],
         "description": "OppaDrama \u2014 Streaming Drama Korea, Movie and TV Series",
-        "fileSize": 84183,
+        "fileSize": 84716,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -502,7 +502,7 @@
         ],
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://oppa.biz&size=128",
         "apiVersion": 1,
-        "fileHash": "sha256-334ad2888ffdb6ffa4d4578e10e726d3db5a3f82d8cbec516de0998951484754"
+        "fileHash": "sha256-b8b12d911e219d116cedc2c4c75d60102c4d164f98885ba0bb633e46646a0100"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/PODJAV.cs3",
@@ -514,7 +514,7 @@
             "aldey84"
         ],
         "description": "Best Japan AV porn site, free forever, high speed, no lag, over 100,000 videos, daily update, no ads while playing video.",
-        "fileSize": 26588,
+        "fileSize": 27017,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "en",
         "tvTypes": [
@@ -522,7 +522,7 @@
         ],
         "iconUrl": "https://podjav.tv/wp-content/uploads/2025/02/favicon-podjav.ico",
         "apiVersion": 1,
-        "fileHash": "sha256-9f5d3ceb682aa6d9a1df2807a4d21052f04d0b1cfd3b113ca66b3dc3cafe05b7"
+        "fileHash": "sha256-d53d248ebea908adeeda02703f811dd262f8ca0304f1c36f261910a2891aacc7"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Pornhub.cs3",
@@ -534,7 +534,7 @@
             "aldey84"
         ],
         "description": "Awas Jangan Coli Kawan",
-        "fileSize": 18227,
+        "fileSize": 18258,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "en",
         "tvTypes": [
@@ -542,7 +542,7 @@
         ],
         "iconUrl": "https://www.pornhub.com/favicon.ico",
         "apiVersion": 1,
-        "fileHash": "sha256-bb31b86ab7a3dc80663bc83393f4b0150b5def2e0a8bd6f596743e05c9fa9c61"
+        "fileHash": "sha256-f3047e694291da1f0efd21af5871abf07656fef4796eedadd15696fc72cdd081"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Rebahin.cs3",
@@ -553,7 +553,7 @@
         "authors": [
             "aldry84"
         ],
-        "fileSize": 23988,
+        "fileSize": 24007,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -563,7 +563,7 @@
         ],
         "iconUrl": "https://rebahinxxi3.autos/wp-content/uploads/2024/03/cropped-rebahinicon-192x192.jpg",
         "apiVersion": 1,
-        "fileHash": "sha256-7569ac21027b3f3505b05821af136d667948f9aa49ca84081bb0759bcc83bb5d"
+        "fileHash": "sha256-b7db27e96b9c26bad30a043f7e7b3e3ee772ebe545c40d5bbe68394c9545902e"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/ReelShort.cs3",
@@ -574,7 +574,7 @@
         "authors": [
             "AdiManu"
         ],
-        "fileSize": 26314,
+        "fileSize": 26445,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -585,18 +585,18 @@
         ],
         "iconUrl": "https://v-mps.crazymaplestudios.com/images/211d3420-d721-11f0-84ad-6b5693b490dc.png",
         "apiVersion": 1,
-        "fileHash": "sha256-9ecb4bdb73b5d154ffdd56d800d6f349dc2ba6edc4a39e22728997eb7e48d4d8"
+        "fileHash": "sha256-091e2c87c195b7f8b1466445afea419e85e68821a44c5ac25ec87bf6083781b5"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/RiveStream.cs3",
         "status": 1,
-        "version": 8,
+        "version": 11,
         "name": "RiveStream",
         "internalName": "RiveStream",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 75765,
+        "fileSize": 114669,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -606,7 +606,7 @@
         ],
         "iconUrl": "https://www.rivestream.app/icons/icon-192x192.png",
         "apiVersion": 1,
-        "fileHash": "sha256-2985604bb2ef8bdf0483650096a32df2acb509e0bad64e1d05478d3adebb3a60"
+        "fileHash": "sha256-457363ad73c13350323549fdd8cf79c5ccad05ddf2808e181a24720c3d171ffe"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Sflix.cs3",
@@ -617,7 +617,7 @@
         "authors": [
             "AdiManu"
         ],
-        "fileSize": 35559,
+        "fileSize": 36392,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -628,7 +628,7 @@
         ],
         "iconUrl": "https://sflix.film/favicon.ico",
         "apiVersion": 1,
-        "fileHash": "sha256-ad07f81e5efb3b9aca06c60c16d10635e7ffdf6867c0356527b7cdadf1b43a40"
+        "fileHash": "sha256-9679a43f9a9976a208a4c016b99db0e728fde61eb1cf532d06aa4ac348a4f2e1"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/streamzy.cs3",
@@ -639,7 +639,7 @@
         "authors": [
             "aldry84"
         ],
-        "fileSize": 87313,
+        "fileSize": 68436,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -649,7 +649,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
         "apiVersion": 1,
-        "fileHash": "sha256-b68701f538233547f9fe6f3d3d88af3f27672f8fabd1908b3878b2c7c3ca05c4"
+        "fileHash": "sha256-f2688dccf2edb9d0b77b5b3603202277259d153d51640e48acc78c73cf874627"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Xhamster.cs3",
@@ -661,7 +661,7 @@
             "aldey84"
         ],
         "description": "Awas Jangan Coli Kawan",
-        "fileSize": 16038,
+        "fileSize": 16013,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "en",
         "tvTypes": [
@@ -669,6 +669,6 @@
         ],
         "iconUrl": "https://static.xhpingcdn.com/xh-mobile/images/favicon/favicon-v2-512x512.png?v=1",
         "apiVersion": 1,
-        "fileHash": "sha256-4663e37d407676d4a0e29ec6409bf72abac5f5327348ffb95ce7de2471d66cc4"
+        "fileHash": "sha256-31d0421667b1802c1f2c5384c1e4c41b6e66b6b42e4778f733044895cf5840ea"
     }
 ]
