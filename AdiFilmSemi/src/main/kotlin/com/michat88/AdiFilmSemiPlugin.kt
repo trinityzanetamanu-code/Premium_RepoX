@@ -10,8 +10,7 @@ class AdiFilmSemiPlugin : Plugin() {
         // Exact MovieBox runtime profile harus siap sebelum request playback pertama.
         AdiFilmSemiExtractor.attachContext(context)
 
-        // Provider utama. Idlix memanggil Majorplay secara langsung dari
-        // AdiFilmSemiIdlix.kt sehingga tidak membutuhkan registerExtractorAPI.
-        registerMainAPI(AdiFilmSemi())
+        // Provider utama dengan recovery playback MovieBox terbaru.
+        registerMainAPI(AdiFilmSemiPlaybackFixedProvider())
     }
 }
