@@ -59,7 +59,7 @@ class AdiFilmSemiPlaybackFixedProvider : AdiFilmSemi() {
             (lower.contains("macdn.aoneroom.com") && lower.contains("/other/"))
     }
 
-    private fun patchMovieBox(link: ExtractorLink): ExtractorLink? {
+    private suspend fun patchMovieBox(link: ExtractorLink): ExtractorLink? {
         val cookie = link.headers["Cookie"].orEmpty()
         if (!cookie.contains("CloudFront-Policy=", true) && !isUpdateDummy(link.url)) return link
         val recoveredUrl = resolveFromUrlPrefix(cookie) ?: resolveDashFromCloudFrontPolicy(cookie)
