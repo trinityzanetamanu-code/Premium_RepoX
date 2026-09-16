@@ -6,28 +6,35 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import okhttp3.Interceptor
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * Playback-only MovieBox recovery + true first-ready playback layer.
+ * Playback-only MovieBox recovery + bounded fast-start layer.
  *
- * FIRST-READY behavior:
- * - semua source tetap mulai paralel lewat provider asli;
- * - callback link valid pertama langsung diteruskan ke CloudStream;
- * - loadLinks() langsung return true setelah source pertama siap;
- * - resolver lain tidak dibatalkan dan tetap berjalan di background sebagai cadangan;
- * - MovieBox update-dummy tetap diubah ke signed manifest secara sinkron.
+ * CloudStream only keeps links delivered while loadLinks() is alive. Therefore:
+ * - all sources start in parallel;
+ * - first valid link is forwarded immediately;
+ * - after the first link, keep loadLinks alive for a short grace window so
+ *   MovieBox / Idlix / VidSrc can still register as backup sources;
+ * - stop waiting as soon as 3 distinct source families are present;
+ * - never wait indefinitely for a slow/dead resolver.
  */
 class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
 
-    private val playbackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    companion object {
+        private const val SOURCE_GRACE_MS = 1800L
+        private const val GRACE_POLL_MS = 75L
+        private const val TARGET_SOURCE_COUNT = 3
+        private const val FINAL_SETTLE_MS = 120L
+    }
 
     private fun decodeBase64Url(value: String): String? {
         val padded = value + "=".repeat((4 - value.length % 4) % 4)
@@ -141,9 +148,14 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
         )
     }
 
-    private fun firstReadyForwarder(
+    private fun sourceKey(link: ExtractorLink): String {
+        return link.source.ifBlank { link.name }.trim().lowercase()
+    }
+
+    private fun graceForwarder(
         emitted: AtomicInteger,
         firstReady: CompletableDeferred<Boolean>,
+        sourceKeys: MutableSet<String>,
         callback: (ExtractorLink) -> Unit
     ): (ExtractorLink) -> Unit = { original ->
         val recoveredUrl = recoveredMediaUrl(original)
@@ -162,11 +174,12 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
         }
 
         if (output != null) {
+            sourceKeys.add(sourceKey(output))
             val position = emitted.incrementAndGet()
             callback(output)
 
             if (position == 1) {
-                Log.i("Adicinemax21", "[FIRST-READY] source=${output.source}|ACTION=release-player")
+                Log.i("Adicinemax21", "[FAST-GRACE] first=${output.source}|ACTION=start-grace")
                 firstReady.complete(true)
             }
         }
@@ -186,34 +199,54 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
+    ): Boolean = supervisorScope {
         val emitted = AtomicInteger(0)
         val firstReady = CompletableDeferred<Boolean>()
-        val forward = firstReadyForwarder(emitted, firstReady, callback)
+        val sourceKeys = ConcurrentHashMap.newKeySet<String>()
+        val forward = graceForwarder(emitted, firstReady, sourceKeys, callback)
 
-        playbackScope.launch {
+        val loaderJob = launch {
             try {
                 loadAllSources(data, isCasting, subtitleCallback, forward)
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 Log.e(
                     "Adicinemax21",
-                    "[FIRST-READY] background resolver error: ${error.javaClass.simpleName}: ${error.message}"
+                    "[FAST-GRACE] resolver error: ${error.javaClass.simpleName}: ${error.message}"
                 )
             } finally {
                 if (!firstReady.isCompleted) {
                     firstReady.complete(emitted.get() > 0)
                 }
-                Log.i(
-                    "Adicinemax21",
-                    "[FIRST-READY] background complete|TOTAL_LINKS=${emitted.get()}"
-                )
             }
         }
 
-        // Release CloudStream as soon as one valid link is delivered.
-        // The independent playbackScope keeps every remaining resolver alive.
-        return firstReady.await()
+        val ready = firstReady.await()
+        if (!ready) {
+            loaderJob.join()
+            return@supervisorScope false
+        }
+
+        val graceStartedNs = System.nanoTime()
+        while (loaderJob.isActive && sourceKeys.size < TARGET_SOURCE_COUNT) {
+            val elapsedMs = (System.nanoTime() - graceStartedNs) / 1_000_000L
+            if (elapsedMs >= SOURCE_GRACE_MS) break
+            delay(minOf(GRACE_POLL_MS, SOURCE_GRACE_MS - elapsedMs))
+        }
+
+        if (loaderJob.isActive && sourceKeys.size >= TARGET_SOURCE_COUNT) {
+            delay(FINAL_SETTLE_MS)
+        }
+
+        if (loaderJob.isActive) {
+            loaderJob.cancelAndJoin()
+        }
+
+        Log.i(
+            "Adicinemax21",
+            "[FAST-GRACE] release-player|LINKS=${emitted.get()}|SOURCES=${sourceKeys.size}"
+        )
+        true
     }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
