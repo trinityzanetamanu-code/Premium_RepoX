@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 9
+version = 10
 
 
 // Reuse ONLY the proven VidSrc engine source files from Adicinemax21.
