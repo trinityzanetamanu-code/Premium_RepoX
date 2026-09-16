@@ -382,16 +382,6 @@ class StreamzyProvider(
     }
 
 
-    private val peachifyResolver =
-        PeachifyResolver(
-            sourceName = name,
-            mainUrl = { mainUrl },
-            logMarkerCallback = ::logMarker,
-            safeHostCallback = ::safeHost,
-            resolveHttpUrlCallback = ::resolveHttpUrl,
-            getIframeUrlsCallback = ::getIframeUrls
-        )
-
     private val vidSrcResolver =
         VidSrcResolver(
             applicationContext = applicationContext,
@@ -1417,7 +1407,25 @@ class StreamzyProvider(
         )
 
         val distinctServerPages =
-            serverPageUrls.distinct()
+            serverPageUrls
+                .distinct()
+                .filterNot { serverPageUrl ->
+                    try {
+                        URI(serverPageUrl)
+                            .rawQuery
+                            ?.split("&")
+                            ?.any { part ->
+                                part.substringBefore("=")
+                                    .equals("server", true) &&
+                                    part.substringAfter(
+                                        delimiter = "=",
+                                        missingDelimiterValue = ""
+                                    ).equals("peachify", true)
+                            } == true
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
 
         logMarker(
             "STREAMZY_RESOLVE|STAGE=servers|" +
@@ -1446,15 +1454,6 @@ class StreamzyProvider(
                     callback(link)
                 }
             }
-
-        peachifyResolver.resolveFromWatchPage(
-            watchUrl = watchUrl,
-            contentKind = contentKind,
-            firstDocument = firstDocument,
-            testedIframeUrls = testedIframeUrls,
-            subtitleCallback = subtitleCallback,
-            forwardingCallback = forwardingCallback
-        )
 
         for (
             (serverZeroIndex, serverPageUrl) in
@@ -1512,6 +1511,10 @@ class StreamzyProvider(
             )
 
             for (iframeUrl in iframeUrls) {
+
+                if (safeHost(iframeUrl) == "peachify.top") {
+                    continue
+                }
 
                 if (
                     !testedIframeUrls.add(
