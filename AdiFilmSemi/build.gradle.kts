@@ -1,9 +1,17 @@
 // use an integer for version numbers
-version = 8
+version = 9
 
 
-dependencies {
-    implementation(project(":Adicinemax21"))
+// Reuse ONLY the proven VidSrc engine source files from Adicinemax21.
+// Do not depend on the whole Adicinemax21 project because that also packages
+// Adicinemax21Plugin (@CloudstreamPlugin) and can hijack plugin discovery.
+android {
+    sourceSets.getByName("main").java.apply {
+        srcDir(rootProject.file("Adicinemax21/src/main/kotlin"))
+        include("com/Adicinemax21/Adicinemax21VidSrc.kt")
+        include("com/Adicinemax21/Adicinemax21VidSrcResolver.kt")
+        include("com/Adicinemax21/Adicinemax21VidSrcShared.kt")
+    }
 }
 
 cloudstream {
