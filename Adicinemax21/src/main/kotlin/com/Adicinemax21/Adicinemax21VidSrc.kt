@@ -2,7 +2,7 @@ package com.Adicinemax21
 
 import android.content.Context
 import android.util.Log
-import com.lagradost.cloudstream3.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.SubtitleFile
 import org.jsoup.nodes.Document
 import java.net.URI
