@@ -10,7 +10,7 @@ class AdiXtreamPlugin : Plugin() {
         // Siapkan exact runtime profile MovieBox sebelum playback pertama.
         AdiXtreamExtractor.attachContext(context)
 
-        // Idlix memanggil Majorplay secara langsung dari AdiXtreamIdlix.kt.
-        registerMainAPI(AdiXtream())
+        // Provider utama dengan recovery playback MovieBox terbaru.
+        registerMainAPI(AdiXtreamPlaybackFixedProvider())
     }
 }
