@@ -27,7 +27,7 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
-    ): HomePageResponse = delegate.getMainPage(page, request)
+    ): HomePageResponse? = delegate.getMainPage(page, request)
 
     override suspend fun search(query: String): List<SearchResponse> =
         delegate.search(query)
@@ -147,41 +147,10 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
             (lower.contains("macdn.aoneroom.com") && lower.contains("/other/"))
     }
 
-    private fun patchedPlaybackLink(link: ExtractorLink): ExtractorLink? {
+    private fun recoveredMediaUrl(link: ExtractorLink): String? {
         val cookie = link.headers["Cookie"].orEmpty()
-        val recoveredUrl =
-            resolveFromUrlPrefix(cookie)
-                ?: resolveDashFromCloudFrontPolicy(cookie)
-
-        if (recoveredUrl != null) {
-            Log.d(
-                "MovieBox",
-                "[PLAYBACK-FIX] recovered signed manifest " +
-                    "directHost=${link.url.substringAfter("://").substringBefore('/')} " +
-                    "realHost=${recoveredUrl.substringAfter("://").substringBefore('/')}"
-            )
-
-            return newExtractorLink(
-                source = "MovieBox",
-                name = "MovieBox",
-                url = recoveredUrl,
-                type = INFER_TYPE
-            ) {
-                referer = link.referer
-                quality = link.quality
-                headers = link.headers
-            }
-        }
-
-        if (isDeprecationNoticeUrl(link.url)) {
-            Log.e(
-                "MovieBox",
-                "[PLAYBACK-FIX] update/deprecation dummy detected but signed manifest was not recoverable; suppressing dummy"
-            )
-            return null
-        }
-
-        return link
+        return resolveFromUrlPrefix(cookie)
+            ?: resolveDashFromCloudFrontPolicy(cookie)
     }
 
     override suspend fun loadLinks(
@@ -190,20 +159,57 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var emitted = 0
+        // The delegate callback is non-suspend, while newExtractorLink is built
+        // safely from this suspend body after delegate resolution completes.
+        val originals = mutableListOf<ExtractorLink>()
 
         delegate.loadLinks(
             data = data,
             isCasting = isCasting,
             subtitleCallback = subtitleCallback,
-            callback = { originalLink ->
-                val fixedLink = patchedPlaybackLink(originalLink)
-                if (fixedLink != null) {
-                    emitted += 1
-                    callback(fixedLink)
-                }
-            }
+            callback = { originalLink -> originals.add(originalLink) }
         )
+
+        var emitted = 0
+
+        for (link in originals) {
+            val recoveredUrl = recoveredMediaUrl(link)
+
+            if (recoveredUrl != null) {
+                Log.d(
+                    "MovieBox",
+                    "[PLAYBACK-FIX] recovered signed manifest " +
+                        "directHost=${link.url.substringAfter("://").substringBefore('/')} " +
+                        "realHost=${recoveredUrl.substringAfter("://").substringBefore('/')}"
+                )
+
+                callback(
+                    newExtractorLink(
+                        source = "MovieBox",
+                        name = "MovieBox",
+                        url = recoveredUrl,
+                        type = INFER_TYPE
+                    ) {
+                        referer = link.referer
+                        quality = link.quality
+                        headers = link.headers
+                    }
+                )
+                emitted += 1
+                continue
+            }
+
+            if (isDeprecationNoticeUrl(link.url)) {
+                Log.e(
+                    "MovieBox",
+                    "[PLAYBACK-FIX] update/deprecation dummy detected but signed manifest was not recoverable; suppressing dummy"
+                )
+                continue
+            }
+
+            callback(link)
+            emitted += 1
+        }
 
         return emitted > 0
     }
