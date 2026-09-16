@@ -95,7 +95,7 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
             (lower.contains("macdn.aoneroom.com") && lower.contains("/other/"))
     }
 
-    private fun patchMovieBox(link: ExtractorLink): ExtractorLink? {
+    private suspend fun patchMovieBox(link: ExtractorLink): ExtractorLink? {
         val cookie = link.headers["Cookie"].orEmpty()
         val looksMovieBox = cookie.contains("CloudFront-Policy=", true) || isUpdateDummy(link.url)
         if (!looksMovieBox) return link
