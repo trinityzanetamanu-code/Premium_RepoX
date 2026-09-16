@@ -20,10 +20,10 @@ import kotlin.coroutines.cancellation.CancellationException
 
 class AdiXtreamPlaybackFixedProvider : AdiXtream() {
     companion object {
-        private const val SOURCE_GRACE_MS = 6500L
+        private const val SOURCE_GRACE_MS = 12_000L
         private const val GRACE_POLL_MS = 75L
-        private const val TARGET_SOURCE_COUNT = 2
-        private const val FINAL_SETTLE_MS = 1200L
+        private const val TARGET_SOURCE_COUNT = 3
+        private const val FINAL_SETTLE_MS = 250L
     }
 
     private fun decodeBase64Url(value: String): String? {
@@ -131,7 +131,13 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
     }
 
     private fun sourceKey(link: ExtractorLink): String {
-        return link.source.ifBlank { link.name }.trim().lowercase()
+        val raw = link.source.ifBlank { link.name }.trim().lowercase()
+        return when {
+            raw.contains("moviebox") -> "moviebox"
+            raw.contains("vidsrc") -> "vidsrc"
+            raw.contains("idlix") -> "idlix"
+            else -> raw
+        }
     }
 
     private fun graceForwarder(
@@ -154,11 +160,13 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
         }
 
         if (output != null) {
-            sourceKeys.add(sourceKey(output))
+            val family = sourceKey(output)
+            sourceKeys.add(family)
             val position = emitted.incrementAndGet()
             callback(output)
+            Log.i("AdiXtream", "[THREE-SOURCE] callback|FAMILY=$family|LINKS=$position|FAMILIES=${sourceKeys.size}")
             if (position == 1) {
-                Log.i("AdiXtream", "[ADAPTIVE-GRACE] first=${output.source}|ACTION=wait-second")
+                Log.i("AdiXtream", "[THREE-SOURCE] first=${output.source}|ACTION=bounded-wait")
                 firstReady.complete(true)
             }
         }
@@ -213,7 +221,7 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
                     loadBaseSources(data, isCasting, subtitleCallback, callback)
                 } catch (error: Exception) {
                     if (error is CancellationException) throw error
-                    Log.e("AdiXtream", "[ADAPTIVE-GRACE] base sources error: ${error.javaClass.simpleName}: ${error.message}")
+                    Log.e("AdiXtream", "[THREE-SOURCE] base sources error: ${error.javaClass.simpleName}: ${error.message}")
                 }
             }
             val vidSrcJob = launch {
@@ -239,7 +247,7 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
                 loadAllSources(data, isCasting, subtitleCallback, forward)
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
-                Log.e("AdiXtream", "[ADAPTIVE-GRACE] resolver error: ${error.javaClass.simpleName}: ${error.message}")
+                Log.e("AdiXtream", "[THREE-SOURCE] resolver error: ${error.javaClass.simpleName}: ${error.message}")
             } finally {
                 if (!firstReady.isCompleted) firstReady.complete(emitted.get() > 0)
             }
@@ -259,7 +267,7 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
         }
 
         if (loaderJob.isActive && sourceKeys.size >= TARGET_SOURCE_COUNT) {
-            Log.i("AdiXtream", "[ADAPTIVE-GRACE] second-source-ready|SOURCES=${sourceKeys.size}")
+            Log.i("AdiXtream", "[THREE-SOURCE] all-families-ready|FAMILIES=${sourceKeys.size}")
             delay(FINAL_SETTLE_MS)
         }
 
@@ -267,7 +275,7 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
 
         Log.i(
             "AdiXtream",
-            "[ADAPTIVE-GRACE] release-player|LINKS=${emitted.get()}|SOURCES=${sourceKeys.size}"
+            "[THREE-SOURCE] release-player|LINKS=${emitted.get()}|FAMILIES=${sourceKeys.joinToString(",")}"
         )
         true
     }
