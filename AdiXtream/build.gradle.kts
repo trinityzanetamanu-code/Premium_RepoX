@@ -8,9 +8,11 @@ version = 15
 android {
     sourceSets.getByName("main").java.apply {
         srcDir(rootProject.file("Adicinemax21/src/main/kotlin"))
-        include("com/Adicinemax21/Adicinemax21VidSrc.kt")
-        include("com/Adicinemax21/Adicinemax21VidSrcResolver.kt")
-        include("com/Adicinemax21/Adicinemax21VidSrcShared.kt")
+        filter.include(
+            "com/Adicinemax21/Adicinemax21VidSrc.kt",
+            "com/Adicinemax21/Adicinemax21VidSrcResolver.kt",
+            "com/Adicinemax21/Adicinemax21VidSrcShared.kt",
+        )
     }
 }
 
