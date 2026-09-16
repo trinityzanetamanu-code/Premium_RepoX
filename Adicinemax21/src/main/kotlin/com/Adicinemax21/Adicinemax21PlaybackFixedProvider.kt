@@ -17,23 +17,23 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * Playback-only MovieBox recovery + adaptive fast-start layer.
+ * Playback-only MovieBox recovery + bounded three-family source collection.
  *
  * CloudStream only keeps links delivered while loadLinks() is alive. Therefore:
  * - all sources start in parallel;
  * - first valid link is forwarded immediately;
- * - after the first link, wait only for a second distinct source, not all sources;
- * - once the second source appears, keep a short settle window so a third source
- *   that is almost ready can still register;
- * - never wait indefinitely for a slow/dead resolver.
+ * - keep loadLinks alive only for a bounded window so MovieBox, VidSrc and Idlix
+ *   can all register before CloudStream freezes the source list;
+ * - release as soon as all three source families are present;
+ * - never inherit Idlix's possible long/30s wait indefinitely.
  */
 class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
 
     companion object {
-        private const val SOURCE_GRACE_MS = 6500L
+        private const val SOURCE_GRACE_MS = 12_000L
         private const val GRACE_POLL_MS = 75L
-        private const val TARGET_SOURCE_COUNT = 2
-        private const val FINAL_SETTLE_MS = 1200L
+        private const val TARGET_SOURCE_COUNT = 3
+        private const val FINAL_SETTLE_MS = 250L
     }
 
     private fun decodeBase64Url(value: String): String? {
@@ -149,7 +149,13 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
     }
 
     private fun sourceKey(link: ExtractorLink): String {
-        return link.source.ifBlank { link.name }.trim().lowercase()
+        val raw = link.source.ifBlank { link.name }.trim().lowercase()
+        return when {
+            raw.contains("moviebox") -> "moviebox"
+            raw.contains("vidsrc") -> "vidsrc"
+            raw.contains("idlix") -> "idlix"
+            else -> raw
+        }
     }
 
     private fun graceForwarder(
@@ -174,12 +180,18 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
         }
 
         if (output != null) {
-            sourceKeys.add(sourceKey(output))
+            val family = sourceKey(output)
+            sourceKeys.add(family)
             val position = emitted.incrementAndGet()
             callback(output)
 
+            Log.i(
+                "Adicinemax21",
+                "[THREE-SOURCE] callback|FAMILY=$family|LINKS=$position|FAMILIES=${sourceKeys.size}"
+            )
+
             if (position == 1) {
-                Log.i("Adicinemax21", "[ADAPTIVE-GRACE] first=${output.source}|ACTION=wait-second")
+                Log.i("Adicinemax21", "[THREE-SOURCE] first=${output.source}|ACTION=bounded-wait")
                 firstReady.complete(true)
             }
         }
@@ -212,7 +224,7 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
                 if (error is CancellationException) throw error
                 Log.e(
                     "Adicinemax21",
-                    "[ADAPTIVE-GRACE] resolver error: ${error.javaClass.simpleName}: ${error.message}"
+                    "[THREE-SOURCE] resolver error: ${error.javaClass.simpleName}: ${error.message}"
                 )
             } finally {
                 if (!firstReady.isCompleted) {
@@ -235,7 +247,7 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
         }
 
         if (loaderJob.isActive && sourceKeys.size >= TARGET_SOURCE_COUNT) {
-            Log.i("Adicinemax21", "[ADAPTIVE-GRACE] second-source-ready|SOURCES=${sourceKeys.size}")
+            Log.i("Adicinemax21", "[THREE-SOURCE] all-families-ready|FAMILIES=${sourceKeys.size}")
             delay(FINAL_SETTLE_MS)
         }
 
@@ -245,7 +257,7 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
 
         Log.i(
             "Adicinemax21",
-            "[ADAPTIVE-GRACE] release-player|LINKS=${emitted.get()}|SOURCES=${sourceKeys.size}"
+            "[THREE-SOURCE] release-player|LINKS=${emitted.get()}|FAMILIES=${sourceKeys.joinToString(",")}"
         )
         true
     }
