@@ -5,20 +5,29 @@ import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import okhttp3.Interceptor
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * Playback-only MovieBox recovery layer.
+ * Playback-only MovieBox recovery + true first-ready playback layer.
  *
- * FAST-START behavior:
- * - source asli tetap berjalan paralel lewat Adicinemax21.runAllAsync;
- * - setiap callback valid langsung diteruskan ke CloudStream;
- * - tidak lagi menunggu semua source selesai sebelum callback pertama;
+ * FIRST-READY behavior:
+ * - semua source tetap mulai paralel lewat provider asli;
+ * - callback link valid pertama langsung diteruskan ke CloudStream;
+ * - loadLinks() langsung return true setelah source pertama siap;
+ * - resolver lain tidak dibatalkan dan tetap berjalan di background sebagai cadangan;
  * - MovieBox update-dummy tetap diubah ke signed manifest secara sinkron.
  */
 class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
+
+    private val playbackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private fun decodeBase64Url(value: String): String? {
         val padded = value + "=".repeat((4 - value.length % 4) % 4)
@@ -132,8 +141,9 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
         )
     }
 
-    private fun fastForwarder(
+    private fun firstReadyForwarder(
         emitted: AtomicInteger,
+        firstReady: CompletableDeferred<Boolean>,
         callback: (ExtractorLink) -> Unit
     ): (ExtractorLink) -> Unit = { original ->
         val recoveredUrl = recoveredMediaUrl(original)
@@ -153,11 +163,22 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
 
         if (output != null) {
             val position = emitted.incrementAndGet()
-            if (position == 1) {
-                Log.i("Adicinemax21", "[FAST-START] first ready source=${output.source}")
-            }
             callback(output)
+
+            if (position == 1) {
+                Log.i("Adicinemax21", "[FIRST-READY] source=${output.source}|ACTION=release-player")
+                firstReady.complete(true)
+            }
         }
+    }
+
+    private suspend fun loadAllSources(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        super.loadLinks(data, isCasting, subtitleCallback, callback)
     }
 
     override suspend fun loadLinks(
@@ -167,18 +188,32 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val emitted = AtomicInteger(0)
-        val forward = fastForwarder(emitted, callback)
+        val firstReady = CompletableDeferred<Boolean>()
+        val forward = firstReadyForwarder(emitted, firstReady, callback)
 
-        // super.loadLinks tetap menunggu seluruh source agar source lambat terus bekerja,
-        // tetapi callback-nya sekarang diteruskan seketika saat masing-masing source siap.
-        super.loadLinks(
-            data = data,
-            isCasting = isCasting,
-            subtitleCallback = subtitleCallback,
-            callback = forward
-        )
+        playbackScope.launch {
+            try {
+                loadAllSources(data, isCasting, subtitleCallback, forward)
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                Log.e(
+                    "Adicinemax21",
+                    "[FIRST-READY] background resolver error: ${error.javaClass.simpleName}: ${error.message}"
+                )
+            } finally {
+                if (!firstReady.isCompleted) {
+                    firstReady.complete(emitted.get() > 0)
+                }
+                Log.i(
+                    "Adicinemax21",
+                    "[FIRST-READY] background complete|TOTAL_LINKS=${emitted.get()}"
+                )
+            }
+        }
 
-        return emitted.get() > 0
+        // Release CloudStream as soon as one valid link is delivered.
+        // The independent playbackScope keeps every remaining resolver alive.
+        return firstReady.await()
     }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
