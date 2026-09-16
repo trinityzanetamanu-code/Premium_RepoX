@@ -8,7 +8,7 @@ import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import okhttp3.Interceptor
 import org.json.JSONObject
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.Collections
 
 /**
  * Playback-only MovieBox recovery layer.
@@ -80,10 +80,7 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
             .takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
             ?: return null
 
-        return when {
-            base.endsWith(".mpd", true) || base.endsWith(".m3u8", true) -> base
-            else -> "$base/index.mpd"
-        }
+        return if (base.endsWith(".mpd", true) || base.endsWith(".m3u8", true)) base else "$base/index.mpd"
     }
 
     private fun isUpdateDummy(url: String): Boolean {
@@ -95,27 +92,10 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
             (lower.contains("macdn.aoneroom.com") && lower.contains("/other/"))
     }
 
-    private suspend fun patchMovieBox(link: ExtractorLink): ExtractorLink? {
+    private fun recoveredMediaUrl(link: ExtractorLink): String? {
         val cookie = link.headers["Cookie"].orEmpty()
-        val looksMovieBox = cookie.contains("CloudFront-Policy=", true) || isUpdateDummy(link.url)
-        if (!looksMovieBox) return link
-
-        val recoveredUrl = resolveFromUrlPrefix(cookie) ?: resolveDashFromCloudFrontPolicy(cookie)
-        if (recoveredUrl != null) {
-            Log.d("Adicinemax21", "[MOVIEBOX-FIX] signed manifest recovered")
-            return newExtractorLink("MovieBox", "MovieBox", recoveredUrl, INFER_TYPE) {
-                referer = link.referer
-                quality = link.quality
-                headers = link.headers
-            }
-        }
-
-        if (isUpdateDummy(link.url)) {
-            Log.e("Adicinemax21", "[MOVIEBOX-FIX] update dummy suppressed; signed manifest unavailable")
-            return null
-        }
-
-        return link
+        if (!cookie.contains("CloudFront-Policy=", true) && !isUpdateDummy(link.url)) return null
+        return resolveFromUrlPrefix(cookie) ?: resolveDashFromCloudFrontPolicy(cookie)
     }
 
     override suspend fun loadLinks(
@@ -124,14 +104,46 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val emitted = AtomicInteger(0)
-        super.loadLinks(data, isCasting, subtitleCallback) { original ->
-            patchMovieBox(original)?.let { fixed ->
-                emitted.incrementAndGet()
-                callback(fixed)
+        // Adicinemax21 menjalankan beberapa source via runAllAsync, jadi callback
+        // dapat datang paralel. Tampung dulu secara thread-safe, lalu patch MovieBox
+        // setelah super.loadLinks selesai dari body suspend ini.
+        val originals = Collections.synchronizedList(mutableListOf<ExtractorLink>())
+
+        super.loadLinks(
+            data = data,
+            isCasting = isCasting,
+            subtitleCallback = subtitleCallback,
+            callback = { original -> originals.add(original) }
+        )
+
+        val snapshot = synchronized(originals) { originals.toList() }
+        var emitted = 0
+
+        for (link in snapshot) {
+            val recoveredUrl = recoveredMediaUrl(link)
+            if (recoveredUrl != null) {
+                Log.d("Adicinemax21", "[MOVIEBOX-FIX] signed manifest recovered")
+                callback(
+                    newExtractorLink("MovieBox", "MovieBox", recoveredUrl, INFER_TYPE) {
+                        referer = link.referer
+                        quality = link.quality
+                        headers = link.headers
+                    }
+                )
+                emitted++
+                continue
             }
+
+            if (isUpdateDummy(link.url)) {
+                Log.e("Adicinemax21", "[MOVIEBOX-FIX] update dummy suppressed; signed manifest unavailable")
+                continue
+            }
+
+            callback(link)
+            emitted++
         }
-        return emitted.get() > 0
+
+        return emitted > 0
     }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
