@@ -10,7 +10,7 @@ class AdiDrakorPlugin : Plugin() {
         // Identity persisten MovieBox disiapkan sebelum request pertama.
         AdiDrakorExtractor.attachContext(context)
 
-        // Hanya mendaftarkan provider utama
-        registerMainAPI(AdiDrakor())
+        // Provider utama dengan recovery playback MovieBox terbaru.
+        registerMainAPI(AdiDrakorPlaybackFixedProvider())
     }
 }
