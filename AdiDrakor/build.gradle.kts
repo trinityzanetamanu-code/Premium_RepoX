@@ -1,6 +1,10 @@
 // use an integer for version numbers
-version = 9
+version = 10
 
+
+dependencies {
+    implementation(project(":Adicinemax21"))
+}
 
 cloudstream {
     language = "id"
