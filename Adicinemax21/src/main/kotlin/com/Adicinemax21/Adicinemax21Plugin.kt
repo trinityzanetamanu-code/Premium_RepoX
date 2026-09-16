@@ -10,6 +10,9 @@ class Adicinemax21Plugin : Plugin() {
         // Identity persisten MovieBox disiapkan sebelum request pertama.
         Adicinemax21Extractor.attachContext(context)
 
+        // Context hanya untuk engine VidSrc (WebView/WASM resolver dari Streamzy).
+        Adicinemax21VidSrc.attachContext(context)
+
         // Hanya mendaftarkan provider utama
         registerMainAPI(Adicinemax21())
     }
