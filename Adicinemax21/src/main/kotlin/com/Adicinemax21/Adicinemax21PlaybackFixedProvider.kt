@@ -17,23 +17,23 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * Playback-only MovieBox recovery + bounded fast-start layer.
+ * Playback-only MovieBox recovery + adaptive fast-start layer.
  *
  * CloudStream only keeps links delivered while loadLinks() is alive. Therefore:
  * - all sources start in parallel;
  * - first valid link is forwarded immediately;
- * - after the first link, keep loadLinks alive for a short grace window so
- *   MovieBox / Idlix / VidSrc can still register as backup sources;
- * - stop waiting as soon as 3 distinct source families are present;
+ * - after the first link, wait only for a second distinct source, not all sources;
+ * - once the second source appears, keep a short settle window so a third source
+ *   that is almost ready can still register;
  * - never wait indefinitely for a slow/dead resolver.
  */
 class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
 
     companion object {
-        private const val SOURCE_GRACE_MS = 1800L
+        private const val SOURCE_GRACE_MS = 6500L
         private const val GRACE_POLL_MS = 75L
-        private const val TARGET_SOURCE_COUNT = 3
-        private const val FINAL_SETTLE_MS = 120L
+        private const val TARGET_SOURCE_COUNT = 2
+        private const val FINAL_SETTLE_MS = 1200L
     }
 
     private fun decodeBase64Url(value: String): String? {
@@ -179,7 +179,7 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
             callback(output)
 
             if (position == 1) {
-                Log.i("Adicinemax21", "[FAST-GRACE] first=${output.source}|ACTION=start-grace")
+                Log.i("Adicinemax21", "[ADAPTIVE-GRACE] first=${output.source}|ACTION=wait-second")
                 firstReady.complete(true)
             }
         }
@@ -212,7 +212,7 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
                 if (error is CancellationException) throw error
                 Log.e(
                     "Adicinemax21",
-                    "[FAST-GRACE] resolver error: ${error.javaClass.simpleName}: ${error.message}"
+                    "[ADAPTIVE-GRACE] resolver error: ${error.javaClass.simpleName}: ${error.message}"
                 )
             } finally {
                 if (!firstReady.isCompleted) {
@@ -235,6 +235,7 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
         }
 
         if (loaderJob.isActive && sourceKeys.size >= TARGET_SOURCE_COUNT) {
+            Log.i("Adicinemax21", "[ADAPTIVE-GRACE] second-source-ready|SOURCES=${sourceKeys.size}")
             delay(FINAL_SETTLE_MS)
         }
 
@@ -244,7 +245,7 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
 
         Log.i(
             "Adicinemax21",
-            "[FAST-GRACE] release-player|LINKS=${emitted.get()}|SOURCES=${sourceKeys.size}"
+            "[ADAPTIVE-GRACE] release-player|LINKS=${emitted.get()}|SOURCES=${sourceKeys.size}"
         )
         true
     }
