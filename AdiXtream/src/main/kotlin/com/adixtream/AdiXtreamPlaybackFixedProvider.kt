@@ -2,6 +2,7 @@ package com.adixtream
 
 import android.util.Base64
 import android.util.Log
+import com.Adicinemax21.Adicinemax21VidSrcShared
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
@@ -68,6 +69,26 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val originals = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         super.loadLinks(data, isCasting, subtitleCallback) { original -> originals.add(original) }
+
+        try {
+            val payload = JSONObject(data)
+            val tmdbId = payload.optString("tmdbId").toIntOrNull()
+            if (tmdbId != null && tmdbId > 0) {
+                val isTvSeries = payload.optBoolean("isTvSeries", false)
+                val season = if (payload.has("season") && !payload.isNull("season")) payload.optInt("season") else null
+                val episode = if (payload.has("episode") && !payload.isNull("episode")) payload.optInt("episode") else null
+                Adicinemax21VidSrcShared.invokeVidSrc(
+                    tmdbId = tmdbId,
+                    type = if (isTvSeries) "tv" else "movie",
+                    season = season,
+                    episode = episode,
+                    subtitleCallback = subtitleCallback,
+                    callback = { originals.add(it) }
+                )
+            }
+        } catch (e: Exception) {
+            Log.e("AdiXtream", "[VIDSRC] gagal resolve: ${e.javaClass.simpleName}: ${e.message}")
+        }
 
         val snapshot = synchronized(originals) { originals.toList() }
         var emitted = 0
