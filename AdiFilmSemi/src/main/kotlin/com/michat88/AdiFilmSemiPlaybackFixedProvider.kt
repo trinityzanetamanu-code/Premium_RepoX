@@ -20,10 +20,10 @@ import kotlin.coroutines.cancellation.CancellationException
 
 class AdiFilmSemiPlaybackFixedProvider : AdiFilmSemi() {
     companion object {
-        private const val SOURCE_GRACE_MS = 1800L
+        private const val SOURCE_GRACE_MS = 6500L
         private const val GRACE_POLL_MS = 75L
-        private const val TARGET_SOURCE_COUNT = 3
-        private const val FINAL_SETTLE_MS = 120L
+        private const val TARGET_SOURCE_COUNT = 2
+        private const val FINAL_SETTLE_MS = 1200L
     }
 
     private fun decodeBase64Url(value: String): String? {
@@ -158,7 +158,7 @@ class AdiFilmSemiPlaybackFixedProvider : AdiFilmSemi() {
             val position = emitted.incrementAndGet()
             callback(output)
             if (position == 1) {
-                Log.i("AdiFilmSemi", "[FAST-GRACE] first=${output.source}|ACTION=start-grace")
+                Log.i("AdiFilmSemi", "[ADAPTIVE-GRACE] first=${output.source}|ACTION=wait-second")
                 firstReady.complete(true)
             }
         }
@@ -213,7 +213,7 @@ class AdiFilmSemiPlaybackFixedProvider : AdiFilmSemi() {
                     loadBaseSources(data, isCasting, subtitleCallback, callback)
                 } catch (error: Exception) {
                     if (error is CancellationException) throw error
-                    Log.e("AdiFilmSemi", "[FAST-GRACE] base sources error: ${error.javaClass.simpleName}: ${error.message}")
+                    Log.e("AdiFilmSemi", "[ADAPTIVE-GRACE] base sources error: ${error.javaClass.simpleName}: ${error.message}")
                 }
             }
             val vidSrcJob = launch {
@@ -239,7 +239,7 @@ class AdiFilmSemiPlaybackFixedProvider : AdiFilmSemi() {
                 loadAllSources(data, isCasting, subtitleCallback, forward)
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
-                Log.e("AdiFilmSemi", "[FAST-GRACE] resolver error: ${error.javaClass.simpleName}: ${error.message}")
+                Log.e("AdiFilmSemi", "[ADAPTIVE-GRACE] resolver error: ${error.javaClass.simpleName}: ${error.message}")
             } finally {
                 if (!firstReady.isCompleted) firstReady.complete(emitted.get() > 0)
             }
@@ -259,6 +259,7 @@ class AdiFilmSemiPlaybackFixedProvider : AdiFilmSemi() {
         }
 
         if (loaderJob.isActive && sourceKeys.size >= TARGET_SOURCE_COUNT) {
+            Log.i("AdiFilmSemi", "[ADAPTIVE-GRACE] second-source-ready|SOURCES=${sourceKeys.size}")
             delay(FINAL_SETTLE_MS)
         }
 
@@ -266,7 +267,7 @@ class AdiFilmSemiPlaybackFixedProvider : AdiFilmSemi() {
 
         Log.i(
             "AdiFilmSemi",
-            "[FAST-GRACE] release-player|LINKS=${emitted.get()}|SOURCES=${sourceKeys.size}"
+            "[ADAPTIVE-GRACE] release-player|LINKS=${emitted.get()}|SOURCES=${sourceKeys.size}"
         )
         true
     }
