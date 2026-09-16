@@ -6,6 +6,10 @@ import com.Adicinemax21.Adicinemax21VidSrcShared
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
@@ -15,6 +19,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 
 class AdiXtreamPlaybackFixedProvider : AdiXtream() {
+    private val playbackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private fun decodeBase64Url(value: String): String? {
         val padded = value + "=".repeat((4 - value.length % 4) % 4)
         return sequenceOf(Base64.DEFAULT, Base64.URL_SAFE).mapNotNull { flags ->
@@ -77,11 +83,7 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
             .takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
             ?: return null
 
-        return if (base.endsWith(".mpd", true) || base.endsWith(".m3u8", true)) {
-            base
-        } else {
-            "$base/index.mpd"
-        }
+        return if (base.endsWith(".mpd", true) || base.endsWith(".m3u8", true)) base else "$base/index.mpd"
     }
 
     private fun isUpdateDummy(url: String): Boolean {
@@ -123,8 +125,9 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
         )
     }
 
-    private fun fastForwarder(
+    private fun firstReadyForwarder(
         emitted: AtomicInteger,
+        firstReady: CompletableDeferred<Boolean>,
         callback: (ExtractorLink) -> Unit
     ): (ExtractorLink) -> Unit = { original ->
         val recoveredUrl = recoveredMediaUrl(original)
@@ -133,21 +136,20 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
                 Log.d("AdiXtream", "[MOVIEBOX-FIX] signed manifest recovered")
                 buildRecoveredLink(original, recoveredUrl)
             }
-
             isUpdateDummy(original.url) -> {
                 Log.e("AdiXtream", "[MOVIEBOX-FIX] update dummy suppressed; signed manifest unavailable")
                 null
             }
-
             else -> original
         }
 
         if (output != null) {
             val position = emitted.incrementAndGet()
-            if (position == 1) {
-                Log.i("AdiXtream", "[FAST-START] first ready source=${output.source}")
-            }
             callback(output)
+            if (position == 1) {
+                Log.i("AdiXtream", "[FIRST-READY] source=${output.source}|ACTION=release-player")
+                firstReady.complete(true)
+            }
         }
     }
 
@@ -188,6 +190,28 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
         }
     }
 
+    private suspend fun loadAllSources(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        supervisorScope {
+            val baseJob = launch {
+                try {
+                    loadBaseSources(data, isCasting, subtitleCallback, callback)
+                } catch (error: Exception) {
+                    if (error is CancellationException) throw error
+                    Log.e("AdiXtream", "[FIRST-READY] base sources error: ${error.javaClass.simpleName}: ${error.message}")
+                }
+            }
+            val vidSrcJob = launch {
+                loadVidSrcSource(data, subtitleCallback, callback)
+            }
+            joinAll(baseJob, vidSrcJob)
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -195,26 +219,22 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val emitted = AtomicInteger(0)
-        val forward = fastForwarder(emitted, callback)
+        val firstReady = CompletableDeferred<Boolean>()
+        val forward = firstReadyForwarder(emitted, firstReady, callback)
 
-        supervisorScope {
-            val baseJob = launch {
-                try {
-                    loadBaseSources(data, isCasting, subtitleCallback, forward)
-                } catch (error: Exception) {
-                    if (error is CancellationException) throw error
-                    Log.e("AdiXtream", "[FAST-START] base sources error: ${error.javaClass.simpleName}: ${error.message}")
-                }
+        playbackScope.launch {
+            try {
+                loadAllSources(data, isCasting, subtitleCallback, forward)
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                Log.e("AdiXtream", "[FIRST-READY] background resolver error: ${error.javaClass.simpleName}: ${error.message}")
+            } finally {
+                if (!firstReady.isCompleted) firstReady.complete(emitted.get() > 0)
+                Log.i("AdiXtream", "[FIRST-READY] background complete|TOTAL_LINKS=${emitted.get()}")
             }
-
-            val vidSrcJob = launch {
-                loadVidSrcSource(data, subtitleCallback, forward)
-            }
-
-            joinAll(baseJob, vidSrcJob)
         }
 
-        return emitted.get() > 0
+        return firstReady.await()
     }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
