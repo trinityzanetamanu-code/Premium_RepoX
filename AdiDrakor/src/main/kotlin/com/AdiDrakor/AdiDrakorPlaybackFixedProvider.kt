@@ -2,6 +2,7 @@ package com.AdiDrakor
 
 import android.util.Base64
 import android.util.Log
+import com.Adicinemax21.Adicinemax21VidSrcShared
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
@@ -68,6 +69,26 @@ class AdiDrakorPlaybackFixedProvider : AdiDrakor() {
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val originals = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         super.loadLinks(data, isCasting, subtitleCallback) { original -> originals.add(original) }
+
+        try {
+            val payload = JSONObject(data)
+            val tmdbId = payload.optInt("id", 0)
+            if (tmdbId > 0) {
+                val type = payload.optString("type").takeIf { it.isNotBlank() }
+                val season = if (payload.has("season") && !payload.isNull("season")) payload.optInt("season") else null
+                val episode = if (payload.has("episode") && !payload.isNull("episode")) payload.optInt("episode") else null
+                Adicinemax21VidSrcShared.invokeVidSrc(
+                    tmdbId = tmdbId,
+                    type = type,
+                    season = season,
+                    episode = episode,
+                    subtitleCallback = subtitleCallback,
+                    callback = { originals.add(it) }
+                )
+            }
+        } catch (e: Exception) {
+            Log.e("AdiDrakor", "[VIDSRC] gagal resolve: ${e.javaClass.simpleName}: ${e.message}")
+        }
 
         val snapshot = synchronized(originals) { originals.toList() }
         var emitted = 0
