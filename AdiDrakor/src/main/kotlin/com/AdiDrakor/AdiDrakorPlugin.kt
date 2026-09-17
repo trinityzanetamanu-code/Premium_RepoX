@@ -14,7 +14,7 @@ class AdiDrakorPlugin : Plugin() {
         // Reuse exact VidSrc/WebView/WASM engine milik Adicinemax21.
         Adicinemax21VidSrcShared.attachContext(context)
 
-        // Provider utama dengan recovery MovieBox + VidSrc.
-        registerMainAPI(AdiDrakorPlaybackFixedProvider())
+        // Provider utama: MovieBox/VidSrc proven + Idlix prefetch/cache.
+        registerMainAPI(AdiDrakorPrefetchProvider())
     }
 }
