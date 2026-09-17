@@ -13,7 +13,7 @@ class Adicinemax21Plugin : Plugin() {
         // Context hanya untuk engine VidSrc (WebView/WASM resolver dari Streamzy).
         Adicinemax21VidSrc.attachContext(context)
 
-        // Provider utama dengan recovery playback MovieBox terbaru.
-        registerMainAPI(Adicinemax21PlaybackFixedProvider())
+        // Provider utama: MovieBox/VidSrc proven + Idlix prefetch/cache.
+        registerMainAPI(Adicinemax21PrefetchProvider())
     }
 }
