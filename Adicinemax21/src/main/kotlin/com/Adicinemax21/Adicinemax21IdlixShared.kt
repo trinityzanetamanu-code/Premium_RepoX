@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
@@ -12,7 +13,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.lagradost.cloudstream3.utils.newSubtitleFile
 import com.lagradost.nicehttp.RequestBodyTypes
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -289,7 +289,10 @@ internal object Adicinemax21IdlixShared {
                     interceptUrl = Regex(".*api/watch/play-info.*"),
                     useOkhttp = false
                 )
-                resolver.resolveUsingWebView(playInfoUrl, headers)
+                resolver.resolveUsingWebView(
+                    url = playInfoUrl,
+                    headers = headers
+                )
                 playInfoText = app.get(playInfoUrl, headers = headers, cookies = cookies).text
                 playInfo = runCatching { AppUtils.parseJson<PlayInfo>(playInfoText) }.getOrNull()
             }
