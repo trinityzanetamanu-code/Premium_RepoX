@@ -9,6 +9,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.supervisorScope
 import okhttp3.Interceptor
 import org.json.JSONObject
@@ -197,13 +198,63 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
         }
     }
 
-    private suspend fun loadAllSources(
+    private suspend fun loadBaseSources(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
         super.loadLinks(data, isCasting, subtitleCallback, callback)
+    }
+
+    private suspend fun loadVidSrcSource(
+        data: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        try {
+            val payload = JSONObject(data)
+            val tmdbId = payload.optInt("id", 0)
+            if (tmdbId <= 0) return
+
+            val type = payload.optString("type").takeIf { it.isNotBlank() }
+            val season = if (payload.has("season") && !payload.isNull("season")) payload.optInt("season") else null
+            val episode = if (payload.has("episode") && !payload.isNull("episode")) payload.optInt("episode") else null
+
+            Adicinemax21VidSrc.invokeVidSrc(
+                tmdbId = tmdbId,
+                type = type,
+                season = season,
+                episode = episode,
+                subtitleCallback = subtitleCallback,
+                callback = callback
+            )
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            Log.e("Adicinemax21", "[VIDSRC] gagal resolve: ${error.javaClass.simpleName}: ${error.message}")
+        }
+    }
+
+    private suspend fun loadAllSources(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        supervisorScope {
+            val baseJob = launch {
+                try {
+                    loadBaseSources(data, isCasting, subtitleCallback, callback)
+                } catch (error: Exception) {
+                    if (error is CancellationException) throw error
+                    Log.e("Adicinemax21", "[THREE-SOURCE] base source error: ${error.javaClass.simpleName}: ${error.message}")
+                }
+            }
+            val vidSrcJob = launch {
+                loadVidSrcSource(data, subtitleCallback, callback)
+            }
+            joinAll(baseJob, vidSrcJob)
+        }
     }
 
     override suspend fun loadLinks(
@@ -263,8 +314,11 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
     }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        val family = extractorLink.source.ifBlank { extractorLink.name }.trim().lowercase()
+        if (!family.contains("moviebox")) return null
+
         val cookie = extractorLink.headers["Cookie"]
-        if (cookie.isNullOrBlank()) return super.getVideoInterceptor(extractorLink)
+        if (cookie.isNullOrBlank()) return null
         val userAgent = extractorLink.headers["User-Agent"]
 
         return Interceptor { chain ->

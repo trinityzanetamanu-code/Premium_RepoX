@@ -2,7 +2,6 @@ package com.adixtream
 
 import android.util.Base64
 import android.util.Log
-import com.Adicinemax21.Adicinemax21VidSrcShared
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -195,7 +194,7 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
             val season = if (payload.has("season") && !payload.isNull("season")) payload.optInt("season") else null
             val episode = if (payload.has("episode") && !payload.isNull("episode")) payload.optInt("episode") else null
 
-            Adicinemax21VidSrcShared.invokeVidSrc(
+            AdiXtreamVidSrcShared.invokeVidSrc(
                 tmdbId = tmdbId,
                 type = if (isTvSeries) "tv" else "movie",
                 season = season,
@@ -281,8 +280,11 @@ class AdiXtreamPlaybackFixedProvider : AdiXtream() {
     }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        val family = extractorLink.source.ifBlank { extractorLink.name }.trim().lowercase()
+        if (!family.contains("moviebox")) return null
+
         val cookie = extractorLink.headers["Cookie"]
-        if (cookie.isNullOrBlank()) return super.getVideoInterceptor(extractorLink)
+        if (cookie.isNullOrBlank()) return null
         val userAgent = extractorLink.headers["User-Agent"]
 
         return Interceptor { chain ->

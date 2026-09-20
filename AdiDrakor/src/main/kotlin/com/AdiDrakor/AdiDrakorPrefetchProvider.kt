@@ -1,7 +1,6 @@
 package com.AdiDrakor
 
 import android.util.Log
-import com.Adicinemax21.Adicinemax21IdlixShared
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
@@ -31,7 +30,7 @@ class AdiDrakorPrefetchProvider : AdiDrakor() {
     override suspend fun load(url: String): LoadResponse? {
         val result = super.load(url)
         if (result != null) {
-            Adicinemax21IdlixShared.prefetch(
+            AdiDrakorIdlixShared.prefetch(
                 title = result.name,
                 year = result.year,
                 isSeries = result is TvSeriesLoadResponse
@@ -80,7 +79,7 @@ class AdiDrakorPrefetchProvider : AdiDrakor() {
         val season = if (payload.has("season") && !payload.isNull("season")) payload.optInt("season") else null
         val episode = if (payload.has("episode") && !payload.isNull("episode")) payload.optInt("episode") else null
 
-        Adicinemax21IdlixShared.invokeIdlix(
+        AdiDrakorIdlixShared.invokeIdlix(
             title = title,
             orgTitle = orgTitle,
             altTitle = altTitle,

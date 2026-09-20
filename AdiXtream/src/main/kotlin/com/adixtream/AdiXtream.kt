@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.adixtream.AdiXtreamExtractor.invokeMoviebox
-import com.adixtream.AdiXtreamIdlix.invokeIdlix
 
 // PERBAIKAN 1: Data class untuk menyimpan informasi film/series dari load() ke loadLinks() secara instan
 data class XtreamLinkData(
@@ -225,18 +224,6 @@ open class AdiXtream : MainAPI() {
                     altTitle = null,
                     year = linkData.year,
                     airedYear = linkData.year,
-                    season = linkData.season,
-                    episode = linkData.episode,
-                    subtitleCallback = subtitleCallback,
-                    callback = callback
-                )
-            },
-            {
-                invokeIdlix(
-                    title = linkData.title,
-                    orgTitle = linkData.originalTitle,
-                    altTitle = null,
-                    year = linkData.year,
                     season = linkData.season,
                     episode = linkData.episode,
                     subtitleCallback = subtitleCallback,

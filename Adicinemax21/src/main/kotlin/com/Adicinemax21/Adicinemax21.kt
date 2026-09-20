@@ -2,7 +2,6 @@ package com.Adicinemax21
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.Adicinemax21.Adicinemax21Extractor.invokeMoviebox
-import com.Adicinemax21.Adicinemax21Idlix.invokeIdlix
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.metaproviders.TmdbProvider
@@ -326,28 +325,6 @@ open class Adicinemax21 : TmdbProvider() {
                     res.episode,
                     subtitleCallback,
                     callback
-                )
-            },
-            {
-                invokeIdlix(
-                    res.title ?: return@runAllAsync,
-                    res.orgTitle,
-                    res.altTitle,
-                    res.year,
-                    res.season,
-                    res.episode,
-                    subtitleCallback,
-                    callback
-                )
-            },
-            {
-                Adicinemax21VidSrc.invokeVidSrc(
-                    tmdbId = res.id ?: return@runAllAsync,
-                    type = res.type,
-                    season = res.season,
-                    episode = res.episode,
-                    subtitleCallback = subtitleCallback,
-                    callback = callback
                 )
             }
         )
