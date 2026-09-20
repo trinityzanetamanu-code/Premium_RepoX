@@ -280,8 +280,11 @@ class AdiDrakorPlaybackFixedProvider : AdiDrakor() {
     }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        val family = extractorLink.source.ifBlank { extractorLink.name }.trim().lowercase()
+        if (!family.contains("moviebox")) return null
+
         val cookie = extractorLink.headers["Cookie"]
-        if (cookie.isNullOrBlank()) return super.getVideoInterceptor(extractorLink)
+        if (cookie.isNullOrBlank()) return null
         val userAgent = extractorLink.headers["User-Agent"]
 
         return Interceptor { chain ->
