@@ -2,7 +2,6 @@ package com.michat88
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.michat88.AdiFilmSemiExtractor.invokeMoviebox
-import com.michat88.AdiFilmSemiIdlix.invokeIdlix
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.metaproviders.TmdbProvider
@@ -316,18 +315,6 @@ open class AdiFilmSemi : TmdbProvider() {
                     altTitle = res.jpTitle,
                     year = res.year,
                     airedYear = res.airedYear,
-                    season = res.season,
-                    episode = res.episode,
-                    subtitleCallback = subtitleCallback,
-                    callback = callback
-                )
-            },
-            {
-                invokeIdlix(
-                    title = res.title ?: return@runAllAsync,
-                    orgTitle = res.orgTitle,
-                    altTitle = res.jpTitle,
-                    year = if (res.season != null) (res.airedYear ?: res.year) else res.year,
                     season = res.season,
                     episode = res.episode,
                     subtitleCallback = subtitleCallback,
