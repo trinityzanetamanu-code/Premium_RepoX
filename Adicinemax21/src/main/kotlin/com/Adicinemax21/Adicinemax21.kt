@@ -326,16 +326,6 @@ open class Adicinemax21 : TmdbProvider() {
                     subtitleCallback,
                     callback
                 )
-            },
-            {
-                Adicinemax21VidSrc.invokeVidSrc(
-                    tmdbId = res.id ?: return@runAllAsync,
-                    type = res.type,
-                    season = res.season,
-                    episode = res.episode,
-                    subtitleCallback = subtitleCallback,
-                    callback = callback
-                )
             }
         )
         return true
