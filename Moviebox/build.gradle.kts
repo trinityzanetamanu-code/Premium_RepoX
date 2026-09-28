@@ -2,7 +2,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
 // use an integer for version numbers
-version = 11
+version = 12
 
 android {
     compileOptions {
