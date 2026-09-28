@@ -1,6 +1,24 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+
 // use an integer for version numbers
 version = 11
 
+android {
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    // CloudStream pre-release artifacts are built for JVM 11. Override the
+    // repository-wide JVM 1.8 target only for MovieBox so this plugin can
+    // compile without changing the other plugins in Premium_RepoX.
+    tasks.withType<KotlinJvmCompile> {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_11)
+        }
+    }
+}
 
 cloudstream {
     language = "id"
@@ -23,7 +41,5 @@ cloudstream {
         "Movie",
     )
 
-
     iconUrl = "https://moviebox.ph/favicon.ico"
-
 }
