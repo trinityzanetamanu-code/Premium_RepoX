@@ -1,0 +1,49 @@
+name: MovieBox test artifact
+
+on:
+  push:
+    branches:
+      - fix/moviebox-high-quality-buffering
+    paths:
+      - '.github/workflows/moviebox-artifact.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-moviebox:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Create local.properties
+        run: touch local.properties
+
+      - name: Build MovieBox
+        run: |
+          chmod +x gradlew
+          ./gradlew :Moviebox:compileDebugKotlin :Moviebox:make --stacktrace
+
+      - name: Verify package
+        run: |
+          test -n "$(find Moviebox/build -maxdepth 1 -type f -name '*.cs3' -print -quit)"
+          find Moviebox/build -maxdepth 1 -type f -name '*.cs3' -print
+
+      - name: Upload MovieBox test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: MovieBox-test-cs3
+          path: Moviebox/build/*.cs3
+          if-no-files-found: error
+          retention-days: 7
