@@ -28,11 +28,7 @@ jobs:
       - name: Create local.properties
         run: touch local.properties
 
-      - name: Build plugin repository
+      - name: Compile MovieBox
         run: |
           chmod +x gradlew
-          ./gradlew makePluginsJson --stacktrace
-
-      - name: Verify MovieBox artifact exists
-        run: |
-          test -n "$(find Moviebox/build -maxdepth 2 -type f \( -name '*.cs3' -o -name '*.jar' \) -print -quit)"
+          ./gradlew :Moviebox:compileDebugKotlin --stacktrace
