@@ -24,141 +24,132 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('Moviebox/src/main/kotlin/com/Moviebox/MovieboxProvider.kt')
           text = path.read_text()
 
           text = text.replace('import okhttp3.Interceptor\n', '', 1)
 
-          interceptor = '''    // 4. INTERCEPTOR COOKIE EXOPLAYER
-              override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
-                  return Interceptor { chain ->
-                      val request = chain.request()
-                      val cookie = extractorLink.headers["Cookie"]
-                      if (!cookie.isNullOrBlank()) {
-                          val newRequest = request.newBuilder()
-                              .header("Cookie", cookie)
-                              .header("User-Agent", CS_USER_AGENT)
-                              .build()
-                          chain.proceed(newRequest)
-                      } else {
-                          chain.proceed(request)
-                      }
-                  }
-              }
-
-          '''
-          # The source is indented with four spaces, not the visual indentation
-          # introduced by this workflow's YAML block. Normalize before matching.
-          interceptor = '\n'.join(line[8:] if line.startswith('        ') else line for line in interceptor.splitlines()) + '\n'
-          if interceptor not in text:
-              raise SystemExit('Expected MovieBox interceptor block not found')
-          text = text.replace(interceptor, '', 1)
+          # Remove the provider-level media interceptor so CloudStream can use
+          # its native Cronet path. ExtractorLink headers remain available to
+          # the native data source.
+          text, count = re.subn(
+              r'\n    // 4\. INTERCEPTOR COOKIE EXOPLAYER\n'
+              r'    override fun getVideoInterceptor\(extractorLink: ExtractorLink\): Interceptor \{.*?'
+              r'\n    \}\n\n    // SUBTITLE',
+              '\n    // SUBTITLE',
+              text,
+              count=1,
+              flags=re.S,
+          )
+          if count != 1:
+              raise SystemExit(f'Expected one MovieBox interceptor block, removed={count}')
 
           old_found = '        var foundStream: StreamItem? = null\n'
           if old_found not in text:
               raise SystemExit('Expected foundStream declaration not found')
-          text = text.replace(old_found, '        var foundStreams: List<StreamItem> = emptyList()\n', 1)
+          text = text.replace(
+              old_found,
+              '        var foundStreams: List<StreamItem> = emptyList()\n',
+              1,
+          )
 
           old_pick = '''            val playData = response.parsedSafe<PlayInfoResponse>()
-              val stream = playData?.data?.streams?.firstOrNull()
+            val stream = playData?.data?.streams?.firstOrNull()
 
-              if (!stream?.url.isNullOrBlank() && !stream?.signCookie.isNullOrBlank()) {
-                  foundStream = stream
-                  break
-              }
-          '''
-          old_pick = '\n'.join(line[8:] if line.startswith('        ') else line for line in old_pick.splitlines()) + '\n'
+            if (!stream?.url.isNullOrBlank() && !stream?.signCookie.isNullOrBlank()) {
+                foundStream = stream
+                break
+            }
+'''
           new_pick = '''            val playData = response.parsedSafe<PlayInfoResponse>()
-              val streams = playData?.data?.streams.orEmpty()
-                  .filter { !it.url.isNullOrBlank() && !it.signCookie.isNullOrBlank() }
-                  .distinctBy { it.url }
+            val streams = playData?.data?.streams.orEmpty()
+                .filter { !it.url.isNullOrBlank() && !it.signCookie.isNullOrBlank() }
+                .distinctBy { it.url }
 
-              if (streams.isNotEmpty()) {
-                  foundStreams = streams
-                  Log.d(TAG, "[PLAYBACK] valid stream candidates=${streams.size}")
-                  break
-              }
-          '''
-          new_pick = '\n'.join(line[8:] if line.startswith('        ') else line for line in new_pick.splitlines()) + '\n'
+            if (streams.isNotEmpty()) {
+                foundStreams = streams
+                Log.d(TAG, "[PLAYBACK] valid stream candidates=${streams.size}")
+                break
+            }
+'''
           if old_pick not in text:
               raise SystemExit('Expected firstOrNull stream picker not found')
           text = text.replace(old_pick, new_pick, 1)
 
           old_emit = '''        val targetStream = foundStream ?: return false
-              val mediaUrl = targetStream.url ?: return false
-              val cleanCookie = (targetStream.signCookie ?: return false).trimEnd(';')
+        val mediaUrl = targetStream.url ?: return false
+        val cleanCookie = (targetStream.signCookie ?: return false).trimEnd(';')
 
-              // Subtitle failure must not block the already-resolved video source.
-              try {
-                  loadSubtitles(epData.subjectId, targetStream.id, bearerToken, subtitleCallback)
-              } catch (e: Exception) {
-                  Log.e(TAG, "[SUBTITLE] playback subtitle request gagal: ${e.javaClass.simpleName}: ${e.message}")
-              }
+        // Subtitle failure must not block the already-resolved video source.
+        try {
+            loadSubtitles(epData.subjectId, targetStream.id, bearerToken, subtitleCallback)
+        } catch (e: Exception) {
+            Log.e(TAG, "[SUBTITLE] playback subtitle request gagal: ${e.javaClass.simpleName}: ${e.message}")
+        }
 
-              callback(
-                  newExtractorLink(
-                      source = name,
-                      name = "MovieBox",
-                      url = mediaUrl,
-                      type = INFER_TYPE
-                  ) {
-                      this.referer = mainUrl
-                      this.quality = Qualities.P1080.value
-                      this.headers = mapOf(
-                          "User-Agent" to CS_USER_AGENT,
-                          "Cookie" to cleanCookie,
-                          "Referer" to mainUrl
-                      )
-                  }
-              )
+        callback(
+            newExtractorLink(
+                source = name,
+                name = "MovieBox",
+                url = mediaUrl,
+                type = INFER_TYPE
+            ) {
+                this.referer = mainUrl
+                this.quality = Qualities.P1080.value
+                this.headers = mapOf(
+                    "User-Agent" to CS_USER_AGENT,
+                    "Cookie" to cleanCookie,
+                    "Referer" to mainUrl
+                )
+            }
+        )
 
-              return true
-          '''
-          old_emit = '\n'.join(line[8:] if line.startswith('        ') else line for line in old_emit.splitlines()) + '\n'
+        return true
+'''
           new_emit = '''        if (foundStreams.isEmpty()) return false
 
-              val primaryStream = foundStreams.first()
+        val primaryStream = foundStreams.first()
 
-              // Subtitle failure must not block the already-resolved video sources.
-              try {
-                  loadSubtitles(epData.subjectId, primaryStream.id, bearerToken, subtitleCallback)
-              } catch (e: Exception) {
-                  Log.e(TAG, "[SUBTITLE] playback subtitle request gagal: ${e.javaClass.simpleName}: ${e.message}")
-              }
+        // Subtitle failure must not block the already-resolved video sources.
+        try {
+            loadSubtitles(epData.subjectId, primaryStream.id, bearerToken, subtitleCallback)
+        } catch (e: Exception) {
+            Log.e(TAG, "[SUBTITLE] playback subtitle request gagal: ${e.javaClass.simpleName}: ${e.message}")
+        }
 
-              val emittedUrls = linkedSetOf<String>()
-              var emitted = 0
+        val emittedUrls = linkedSetOf<String>()
+        var emitted = 0
 
-              foundStreams.forEachIndexed { index, stream ->
-                  val mediaUrl = stream.url ?: return@forEachIndexed
-                  val signCookie = stream.signCookie ?: return@forEachIndexed
-                  if (!emittedUrls.add(mediaUrl)) return@forEachIndexed
+        foundStreams.forEachIndexed { index, stream ->
+            val mediaUrl = stream.url ?: return@forEachIndexed
+            val signCookie = stream.signCookie ?: return@forEachIndexed
+            if (!emittedUrls.add(mediaUrl)) return@forEachIndexed
 
-                  val cleanCookie = signCookie.trimEnd(';')
-                  callback(
-                      newExtractorLink(
-                          source = name,
-                          name = if (index == 0) "MovieBox" else "MovieBox Mirror ${index + 1}",
-                          url = mediaUrl,
-                          type = INFER_TYPE
-                      ) {
-                          this.referer = mainUrl
-                          this.quality = Qualities.P1080.value
-                          this.headers = mapOf(
-                              "User-Agent" to CS_USER_AGENT,
-                              "Cookie" to cleanCookie,
-                              "Referer" to mainUrl
-                          )
-                      }
-                  )
-                  emitted += 1
-              }
+            val cleanCookie = signCookie.trimEnd(';')
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = if (index == 0) "MovieBox" else "MovieBox Mirror ${index + 1}",
+                    url = mediaUrl,
+                    type = INFER_TYPE
+                ) {
+                    this.referer = mainUrl
+                    this.quality = Qualities.P1080.value
+                    this.headers = mapOf(
+                        "User-Agent" to CS_USER_AGENT,
+                        "Cookie" to cleanCookie,
+                        "Referer" to mainUrl
+                    )
+                }
+            )
+            emitted += 1
+        }
 
-              Log.d(TAG, "[PLAYBACK] emitted stream candidates=$emitted")
-              return emitted > 0
-          '''
-          new_emit = '\n'.join(line[8:] if line.startswith('        ') else line for line in new_emit.splitlines()) + '\n'
+        Log.d(TAG, "[PLAYBACK] emitted stream candidates=$emitted")
+        return emitted > 0
+'''
           if old_emit not in text:
               raise SystemExit('Expected single-stream emitter not found')
           text = text.replace(old_emit, new_emit, 1)
@@ -166,14 +157,19 @@ jobs:
           path.write_text(text)
 
           gradle = Path('Moviebox/build.gradle.kts')
-          g = gradle.read_text()
-          if 'version = 12' not in g:
+          gradle_text = gradle.read_text()
+          if 'version = 12' not in gradle_text:
               raise SystemExit('Expected MovieBox version 12 not found')
-          gradle.write_text(g.replace('version = 12', 'version = 13', 1))
+          gradle.write_text(gradle_text.replace('version = 12', 'version = 13', 1))
           PY
 
           git diff --check
-          git diff -- Moviebox/src/main/kotlin/com/Moviebox/MovieboxProvider.kt Moviebox/build.gradle.kts
+          grep -q 'var foundStreams: List<StreamItem>' Moviebox/src/main/kotlin/com/Moviebox/MovieboxProvider.kt
+          if grep -q 'override fun getVideoInterceptor' Moviebox/src/main/kotlin/com/Moviebox/MovieboxProvider.kt; then
+            echo 'Provider interceptor still present' >&2
+            exit 1
+          fi
+          grep -q 'version = 13' Moviebox/build.gradle.kts
 
       - name: Commit production changes to fix branch
         run: |
