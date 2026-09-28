@@ -28,7 +28,7 @@ jobs:
       - name: Create local.properties
         run: touch local.properties
 
-      - name: Compile MovieBox
+      - name: Compile and package MovieBox
         run: |
           chmod +x gradlew
-          ./gradlew :Moviebox:compileDebugKotlin --stacktrace
+          ./gradlew :Moviebox:compileDebugKotlin :Moviebox:make --stacktrace
