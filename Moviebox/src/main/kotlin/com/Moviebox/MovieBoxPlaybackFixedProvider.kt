@@ -11,9 +11,8 @@ import org.json.JSONObject
  * Playback-only compatibility layer for MovieBox.
  *
  * Every non-playback operation is delegated unchanged to MovieBoxProvider.
- * The only behavioral difference is that playback links are checked for the
- * MovieBox v4.0.02+ update/deprecation dummy and, when possible, recovered
- * from the signed CloudFront cookie / urlprefix returned by play-info.
+ * Playback keeps the signed adaptive manifest as the preferred source while
+ * retaining a valid direct URL as a fallback when MovieBox returns both.
  */
 class MovieBoxPlaybackFixedProvider : MainAPI() {
     private val delegate = MovieBoxProvider()
@@ -38,8 +37,36 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? =
         delegate.load(url)
 
-    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor =
-        delegate.getVideoInterceptor(extractorLink)
+    /**
+     * Re-apply every link-specific header to every media request.
+     *
+     * MovieBox manifests and their DASH/HLS segments are protected by the
+     * stream-specific signed cookie returned by play-info. Keeping the whole
+     * header set here is important because the manifest can redirect to a
+     * different CDN host and subsequent segment requests must still carry the
+     * same Cookie/User-Agent/Referer tuple.
+     */
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
+        return Interceptor { chain ->
+            val request = chain.request()
+            val builder = request.newBuilder()
+
+            extractorLink.headers.forEach { (key, value) ->
+                if (key.isNotBlank() && value.isNotBlank()) {
+                    builder.header(key, value)
+                }
+            }
+
+            if (
+                extractorLink.referer.isNotBlank() &&
+                extractorLink.headers.keys.none { it.equals("Referer", ignoreCase = true) }
+            ) {
+                builder.header("Referer", extractorLink.referer)
+            }
+
+            chain.proceed(builder.build())
+        }
+    }
 
     private fun decodeBase64Url(value: String): String? {
         val padded = value + "=".repeat((4 - value.length % 4) % 4)
@@ -59,6 +86,11 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
             .firstOrNull()
     }
 
+    /**
+     * Supports the current Edge-Cache-Cookie / urlprefix form as well as the
+     * older urlprefix form. The decoded prefix points at MovieBox's adaptive
+     * media directory rather than the update/deprecation dummy URL.
+     */
     private fun resolveFromUrlPrefix(signCookie: String): String? {
         val encoded = Regex(
             pattern = """urlprefix=([^:;,\s]+)""",
@@ -148,7 +180,11 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
     }
 
     private fun recoveredMediaUrl(link: ExtractorLink): String? {
-        val cookie = link.headers["Cookie"].orEmpty()
+        val cookie = link.headers.entries
+            .firstOrNull { it.key.equals("Cookie", ignoreCase = true) }
+            ?.value
+            .orEmpty()
+
         return resolveFromUrlPrefix(cookie)
             ?: resolveDashFromCloudFrontPolicy(cookie)
     }
@@ -171,22 +207,27 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
         )
 
         var emitted = 0
+        val emittedUrls = linkedSetOf<String>()
 
         for (link in originals) {
             val recoveredUrl = recoveredMediaUrl(link)
+            val directIsDummy = isDeprecationNoticeUrl(link.url)
 
-            if (recoveredUrl != null) {
+            // Prefer the signed adaptive manifest. A multi-representation DASH
+            // or HLS manifest lets the player adapt bitrate instead of being
+            // locked to one large fixed-bitrate file.
+            if (recoveredUrl != null && emittedUrls.add(recoveredUrl)) {
                 Log.d(
                     "MovieBox",
-                    "[PLAYBACK-FIX] recovered signed manifest " +
+                    "[PLAYBACK-FIX] adaptive manifest recovered " +
                         "directHost=${link.url.substringAfter("://").substringBefore('/')} " +
-                        "realHost=${recoveredUrl.substringAfter("://").substringBefore('/')}"
+                        "adaptiveHost=${recoveredUrl.substringAfter("://").substringBefore('/')}"
                 )
 
                 callback(
                     newExtractorLink(
                         source = "MovieBox",
-                        name = "MovieBox",
+                        name = "MovieBox Adaptive",
                         url = recoveredUrl,
                         type = INFER_TYPE
                     ) {
@@ -196,19 +237,27 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
                     }
                 )
                 emitted += 1
-                continue
             }
 
-            if (isDeprecationNoticeUrl(link.url)) {
+            // Keep a genuine direct stream as an explicit fallback instead of
+            // discarding it merely because an adaptive manifest was recovered.
+            // Known update/deprecation dummy URLs are never exposed.
+            if (!directIsDummy && emittedUrls.add(link.url)) {
+                if (recoveredUrl != null) {
+                    Log.d(
+                        "MovieBox",
+                        "[PLAYBACK-FIX] keeping direct fallback host=" +
+                            link.url.substringAfter("://").substringBefore('/')
+                    )
+                }
+                callback(link)
+                emitted += 1
+            } else if (directIsDummy && recoveredUrl == null) {
                 Log.e(
                     "MovieBox",
                     "[PLAYBACK-FIX] update/deprecation dummy detected but signed manifest was not recoverable; suppressing dummy"
                 )
-                continue
             }
-
-            callback(link)
-            emitted += 1
         }
 
         return emitted > 0
