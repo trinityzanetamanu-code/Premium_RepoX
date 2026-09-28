@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.app
 import com.fasterxml.jackson.annotation.JsonProperty
-import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -986,23 +985,6 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    // 4. INTERCEPTOR COOKIE EXOPLAYER
-    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
-        return Interceptor { chain ->
-            val request = chain.request()
-            val cookie = extractorLink.headers["Cookie"]
-            if (!cookie.isNullOrBlank()) {
-                val newRequest = request.newBuilder()
-                    .header("Cookie", cookie)
-                    .header("User-Agent", CS_USER_AGENT)
-                    .build()
-                chain.proceed(newRequest)
-            } else {
-                chain.proceed(request)
-            }
-        }
-    }
-
     // SUBTITLE
     // Struktur terbukti dari server:
     //   data.extCaptions[] { id, lan, lanName, url, size, delay }
@@ -1060,7 +1042,7 @@ class MovieBoxProvider : MainAPI() {
                 listOf(epData.se to epData.ep, 1 to 1, 0 to 0)
             }
 
-        var foundStream: StreamItem? = null
+        var foundStreams: List<StreamItem> = emptyList()
 
         for ((se, ep) in candidatePairs) {
             val ts = System.currentTimeMillis().toString()
@@ -1086,43 +1068,58 @@ class MovieBoxProvider : MainAPI() {
             if (response.code != 200) continue
 
             val playData = response.parsedSafe<PlayInfoResponse>()
-            val stream = playData?.data?.streams?.firstOrNull()
+            val streams = playData?.data?.streams.orEmpty()
+                .filter { !it.url.isNullOrBlank() && !it.signCookie.isNullOrBlank() }
+                .distinctBy { it.url }
 
-            if (!stream?.url.isNullOrBlank() && !stream?.signCookie.isNullOrBlank()) {
-                foundStream = stream
+            if (streams.isNotEmpty()) {
+                foundStreams = streams
+                Log.d(TAG, "[PLAYBACK] valid stream candidates=${streams.size}")
                 break
             }
         }
 
-        val targetStream = foundStream ?: return false
-        val mediaUrl = targetStream.url ?: return false
-        val cleanCookie = (targetStream.signCookie ?: return false).trimEnd(';')
+        if (foundStreams.isEmpty()) return false
 
-        // Subtitle failure must not block the already-resolved video source.
+        val primaryStream = foundStreams.first()
+
+        // Subtitle failure must not block the already-resolved video sources.
         try {
-            loadSubtitles(epData.subjectId, targetStream.id, bearerToken, subtitleCallback)
+            loadSubtitles(epData.subjectId, primaryStream.id, bearerToken, subtitleCallback)
         } catch (e: Exception) {
             Log.e(TAG, "[SUBTITLE] playback subtitle request gagal: ${e.javaClass.simpleName}: ${e.message}")
         }
 
-        callback(
-            newExtractorLink(
-                source = name,
-                name = "MovieBox",
-                url = mediaUrl,
-                type = INFER_TYPE
-            ) {
-                this.referer = mainUrl
-                this.quality = Qualities.P1080.value
-                this.headers = mapOf(
-                    "User-Agent" to CS_USER_AGENT,
-                    "Cookie" to cleanCookie,
-                    "Referer" to mainUrl
-                )
-            }
-        )
+        val emittedUrls = linkedSetOf<String>()
+        var emitted = 0
 
-        return true
+        foundStreams.forEachIndexed { index, stream ->
+            val mediaUrl = stream.url ?: return@forEachIndexed
+            val signCookie = stream.signCookie ?: return@forEachIndexed
+            if (!emittedUrls.add(mediaUrl)) return@forEachIndexed
+
+            val cleanCookie = signCookie.trimEnd(';')
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = if (index == 0) "MovieBox" else "MovieBox Mirror ${index + 1}",
+                    url = mediaUrl,
+                    type = INFER_TYPE
+                ) {
+                    this.referer = mainUrl
+                    this.quality = Qualities.P1080.value
+                    this.headers = mapOf(
+                        "User-Agent" to CS_USER_AGENT,
+                        "Cookie" to cleanCookie,
+                        "Referer" to mainUrl
+                    )
+                }
+            )
+            emitted += 1
+        }
+
+        Log.d(TAG, "[PLAYBACK] emitted stream candidates=$emitted")
+        return emitted > 0
     }
 
     // MODELS
