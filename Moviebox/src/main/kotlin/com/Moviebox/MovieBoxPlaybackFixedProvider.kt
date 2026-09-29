@@ -38,7 +38,7 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? =
         delegate.load(url)
 
-    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor =
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? =
         delegate.getVideoInterceptor(extractorLink)
 
     private fun decodeBase64Url(value: String): String? {
