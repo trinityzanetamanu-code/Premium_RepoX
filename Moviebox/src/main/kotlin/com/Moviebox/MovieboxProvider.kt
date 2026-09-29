@@ -1234,7 +1234,7 @@ class MovieBoxProvider : MainAPI() {
                             Log.e(
                                 TAG,
                                 "[PLAYBACK-LEGACY-FALLBACK] gagal: " +
-                                    "${legacyError.javaClass.simpleName}: ${legcyError.message}"
+                                    "${legacyError.javaClass.simpleName}: ${legacyError.message}"
                             )
                             continue
                         }
