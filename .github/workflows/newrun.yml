@@ -29,151 +29,6 @@ jobs:
         with:
           path: "src"
 
-      - name: Apply exact compiler-warning fixes
-        run: |
-          cd "$GITHUB_WORKSPACE/src"
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          changed = set()
-
-          def literal(file_name, old, new):
-              path = Path(file_name)
-              text = path.read_text(encoding="utf-8")
-              if old in text:
-                  path.write_text(text.replace(old, new), encoding="utf-8")
-                  changed.add(file_name)
-              elif new not in text:
-                  raise SystemExit(f"Literal warning anchor not found: {file_name}: {old}")
-
-          def regex_fix(file_name, pattern, replacement, already_pattern):
-              path = Path(file_name)
-              text = path.read_text(encoding="utf-8")
-              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
-              if count:
-                  path.write_text(updated, encoding="utf-8")
-                  changed.add(file_name)
-              elif not re.search(already_pattern, text, flags=re.S):
-                  raise SystemExit(f"Regex warning anchor not found: {file_name}: {pattern}")
-
-          session_pattern = r'''(?m)^(\s*)val sessionUserId = when \{\n\1    xUser\.has\("userId"\) && xUser\.opt\("userId"\) != JSONObject\.NULL ->\n\1        xUser\.opt\("userId"\)\.toString\(\)\n\1    xUser\.has\("user_id"\) && xUser\.opt\("user_id"\) != JSONObject\.NULL ->\n\1        xUser\.opt\("user_id"\)\.toString\(\)\n\1    else -> ""\n\1\}'''
-          session_replacement = r'''\1val userIdValue = xUser.opt("userId")
-          \1val snakeUserIdValue = xUser.opt("user_id")
-          \1val sessionUserId = when {
-          \1    userIdValue != null && userIdValue != JSONObject.NULL ->
-          \1        userIdValue.toString()
-          \1    snakeUserIdValue != null && snakeUserIdValue != JSONObject.NULL ->
-          \1        snakeUserIdValue.toString()
-          \1    else -> ""
-          \1}'''
-          session_already = r'val userIdValue = xUser\.opt\("userId"\).*?val snakeUserIdValue = xUser\.opt\("user_id"\)'
-
-          regex_fix(
-              "Adicinemax21/src/main/kotlin/com/Adicinemax21/Adicinemax21Extractor.kt",
-              session_pattern, session_replacement, session_already
-          )
-          regex_fix(
-              "AdiDrakor/src/main/kotlin/com/AdiDrakor/AdiDrakorExtractor.kt",
-              session_pattern, session_replacement, session_already
-          )
-
-          literal("Adicinemax21/src/main/kotlin/com/Adicinemax21/Adicinemax21Idlix.kt",
-                  "val seasonNum = season ?: return", "val seasonNum = season")
-          literal("Adicinemax21/src/main/kotlin/com/Adicinemax21/Adicinemax21IdlixShared.kt",
-                  "val seasonNum = season ?: return", "val seasonNum = season")
-          literal("DramaBox/src/main/kotlin/com/DramaBox/DramaBoxProvider.kt",
-                  "var code = it.toInt()", "var code = it.code")
-          literal("IdlixProvider/src/main/kotlin/com/IdlixProvider/IdlixProvider.kt",
-                  "val gateToken = playInfoRes?.gateToken ?: return false",
-                  "val gateToken = playInfoRes.gateToken ?: return false")
-          literal("KlikXXI/src/main/kotlin/com/KlikXXI/KlikXXI.kt",
-                  "isDataJob: Boolean,", "isCasting: Boolean,")
-          literal("KlikXXI/src/main/kotlin/com/KlikXXI/Strp2p.kt",
-                  "cfHost != null && srcPath != null && sourceRaw != null && isRawIp(sourceRaw)",
-                  "cfHost != null && srcPath != null && isRawIp(sourceRaw)")
-          literal("KisskhProvider/src/main/kotlin/com/michat88/KisskhProvider.kt",
-                  "res.title ?: return null,", "res.title,")
-          literal("KisskhProvider/src/main/kotlin/com/michat88/Utils.kt",
-                  "resultTitle.contains(title ?: \"\", ignoreCase = true)",
-                  "resultTitle.contains(title, ignoreCase = true)")
-          literal("KisskhProvider/src/main/kotlin/com/michat88/Utils.kt",
-                  "(title != null && title.contains(resultTitle, ignoreCase = true))",
-                  "title.contains(resultTitle, ignoreCase = true)")
-
-          regex_fix(
-              "MissAv/src/main/kotlin/com/MissAv/MissAVProvider.kt",
-              r'''subtitleCallback\.invoke\(\s*SubtitleFile\(\s*lang\s*=\s*"ID - \$subLabel",\s*url\s*=\s*finalDownloadUrl\s*\)\s*\)''',
-              '''subtitleCallback.invoke(
-                                    newSubtitleFile("ID - $subLabel", finalDownloadUrl)
-                                )''',
-              r'''newSubtitleFile\("ID - \$subLabel",\s*finalDownloadUrl\)'''
-          )
-
-          literal("PODJAV/src/main/kotlin/com/PODJAV/PodjavProvider.kt",
-                  "val recUrl = it.attr(\"href\") ?: return@mapNotNull null",
-                  "val recUrl = it.attr(\"href\")")
-          regex_fix(
-              "PODJAV/src/main/kotlin/com/PODJAV/PodjavProvider.kt",
-              r'''subtitleCallback\.invoke\(\s*SubtitleFile\(\s*lang\s*=\s*sub\.label\s*\?:\s*"Indonesia",\s*url\s*=\s*subUrl\s*\)\s*\)''',
-              '''subtitleCallback.invoke(
-                            newSubtitleFile(sub.label ?: "Indonesia", subUrl)
-                        )''',
-              r'''newSubtitleFile\(sub\.label\s*\?:\s*"Indonesia",\s*subUrl\)'''
-          )
-
-          oppa = "OppaDrama/src/main/kotlin/com/OppaDrama/OppaDramaProvider.kt"
-          for old, new in [
-              ('o.optString("label", null)?.takeIf', 'o.optString("label").takeIf'),
-              ('o.optString("codec", null)?.takeIf', 'o.optString("codec").takeIf'),
-              ('o.optString("res_id", null)?.takeIf', 'o.optString("res_id").takeIf'),
-              ('o.optString("size", null)?.toLongOrNull()', 'o.optString("size").toLongOrNull()'),
-              ('o.optString("sub", null)?.takeIf', 'o.optString("sub").takeIf'),
-              ('o.optString("url", null)?.takeIf', 'o.optString("url").takeIf'),
-              ('o.optString("path", null)?.takeIf', 'o.optString("path").takeIf'),
-              ('o.optString("file", null)?.takeIf', 'o.optString("file").takeIf'),
-              ('o.optString("src", null)?.takeIf', 'o.optString("src").takeIf'),
-              ('mp4Obj?.optString("url", null)?.takeIf', 'mp4Obj?.optString("url")?.takeIf'),
-              ('decryptedObj.optString("url", null)?.takeIf', 'decryptedObj.optString("url").takeIf'),
-          ]:
-              literal(oppa, old, new)
-
-          literal(
-              "RiveStream/src/main/kotlin/com/RiveStream/byse/BysePlayback.kt",
-              'val kunci = rakitKunci(playback.optString("version", null), parts)',
-              '''val version = playback.opt("version")
-                      ?.takeUnless { it == JSONObject.NULL }
-                      ?.toString()
-                  val kunci = rakitKunci(version, parts)'''
-          )
-
-          regex_fix(
-              "Sflix/src/main/kotlin/com/sflix/Sflix.kt",
-              r'''subtitleCallback\.invoke\(\s*SubtitleFile\(\s*lang\s*=\s*langName,\s*url\s*=\s*subUrl\s*\)\s*\)''',
-              '''subtitleCallback.invoke(
-                    newSubtitleFile(langName, subUrl)
-                )''',
-              r'''newSubtitleFile\(langName,\s*subUrl\)'''
-          )
-          literal("Xhamster/src/main/kotlin/com/michat88/Xhamster.kt",
-                  'val url = element.attr("href") ?: ""',
-                  'val url = element.attr("href")')
-
-          print("Changed warning files:")
-          for file_name in sorted(changed):
-              print(" -", file_name)
-          PY
-
-          git config --local user.email "actions@github.com"
-          git config --local user.name "GitHub Actions"
-          git add -A
-          if git diff --cached --quiet; then
-            echo ">> Warning fixes already applied."
-          else
-            git commit -m "Cleanup Kotlin compiler warnings"
-            git push origin HEAD:main
-          fi
-
       - name: Checkout repo untuk folder builds
         uses: actions/checkout@v7
         with:
@@ -221,7 +76,7 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/src"
           chmod +x gradlew
-          ./gradlew makePluginsJson --rerun-tasks
+          ./gradlew makePluginsJson
           shopt -s globstar nullglob
           cp **/build/*.cs3 "$GITHUB_WORKSPACE/builds" || true
           cp **/build/*.jar "$GITHUB_WORKSPACE/builds" || true
@@ -234,6 +89,8 @@ jobs:
             echo ">> repo.json sudah ada, tidak diubah."
             exit 0
           fi
+
+          echo ">> repo.json hilang, membuat ulang..."
           cat > repo.json << EOF
           {
             "name": "$REPO_NAME",
@@ -244,22 +101,31 @@ jobs:
             ]
           }
           EOF
+          cat repo.json
 
       - name: Push builds
         run: |
           cd "$GITHUB_WORKSPACE/builds"
-          if [ ! -f "plugins.json" ] || [ ! -f "repo.json" ]; then
-            echo "BAHAYA: metadata build tidak lengkap."
+
+          if [ ! -f "plugins.json" ]; then
+            echo "BAHAYA: plugins.json tidak terbentuk. Membatalkan proses."
+            exit 1
+          fi
+          if [ ! -f "repo.json" ]; then
+            echo "BAHAYA: repo.json hilang! Membatalkan proses."
             exit 1
           fi
           if ! ls ./*.cs3 >/dev/null 2>&1; then
-            echo "BAHAYA: tidak ada file .cs3 sama sekali."
+            echo "BAHAYA: tidak ada file .cs3 sama sekali. Membatalkan proses."
             exit 1
           fi
+
           echo ">> Total file .cs3: $(ls -1 ./*.cs3 | wc -l)"
+
           git config --local user.email "actions@github.com"
           git config --local user.name "GitHub Actions"
           git add -A
+
           if git rev-parse --verify HEAD >/dev/null 2>&1; then
             if git diff --cached --quiet; then
               echo ">> Tidak ada perubahan, skip push."
@@ -269,4 +135,5 @@ jobs:
           else
             git commit -m "Build $GITHUB_SHA"
           fi
+
           git push --force origin builds
