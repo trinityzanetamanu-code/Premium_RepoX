@@ -72,18 +72,6 @@ jobs:
           cd "$GITHUB_WORKSPACE/src"
           touch local.properties
 
-      - name: Fix MovieBox fallback typo
-        run: |
-          cd "$GITHUB_WORKSPACE/src"
-          sed -i 's/legcyError/legacyError/g' Moviebox/src/main/kotlin/com/Moviebox/MovieboxProvider.kt
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add Moviebox/src/main/kotlin/com/Moviebox/MovieboxProvider.kt
-          if ! git diff --cached --quiet; then
-            git commit -m "Fix MovieBox API3 fallback compile typo"
-            git push origin HEAD:main
-          fi
-
       - name: Build Plugins
         run: |
           cd "$GITHUB_WORKSPACE/src"
