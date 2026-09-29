@@ -30,6 +30,193 @@ jobs:
         with:
           path: "src"
 
+      - name: Apply exact compiler-warning fixes
+        run: |
+          cd "$GITHUB_WORKSPACE/src"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          fixes = {
+              "Adicinemax21/src/main/kotlin/com/Adicinemax21/Adicinemax21Extractor.kt": [
+                  (
+          '''                val sessionUserId = when {
+                              xUser.has("userId") && xUser.opt("userId") != JSONObject.NULL ->
+                                  xUser.opt("userId").toString()
+                              xUser.has("user_id") && xUser.opt("user_id") != JSONObject.NULL ->
+                                  xUser.opt("user_id").toString()
+                              else -> ""
+                          }''',
+          '''                val userIdValue = xUser.opt("userId")
+                          val snakeUserIdValue = xUser.opt("user_id")
+                          val sessionUserId = when {
+                              userIdValue != null && userIdValue != JSONObject.NULL ->
+                                  userIdValue.toString()
+                              snakeUserIdValue != null && snakeUserIdValue != JSONObject.NULL ->
+                                  snakeUserIdValue.toString()
+                              else -> ""
+                          }'''
+                  )
+              ],
+              "AdiDrakor/src/main/kotlin/com/AdiDrakor/AdiDrakorExtractor.kt": [
+                  (
+          '''                val sessionUserId = when {
+                              xUser.has("userId") && xUser.opt("userId") != JSONObject.NULL ->
+                                  xUser.opt("userId").toString()
+                              xUser.has("user_id") && xUser.opt("user_id") != JSONObject.NULL ->
+                                  xUser.opt("user_id").toString()
+                              else -> ""
+                          }''',
+          '''                val userIdValue = xUser.opt("userId")
+                          val snakeUserIdValue = xUser.opt("user_id")
+                          val sessionUserId = when {
+                              userIdValue != null && userIdValue != JSONObject.NULL ->
+                                  userIdValue.toString()
+                              snakeUserIdValue != null && snakeUserIdValue != JSONObject.NULL ->
+                                  snakeUserIdValue.toString()
+                              else -> ""
+                          }'''
+                  )
+              ],
+              "Adicinemax21/src/main/kotlin/com/Adicinemax21/Adicinemax21Idlix.kt": [
+                  ("                val seasonNum = season ?: return", "                val seasonNum = season")
+              ],
+              "Adicinemax21/src/main/kotlin/com/Adicinemax21/Adicinemax21IdlixShared.kt": [
+                  ("                val seasonNum = season ?: return", "                val seasonNum = season")
+              ],
+              "DramaBox/src/main/kotlin/com/DramaBox/DramaBoxProvider.kt": [
+                  ("                var code = it.toInt()", "                var code = it.code")
+              ],
+              "IdlixProvider/src/main/kotlin/com/IdlixProvider/IdlixProvider.kt": [
+                  ("            val gateToken = playInfoRes?.gateToken ?: return false", "            val gateToken = playInfoRes.gateToken ?: return false")
+              ],
+              "KlikXXI/src/main/kotlin/com/KlikXXI/KlikXXI.kt": [
+                  ("        isDataJob: Boolean,", "        isCasting: Boolean,")
+              ],
+              "KlikXXI/src/main/kotlin/com/KlikXXI/Strp2p.kt": [
+                  ("        val swappedUrl = if (cfHost != null && srcPath != null && sourceRaw != null && isRawIp(sourceRaw)) {", "        val swappedUrl = if (cfHost != null && srcPath != null && isRawIp(sourceRaw)) {")
+              ],
+              "KisskhProvider/src/main/kotlin/com/michat88/KisskhProvider.kt": [
+                  ("            res.title ?: return null,", "            res.title,")
+              ],
+              "KisskhProvider/src/main/kotlin/com/michat88/Utils.kt": [
+                  ("            resultTitle.contains(title ?: \"\", ignoreCase = true) ||", "            resultTitle.contains(title, ignoreCase = true) ||"),
+                  ("            (title != null && title.contains(resultTitle, ignoreCase = true))", "            title.contains(resultTitle, ignoreCase = true)")
+              ],
+              "MissAv/src/main/kotlin/com/MissAv/MissAVProvider.kt": [
+                  (
+          '''                                subtitleCallback.invoke(
+                                      SubtitleFile(
+                                          lang = "ID - $subLabel",
+                                          url = finalDownloadUrl
+                                      )
+                                  )''',
+          '''                                subtitleCallback.invoke(
+                                      newSubtitleFile("ID - $subLabel", finalDownloadUrl)
+                                  )'''
+                  )
+              ],
+              "PODJAV/src/main/kotlin/com/PODJAV/PodjavProvider.kt": [
+                  ("            val recUrl = it.attr(\"href\") ?: return@mapNotNull null", "            val recUrl = it.attr(\"href\")"),
+                  (
+          '''                        subtitleCallback.invoke(
+                              SubtitleFile(
+                                  lang = sub.label ?: "Indonesia",
+                                  url = subUrl
+                              )
+                          )''',
+          '''                        subtitleCallback.invoke(
+                              newSubtitleFile(sub.label ?: "Indonesia", subUrl)
+                          )'''
+                  )
+              ],
+              "OppaDrama/src/main/kotlin/com/OppaDrama/OppaDramaProvider.kt": [
+                  ("                    label = o.optString(\"label\", null)?.takeIf { it.isNotBlank() } ?: \"HD\",", "                    label = o.optString(\"label\").takeIf { it.isNotBlank() } ?: \"HD\","),
+                  ("                    codec = o.optString(\"codec\", null)?.takeIf { it.isNotBlank() } ?: \"\",", "                    codec = o.optString(\"codec\").takeIf { it.isNotBlank() } ?: \"\","),
+                  ("                    resId = o.optString(\"res_id\", null)?.takeIf { it.isNotBlank() && it != \"null\" },", "                    resId = o.optString(\"res_id\").takeIf { it.isNotBlank() && it != \"null\" },"),
+                  ("                    size = o.optString(\"size\", null)?.toLongOrNull(),", "                    size = o.optString(\"size\").toLongOrNull(),"),
+                  ("                    sub = o.optString(\"sub\", null)?.takeIf { it.isNotBlank() && it != \"null\" },", "                    sub = o.optString(\"sub\").takeIf { it.isNotBlank() && it != \"null\" },"),
+                  ("                    url = o.optString(\"url\", null)?.takeIf { it.isNotBlank() && it != \"null\" },", "                    url = o.optString(\"url\").takeIf { it.isNotBlank() && it != \"null\" },"),
+                  ("                    path = o.optString(\"path\", null)?.takeIf { it.isNotBlank() && it != \"null\" }", "                    path = o.optString(\"path\").takeIf { it.isNotBlank() && it != \"null\" }"),
+                  ("                        ?: o.optString(\"file\", null)?.takeIf { it.isNotBlank() && it != \"null\" }", "                        ?: o.optString(\"file\").takeIf { it.isNotBlank() && it != \"null\" }"),
+                  ("                        ?: o.optString(\"src\", null)?.takeIf { it.isNotBlank() && it != \"null\" }", "                        ?: o.optString(\"src\").takeIf { it.isNotBlank() && it != \"null\" }"),
+                  ("                        ?: mp4Obj?.optString(\"url\", null)?.takeIf { it.isNotBlank() && it != \"null\" }", "                        ?: mp4Obj?.optString(\"url\")?.takeIf { it.isNotBlank() && it != \"null\" }"),
+                  ("                        ?: decryptedObj.optString(\"url\", null)?.takeIf { it.isNotBlank() && it != \"null\" }", "                        ?: decryptedObj.optString(\"url\").takeIf { it.isNotBlank() && it != \"null\" }")
+              ],
+              "RiveStream/src/main/kotlin/com/RiveStream/byse/BysePlayback.kt": [
+                  (
+          '''            val kunci = rakitKunci(playback.optString("version", null), parts)''',
+          '''            val version = playback.opt("version")
+                      ?.takeUnless { it == JSONObject.NULL }
+                      ?.toString()
+                  val kunci = rakitKunci(version, parts)'''
+                  )
+              ],
+              "Sflix/src/main/kotlin/com/sflix/Sflix.kt": [
+                  (
+          '''                subtitleCallback.invoke(
+                      SubtitleFile(
+                          lang = langName,
+                          url = subUrl
+                      )
+                  )''',
+          '''                subtitleCallback.invoke(
+                      newSubtitleFile(langName, subUrl)
+                  )'''
+                  )
+              ],
+              "Xhamster/src/main/kotlin/com/michat88/Xhamster.kt": [
+                  ("                val url = element.attr(\"href\") ?: \"\"", "                val url = element.attr(\"href\")")
+              ],
+          }
+
+          changed_files = []
+          for file_name, replacements in fixes.items():
+              path = Path(file_name)
+              text = path.read_text(encoding="utf-8")
+              original = text
+              for old, new in replacements:
+                  if old in text:
+                      text = text.replace(old, new)
+                  elif new in text:
+                      pass
+                  else:
+                      raise SystemExit(f"Exact warning fix anchor not found: {file_name}\n{old}")
+              if text != original:
+                  path.write_text(text, encoding="utf-8")
+                  changed_files.append(file_name)
+
+          print("Changed warning files:")
+          for item in changed_files:
+              print(f" - {item}")
+          PY
+
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          git add \
+            Adicinemax21/src/main/kotlin/com/Adicinemax21/Adicinemax21Extractor.kt \
+            Adicinemax21/src/main/kotlin/com/Adicinemax21/Adicinemax21Idlix.kt \
+            Adicinemax21/src/main/kotlin/com/Adicinemax21/Adicinemax21IdlixShared.kt \
+            AdiDrakor/src/main/kotlin/com/AdiDrakor/AdiDrakorExtractor.kt \
+            DramaBox/src/main/kotlin/com/DramaBox/DramaBoxProvider.kt \
+            IdlixProvider/src/main/kotlin/com/IdlixProvider/IdlixProvider.kt \
+            KlikXXI/src/main/kotlin/com/KlikXXI/KlikXXI.kt \
+            KlikXXI/src/main/kotlin/com/KlikXXI/Strp2p.kt \
+            KisskhProvider/src/main/kotlin/com/michat88/KisskhProvider.kt \
+            KisskhProvider/src/main/kotlin/com/michat88/Utils.kt \
+            MissAv/src/main/kotlin/com/MissAv/MissAVProvider.kt \
+            PODJAV/src/main/kotlin/com/PODJAV/PodjavProvider.kt \
+            OppaDrama/src/main/kotlin/com/OppaDrama/OppaDramaProvider.kt \
+            RiveStream/src/main/kotlin/com/RiveStream/byse/BysePlayback.kt \
+            Sflix/src/main/kotlin/com/sflix/Sflix.kt \
+            Xhamster/src/main/kotlin/com/michat88/Xhamster.kt
+
+          if git diff --cached --quiet; then
+            echo ">> Warning fixes already applied."
+          else
+            git commit -m "Cleanup Kotlin compiler warnings"
+            git push origin HEAD:main
+          fi
+
       - name: Checkout repo untuk folder builds
         uses: actions/checkout@v7
         with:
