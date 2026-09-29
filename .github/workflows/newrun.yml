@@ -77,7 +77,7 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/src"
           chmod +x gradlew
-          ./gradlew makePluginsJson
+          ./gradlew makePluginsJson --rerun-tasks
           shopt -s globstar nullglob
           cp **/build/*.cs3 "$GITHUB_WORKSPACE/builds" || true
           cp **/build/*.jar "$GITHUB_WORKSPACE/builds" || true
