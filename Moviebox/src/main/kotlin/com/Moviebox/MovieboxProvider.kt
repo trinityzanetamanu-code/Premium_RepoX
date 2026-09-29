@@ -1150,7 +1150,9 @@ class MovieBoxProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val epData = AppUtils.tryParseJson<EpData>(data) ?: return false
-        var bearerToken = fetchModernPlaybackBearer() ?: return false
+        var bearerToken = fetchModernPlaybackBearer()
+            ?: getBearerToken()
+            ?: return false
 
         val candidatePairs =
             if (epData.subjectType == 1 || (epData.se == 0 && epData.ep == 0)) {
@@ -1189,6 +1191,7 @@ class MovieBoxProvider : MainAPI() {
 
                     if (response.code == 401 || response.code == 441) {
                         val refreshed = fetchModernPlaybackBearer()
+                            ?: getBearerToken()
                         if (!refreshed.isNullOrBlank()) {
                             bearerToken = refreshed
                             response = try {
