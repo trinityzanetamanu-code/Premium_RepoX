@@ -493,3 +493,627 @@ class MovieBoxProvider : MainAPI() {
                 URLDecoder.decode(str, "UTF-8")
             }
     }
+    private fun headersFor(
+        ts: String,
+        signature: String,
+        bearer: String?
+    ): Map<String, String> {
+        val h = mutableMapOf(
+            "user-agent" to CS_USER_AGENT,
+            "accept" to "application/json",
+            "content-type" to "application/json",
+            "x-client-token" to generateGuestToken(ts),
+            "x-tr-signature" to signature,
+            "x-client-info" to clientInfo(),
+            "x-client-status" to "0"
+        )
+
+        if (!bearer.isNullOrBlank()) {
+            h["authorization"] = "Bearer $bearer"
+        }
+
+        return h
+    }
+
+    private suspend fun getSigned(
+        path: String,
+        query: String,
+        bearer: String?
+    ): String? {
+        val ts = System.currentTimeMillis().toString()
+
+        val pathWithQuery =
+            if (query.isBlank()) path else "$path?$query"
+
+        return try {
+            app.get(
+                "$mainUrl$pathWithQuery",
+                headers = headersFor(
+                    ts,
+                    generateSignature(
+                        "GET",
+                        pathWithQuery,
+                        ts
+                    ),
+                    bearer
+                )
+            ).text
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private suspend fun postSigned(
+        path: String,
+        body: String,
+        bearer: String?
+    ): String? {
+        val ts = System.currentTimeMillis().toString()
+        val sig = generateSignature("POST", path, ts, body)
+
+        return try {
+            val res = app.post(
+                "$mainUrl$path",
+                headers = headersFor(
+                    ts,
+                    sig,
+                    bearer
+                ),
+                requestBody = body
+                    .toByteArray(Charsets.UTF_8)
+                    .toRequestBody(
+                        "application/json".toMediaTypeOrNull()
+                    )
+            )
+
+            Log.d(
+                TAG,
+                "POST $path HTTP=${res.code} bytes=${res.text.length}"
+            )
+
+            if (res.code == 200) res.text else null
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "POST $path gagal: ${e.javaClass.simpleName}: ${e.message}"
+            )
+            null
+        }
+    }
+
+    private suspend fun getBearerToken(): String? {
+        val ts = System.currentTimeMillis().toString()
+        val path = "/wefeed-mobile-bff/tab/ranking-list"
+        val query = "page=1&perPage=1&tabId=0"
+
+        val response = app.get(
+            "$mainUrl$path?$query",
+            headers = headersFor(
+                ts,
+                generateSignature(
+                    "GET",
+                    "$path?$query",
+                    ts
+                ),
+                null
+            )
+        )
+
+        val xUserHeader =
+            response.headers["x-user"]
+                ?: return null
+
+        return """"token"\s*:\s*"([^"]+)""""
+            .toRegex()
+            .find(xUserHeader)
+            ?.groupValues
+            ?.get(1)
+    }
+
+    private suspend fun getPlaybackBearerToken(
+        profile: PlaybackSessionProfile
+    ): String? {
+        val ts = System.currentTimeMillis().toString()
+        val path = "/wefeed-mobile-bff/tab/ranking-list"
+        val query = "page=1&perPage=1&tabId=0"
+
+        val signature =
+            playbackGetSignature(
+                "$path?$query",
+                ts
+            )
+
+        return try {
+            val response = app.get(
+                "$PLAYBACK_API_BASE$path?$query",
+                headers = playbackGuestHeaders(
+                    ts,
+                    signature,
+                    profile
+                )
+            )
+
+            val xUserHeader =
+                response.headers["x-user"]
+                    ?: return null
+
+            val xUser = JSONObject(xUserHeader)
+
+            val bearer =
+                xUser.optString("token", "")
+                    .ifBlank { return null }
+
+            val sessionUserId =
+                when {
+                    xUser.has("userId") &&
+                        xUser.opt("userId") != JSONObject.NULL ->
+                        xUser.opt("userId").toString()
+
+                    xUser.has("user_id") &&
+                        xUser.opt("user_id") != JSONObject.NULL ->
+                        xUser.opt("user_id").toString()
+
+                    else -> ""
+                }
+
+            val realUserId =
+                profile.identity.userId
+
+            val identityMatches =
+                realUserIdIsGuest(realUserId) ||
+                    (
+                        sessionUserId.isNotBlank() &&
+                            sessionUserId == realUserId
+                        )
+
+            if (!identityMatches) {
+                Log.e(
+                    TAG,
+                    "[PLAYBACK] session user tidak cocok dengan runtime identity"
+                )
+                null
+            } else {
+                bearer
+            }
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "[PLAYBACK] gagal memperoleh bearer: ${e.javaClass.simpleName}: ${e.message}"
+            )
+            null
+        }
+    }
+
+    // ===============================================================
+    // MOVIEBOX CS3 V47 PLAYBACK
+    // ===============================================================
+
+    private val modernPlaybackDeviceId: String by lazy {
+        val bytes = ByteArray(16)
+        java.security.SecureRandom().nextBytes(bytes)
+
+        bytes.joinToString("") {
+            "%02x".format(it)
+        }
+    }
+
+    private fun modernPlaybackClientInfo(): String =
+        JSONObject()
+            .put("package_name", "com.community.mbox.in")
+            .put("version_name", PLAYBACK_VERSION_NAME)
+            .put("version_code", PLAYBACK_VERSION_CODE)
+            .put("os", "android")
+            .put("os_version", "14")
+            .put("device_id", modernPlaybackDeviceId)
+            .put("install_store", "official")
+            .put(
+                "gaid",
+                "1b2212c1-dadf-43c3-a0c8-bd6ce48ae22d"
+            )
+            .put("brand", "Google")
+            .put("model", "Pixel 8")
+            .put("system_language", "en")
+            .put("net", "NETWORK_WIFI")
+            .put("region", "IN")
+            .put("timezone", "Asia/Calcutta")
+            .put("sp_code", "")
+            .toString()
+
+    private fun modernPlaybackCanonicalPath(
+        url: String
+    ): String {
+        val uri = URI(url)
+
+        val path =
+            uri.path.orEmpty()
+
+        val query =
+            uri.query.orEmpty()
+
+        if (query.isBlank()) {
+            return path
+        }
+
+        val sortedQuery =
+            query
+                .split("&")
+                .filter { it.isNotBlank() }
+                .map { entry ->
+                    val parts =
+                        entry.split(
+                            "=",
+                            limit = 2
+                        )
+
+                    parts[0] to
+                        parts.getOrElse(1) { "" }
+                }
+                .sortedBy { it.first }
+                .joinToString("&") {
+                    "${it.first}=${it.second}"
+                }
+
+        return if (sortedQuery.isBlank()) {
+            path
+        } else {
+            "$path?$sortedQuery"
+        }
+    }
+
+    private fun modernPlaybackSignature(
+        url: String,
+        ts: String
+    ): String {
+        val canonical =
+            listOf(
+                "GET",
+                "application/json",
+                "application/json",
+                "",
+                ts,
+                "",
+                modernPlaybackCanonicalPath(url)
+            ).joinToString("\n")
+
+        val mac =
+            Mac.getInstance("HmacMD5")
+
+        mac.init(
+            SecretKeySpec(
+                PLAYBACK_ALT_SECRET_BYTES,
+                "HmacMD5"
+            )
+        )
+
+        val signed =
+            mac.doFinal(
+                canonical.toByteArray(
+                    Charsets.UTF_8
+                )
+            )
+
+        return "$ts|2|${
+            Base64.encodeToString(
+                signed,
+                Base64.NO_WRAP
+            )
+        }"
+    }
+
+    private fun modernPlaybackHeaders(
+        url: String,
+        bearer: String? = null
+    ): Map<String, String> {
+        val ts =
+            System.currentTimeMillis()
+                .toString()
+
+        val headers =
+            mutableMapOf(
+                "user-agent" to PLAYBACK_USER_AGENT,
+                "accept" to "application/json",
+                "content-type" to "application/json",
+                "connection" to "keep-alive",
+                "x-client-token" to generateGuestToken(ts),
+                "x-tr-signature" to
+                    modernPlaybackSignature(
+                        url,
+                        ts
+                    ),
+                "x-client-info" to
+                    modernPlaybackClientInfo(),
+                "x-client-status" to "0"
+            )
+
+        if (!bearer.isNullOrBlank()) {
+            headers["Authorization"] =
+                "Bearer $bearer"
+        }
+
+        return headers
+    }
+
+    private suspend fun fetchModernPlaybackBearer(): String? {
+        return try {
+            val response =
+                app.get(
+                    PLAYBACK_TOKEN_URL,
+                    headers =
+                        modernPlaybackHeaders(
+                            PLAYBACK_TOKEN_URL
+                        )
+                )
+
+            val rawXUser =
+                response.headers["x-user"]
+
+            if (rawXUser.isNullOrBlank()) {
+                Log.e(
+                    TAG,
+                    "[PLAYBACK-V47] x-user token header kosong HTTP=${response.code}"
+                )
+                null
+            } else {
+                val token =
+                    JSONObject(rawXUser)
+                        .optString("token", "")
+
+                if (token.isBlank()) {
+                    Log.e(
+                        TAG,
+                        "[PLAYBACK-V47] token anonymous kosong HTTP=${response.code}"
+                    )
+                    null
+                } else {
+                    token
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "[PLAYBACK-V47] gagal mengambil token anonymous: " +
+                    "${e.javaClass.simpleName}: ${e.message}"
+            )
+            null
+        }
+    }
+
+    private fun decodeEdgeUrlPrefix(
+        signCookie: String
+    ): String? {
+        val encoded =
+            Regex(
+                """Edge-Cache-Cookie=urlprefix=([^:;\s]+)""",
+                RegexOption.IGNORE_CASE
+            )
+                .find(signCookie)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.takeIf {
+                    it.isNotBlank()
+                }
+                ?: return null
+
+        return try {
+            val normalized =
+                encoded
+                    .replace('_', '/')
+                    .replace('-', '+')
+                    .let {
+                        it + "=".repeat(
+                            (4 - it.length % 4) % 4
+                        )
+                    }
+
+            val prefix =
+                String(
+                    Base64.decode(
+                        normalized,
+                        Base64.DEFAULT
+                    ),
+                    Charsets.UTF_8
+                ).trimEnd('/')
+
+            "$prefix/index.mpd"
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun decodeCloudFrontPolicyResource(
+        signCookie: String
+    ): String? {
+        val encoded =
+            Regex(
+                """CloudFront-Policy=([^;]+)""",
+                RegexOption.IGNORE_CASE
+            )
+                .find(signCookie)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.takeIf {
+                    it.isNotBlank()
+                }
+                ?: return null
+
+        return try {
+            val normalized =
+                encoded
+                    .replace('-', '+')
+                    .replace('~', '/')
+                    .replace('_', '=')
+                    .let {
+                        it + "=".repeat(
+                            (4 - it.length % 4) % 4
+                        )
+                    }
+
+            val policyJson =
+                String(
+                    Base64.decode(
+                        normalized,
+                        Base64.DEFAULT
+                    ),
+                    Charsets.UTF_8
+                )
+
+            val resource =
+                JSONObject(policyJson)
+                    .optJSONArray("Statement")
+                    ?.optJSONObject(0)
+                    ?.optString("Resource")
+                    ?.trim()
+                    ?.takeIf {
+                        it.startsWith("http://") ||
+                            it.startsWith("https://")
+                    }
+                    ?: return null
+
+            val base =
+                resource
+                    .trimEnd('*')
+                    .trimEnd('/')
+
+            if (
+                base.endsWith(
+                    ".mpd",
+                    ignoreCase = true
+                )
+            ) {
+                base
+            } else {
+                "$base/index.mpd"
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun extractPlaybackPolicyResource(
+        signCookie: String?
+    ): String? {
+        if (signCookie.isNullOrBlank()) {
+            return null
+        }
+
+        return decodeEdgeUrlPrefix(signCookie)
+            ?: decodeCloudFrontPolicyResource(
+                signCookie
+            )
+    }
+
+    private fun highestPlaybackQuality(
+        resolutions: String?
+    ): Int? =
+        Regex("""\d{3,4}""")
+            .findAll(resolutions.orEmpty())
+            .mapNotNull {
+                it.value.toIntOrNull()
+            }
+            .filter {
+                it in 144..4320
+            }
+            .maxOrNull()
+
+    private fun playbackLinkType(
+        format: String?,
+        url: String
+    ): ExtractorLinkType {
+        val lowerUrl =
+            url.lowercase()
+
+        return when {
+            lowerUrl.contains(".mpd") ||
+                format.equals(
+                    "dash",
+                    ignoreCase = true
+                ) ->
+                ExtractorLinkType.DASH
+
+            lowerUrl.contains(".m3u8") ||
+                format.equals(
+                    "hls",
+                    ignoreCase = true
+                ) ->
+                ExtractorLinkType.M3U8
+
+            else ->
+                ExtractorLinkType.VIDEO
+        }
+    }
+
+    private fun isPlaybackNotice(
+        url: String
+    ): Boolean {
+        val lower =
+            url.lowercase()
+
+        return lower.contains(
+            "b164fbfb4347792950bdfbfb563d39d9"
+        ) ||
+            lower.contains(
+                "1c7de0bd3393702d9191801f15f88f8d"
+            ) ||
+            lower.contains(
+                "9a0461bc39da389663bf3dbb17091d3f"
+            ) ||
+            lower.contains("/other/2026/09/") ||
+            lower.contains("/notice.mp4") ||
+            lower.contains("upgrade-notice")
+    }
+
+    private data class ResolvedPlaybackStream(
+        val stream: StreamItem,
+        val url: String,
+        val cookie: String?,
+        val type: ExtractorLinkType,
+        val quality: Int?
+    )
+
+    private fun resolvePlaybackStream(
+        stream: StreamItem,
+        dataCookie: String?
+    ): ResolvedPlaybackStream? {
+        val originalUrl =
+            stream.url
+                ?.trim()
+                ?.takeIf {
+                    it.isNotBlank()
+                }
+                ?: return null
+
+        val cookie =
+            stream.signCookie
+                ?.trim()
+                ?.takeIf {
+                    it.isNotBlank()
+                }
+                ?: dataCookie
+                    ?.trim()
+                    ?.takeIf {
+                        it.isNotBlank()
+                    }
+
+        val resolvedUrl =
+            extractPlaybackPolicyResource(
+                cookie
+            ) ?: originalUrl
+
+        if (isPlaybackNotice(resolvedUrl)) {
+            return null
+        }
+
+        return ResolvedPlaybackStream(
+            stream = stream,
+            url = resolvedUrl,
+            cookie = cookie,
+            type = playbackLinkType(
+                stream.format,
+                resolvedUrl
+            ),
+            quality =
+                highestPlaybackQuality(
+                    stream.resolutions
+                )
+        )
+    }
