@@ -1,0 +1,115 @@
+name: Fix MovieBox runtime
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Patch MovieBox playback bearer fallback
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("Moviebox/src/main/kotlin/com/Moviebox/MovieboxProvider.kt")
+          text = path.read_text(encoding="utf-8")
+
+          pattern = re.compile(
+              r'''    private suspend fun fetchModernPlaybackBearer\(\): String\? \{.*?\n    \}\n\n    private fun decodeEdgeUrlPrefix''',
+              re.S,
+          )
+
+          replacement = '''    private suspend fun fetchModernPlaybackBearer(): String? {
+        val tokenPath = "/wefeed-mobile-bff/tab/ranking-list"
+        val tokenQuery = "tabId=0&categoryType=4516404531735022304&page=1&perPage=1"
+        val candidates = mutableListOf<String>().apply {
+            add(PLAYBACK_TOKEN_URL)
+            PLAYBACK_HOSTS.forEach { host ->
+                add("${host.trimEnd('/')}" + tokenPath + "?" + tokenQuery)
+            }
+        }.distinct()
+
+        for (url in candidates) {
+            try {
+                val response = app.get(
+                    url,
+                    headers = modernPlaybackHeaders(url)
+                )
+
+                val rawXUser = response.headers["x-user"]
+                if (!rawXUser.isNullOrBlank()) {
+                    val token = JSONObject(rawXUser).optString("token", "")
+                    if (token.isNotBlank()) {
+                        val host = runCatching { URI(url).host }.getOrNull().orEmpty()
+                        Log.d(TAG, "[PLAYBACK-V47] token acquired host=$host")
+                        return token
+                    }
+                }
+
+                val host = runCatching { URI(url).host }.getOrNull().orEmpty()
+                Log.d(
+                    TAG,
+                    "[PLAYBACK-V47] token candidate tanpa bearer host=$host HTTP=${response.code}"
+                )
+            } catch (e: Exception) {
+                val host = runCatching { URI(url).host }.getOrNull().orEmpty()
+                Log.e(
+                    TAG,
+                    "[PLAYBACK-V47] token candidate gagal host=$host: " +
+                        "${e.javaClass.simpleName}: ${e.message}"
+                )
+            }
+        }
+
+        return try {
+            val legacy = getBearerToken()
+            if (!legacy.isNullOrBlank()) {
+                Log.d(TAG, "[PLAYBACK-V47] fallback bearer legacy aktif")
+            } else {
+                Log.e(TAG, "[PLAYBACK-V47] seluruh jalur bearer gagal")
+            }
+            legacy
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "[PLAYBACK-V47] fallback bearer legacy gagal: " +
+                    "${e.javaClass.simpleName}: ${e.message}"
+            )
+            null
+        }
+    }
+
+    private fun decodeEdgeUrlPrefix'''
+
+          updated, count = pattern.subn(replacement, text, count=1)
+          if count == 0:
+              if "[PLAYBACK-V47] fallback bearer legacy aktif" in text:
+                  print("MovieBox bearer fallback already applied")
+              else:
+                  raise SystemExit("MovieBox fetchModernPlaybackBearer anchor not found")
+          else:
+              path.write_text(updated, encoding="utf-8")
+              print("MovieBox bearer fallback patched")
+          PY
+
+      - name: Commit patch
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add Moviebox/src/main/kotlin/com/Moviebox/MovieboxProvider.kt
+          if git diff --cached --quiet; then
+            echo ">> Patch already present; nothing to commit."
+            exit 0
+          fi
+          git commit -m "Fix MovieBox playback bearer fallback"
+          git push origin HEAD:main
