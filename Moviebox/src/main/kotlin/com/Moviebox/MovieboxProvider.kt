@@ -1181,12 +1181,63 @@ class MovieBoxProvider : MainAPI() {
                             headers = modernPlaybackHeaders(requestUrl, bearerToken)
                         )
                     } catch (e: Exception) {
-                        Log.e(
-                            TAG,
-                            "[PLAYBACK-V47] play-info gagal host=$host " +
-                                "${e.javaClass.simpleName}: ${e.message}"
-                        )
-                        continue
+                        val useLegacyApi3Fallback =
+                            host.trimEnd('/') == mainUrl.trimEnd('/')
+
+                        if (!useLegacyApi3Fallback) {
+                            Log.e(
+                                TAG,
+                                "[PLAYBACK-V47] play-info gagal host=$host " +
+                                    "${e.javaClass.simpleName}: ${e.message}"
+                            )
+                            continue
+                        }
+
+                        val legacyBearer = try {
+                            getBearerToken()
+                        } catch (_: Exception) {
+                            null
+                        }
+
+                        if (legacyBearer.isNullOrBlank()) {
+                            Log.e(
+                                TAG,
+                                "[PLAYBACK-LEGACY-FALLBACK] bearer legacy kosong " +
+                                    "setelah V47 gagal: ${e.javaClass.simpleName}: ${e.message}"
+                            )
+                            continue
+                        }
+
+                        val legacyTs = System.currentTimeMillis().toString()
+                        val legacyPathWithQuery = "$path?$query"
+
+                        try {
+                            val legacyResponse = app.get(
+                                "$mainUrl$legacyPathWithQuery",
+                                headers = headersFor(
+                                    legacyTs,
+                                    generateSignature(
+                                        "GET",
+                                        legacyPathWithQuery,
+                                        legacyTs
+                                    ),
+                                    legacyBearer
+                                )
+                            )
+                            Log.d(
+                                TAG,
+                                "[PLAYBACK-LEGACY-FALLBACK] host=$mainUrl " +
+                                    "HTTP=${legacyResponse.code} se=$se ep=$ep"
+                            )
+                            legacyResponse
+                        } catch (legacyError: Exception) {
+                            Log.e(
+                                TAG,
+                                "[PLAYBACK-LEGACY-FALLBACK] gagal: " +
+                                    "${legacyError.javaClass.simpleName}: ${legcyError.message}"
+                            )
+                            continue
+                        }
                     }
 
                     if (response.code == 401 || response.code == 441) {
