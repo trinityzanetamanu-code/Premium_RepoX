@@ -208,7 +208,7 @@ class PodjavProvider : MainAPI() {
 
         // Mengambil daftar video rekomendasi
         val recommendations = document.select(".carousel-track a.reko-card").mapNotNull {
-            val recUrl = it.attr("href") ?: return@mapNotNull null
+            val recUrl = it.attr("href")
             val imgElem = it.selectFirst("img") ?: return@mapNotNull null
             val recPoster = imgElem.attr("src")
             val recTitle = it.selectFirst(".reko-card-title")?.text() ?: return@mapNotNull null
@@ -347,11 +347,8 @@ class PodjavProvider : MainAPI() {
                         // 2-argumen yang publik, karena setelah token diperbarui lewat AJAX
                         // header kemungkinan besar tidak lagi dibutuhkan.
                         subtitleCallback.invoke(
-                            SubtitleFile(
-                                lang = sub.label ?: "Indonesia",
-                                url = subUrl
-                            )
-                        )
+                  newSubtitleFile(sub.label ?: "Indonesia", subUrl)
+              )
                     }
                 }
             }

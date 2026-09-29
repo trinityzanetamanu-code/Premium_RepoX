@@ -799,15 +799,15 @@ class OppaDramaProvider : MainAPI() {
             LocalProxy.obs("HX-5-SOURCE[$i]", o.toString())
             parsed.add(
                 HydraxSource(
-                    label = o.optString("label", null)?.takeIf { it.isNotBlank() } ?: "HD",
-                    codec = o.optString("codec", null)?.takeIf { it.isNotBlank() } ?: "",
-                    resId = o.optString("res_id", null)?.takeIf { it.isNotBlank() && it != "null" },
-                    size = o.optString("size", null)?.toLongOrNull(),
-                    sub = o.optString("sub", null)?.takeIf { it.isNotBlank() && it != "null" },
-                    url = o.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" },
-                    path = o.optString("path", null)?.takeIf { it.isNotBlank() && it != "null" }
-                        ?: o.optString("file", null)?.takeIf { it.isNotBlank() && it != "null" }
-                        ?: o.optString("src", null)?.takeIf { it.isNotBlank() && it != "null" }
+                    label = o.optString("label").takeIf { it.isNotBlank() } ?: "HD",
+                    codec = o.optString("codec").takeIf { it.isNotBlank() } ?: "",
+                    resId = o.optString("res_id").takeIf { it.isNotBlank() && it != "null" },
+                    size = o.optString("size").toLongOrNull(),
+                    sub = o.optString("sub").takeIf { it.isNotBlank() && it != "null" },
+                    url = o.optString("url").takeIf { it.isNotBlank() && it != "null" },
+                    path = o.optString("path").takeIf { it.isNotBlank() && it != "null" }
+                        ?: o.optString("file").takeIf { it.isNotBlank() && it != "null" }
+                        ?: o.optString("src").takeIf { it.isNotBlank() && it != "null" }
                 )
             )
         }
@@ -882,8 +882,8 @@ class OppaDramaProvider : MainAPI() {
                 // --- Jalur 2: url + path (perilaku lama, dipertahankan sebagai cadangan) ---
                 if (fullUrl == null) {
                     val bUrl = src.url
-                        ?: mp4Obj?.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
-                        ?: decryptedObj.optString("url", null)?.takeIf { it.isNotBlank() && it != "null" }
+                        ?: mp4Obj?.optString("url")?.takeIf { it.isNotBlank() && it != "null" }
+                        ?: decryptedObj.optString("url").takeIf { it.isNotBlank() && it != "null" }
                     val pPath = src.path
 
                     if (pPath != null && (pPath.startsWith("http://") || pPath.startsWith("https://"))) {

@@ -195,7 +195,10 @@ object BysePlayback {
         val payloadB64 = playback.optString("payload", "").takeIf { it.isNotBlank() } ?: return null
 
         return try {
-            val kunci = rakitKunci(playback.optString("version", null), parts)
+            val version = playback.opt("version")
+            ?.takeUnless { it == JSONObject.NULL }
+            ?.toString()
+        val kunci = rakitKunci(version, parts)
             // AES hanya menerima 16, 24, atau 32 byte.
             if (kunci.size != 16 && kunci.size != 24 && kunci.size != 32) return null
 

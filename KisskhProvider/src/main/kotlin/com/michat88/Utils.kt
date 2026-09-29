@@ -21,8 +21,8 @@ suspend fun fetchtmdb(title: String?, year: Int?, isMovie: Boolean): Int? {
 
         val titleMatches =
             resultTitle.equals(title, ignoreCase = true) ||
-            resultTitle.contains(title ?: "", ignoreCase = true) ||
-            (title != null && title.contains(resultTitle, ignoreCase = true))
+            resultTitle.contains(title, ignoreCase = true) ||
+            title.contains(resultTitle, ignoreCase = true)
 
         val yearMatches =
             ignoreYear ||

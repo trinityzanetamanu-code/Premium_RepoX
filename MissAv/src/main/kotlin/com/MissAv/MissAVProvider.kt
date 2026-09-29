@@ -201,11 +201,8 @@ class MissAvProvider : MainAPI() {
                                 
                                 // Kirim setiap subtitle yang berhasil ditemukan ke CloudStream
                                 subtitleCallback.invoke(
-                                    SubtitleFile(
-                                        lang = "ID - $subLabel",
-                                        url = finalDownloadUrl
-                                    )
-                                )
+                          newSubtitleFile("ID - $subLabel", finalDownloadUrl)
+                      )
                             }
                         } catch (e: Exception) {
                             // Abaikan error pada satu file agar tidak mengganggu file lainnya

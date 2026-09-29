@@ -68,7 +68,7 @@ class Xhamster : MainAPI() {
         
         if (items.isEmpty()) {
             document.select("a.video-thumb, a.thumb-image-container, a.mobile-thumb-player-container").forEach { element ->
-                val url = element.attr("href") ?: ""
+                val url = element.attr("href")
                 val img = element.selectFirst("img")
                 val title = element.attr("aria-label").ifBlank { img?.attr("alt") ?: "" }
                 

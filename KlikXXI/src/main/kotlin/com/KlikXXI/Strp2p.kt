@@ -61,7 +61,7 @@ class Strp2p : ExtractorApi() {
             if (idx >= 0) it.substring(idx) else null
         }
 
-        val swappedUrl = if (cfHost != null && srcPath != null && sourceRaw != null && isRawIp(sourceRaw)) {
+        val swappedUrl = if (cfHost != null && srcPath != null && isRawIp(sourceRaw)) {
             "$cfHost$srcPath"
         } else null
 

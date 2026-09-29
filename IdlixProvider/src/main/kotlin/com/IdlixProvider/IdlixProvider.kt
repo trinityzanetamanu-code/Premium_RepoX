@@ -401,7 +401,7 @@ class IdlixProvider : MainAPI() {
                 playInfoRes = AppUtils.parseJson<PlayInfoResponse>(playInfoResText)
             }
 
-            val gateToken = playInfoRes?.gateToken ?: return false
+            val gateToken = playInfoRes.gateToken ?: return false
 
             // 3. Bypass time-lock dengan cap maksimum delay
             val serverNow = playInfoRes.serverNow ?: 0L

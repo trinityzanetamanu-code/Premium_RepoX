@@ -102,7 +102,7 @@ class KlikXXI : MainAPI() {
     // ─────────────────────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
-        isDataJob: Boolean,
+        isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {

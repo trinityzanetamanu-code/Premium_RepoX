@@ -350,11 +350,8 @@ class Sflix : MainAPI() {
                 val langName = caption.lanName ?: "Unknown"
                 
                 subtitleCallback.invoke(
-                    SubtitleFile(
-                        lang = langName,
-                        url = subUrl
-                    )
-                )
+          newSubtitleFile(langName, subUrl)
+      )
             }
         }
 
