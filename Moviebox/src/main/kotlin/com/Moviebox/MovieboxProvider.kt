@@ -48,7 +48,15 @@ class MovieBoxProvider : MainAPI() {
         private const val PLAYBACK_ALT_SECRET_B64 =
             "WHFuMm5uTzQxL0w5Mm8xaXVYaFNMSFRiWHZZNFo1Wlo2Mm04bVNMQQ=="
         private const val TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49"
-
+        /**
+         * x-client-info dirakit saat request, bukan konstanta, karena device_id
+         * berasal dari identity persisten per-instalasi.
+         *
+         * Isi field lain TIDAK berubah sedikit pun dari versi sebelumnya.
+         * x-client-info tidak ikut ditandatangani (buildCanonical hanya memakai
+         * method/accept/content-type/panjang body/ts/md5 body/path), jadi
+         * perubahan ini tidak dapat memengaruhi signature.
+         */
         private fun clientInfo(): String =
             "{\"package_name\":\"com.community.oneroom\",\"version_name\":\"3.0.13.0325.03\"," +
             "\"version_code\":50020088,\"os\":\"android\",\"os_version\":\"13\"," +
@@ -56,6 +64,9 @@ class MovieBoxProvider : MainAPI() {
             "\"system_language\":\"en\",\"net\":\"NETWORK_WIFI\",\"region\":\"US\"," +
             "\"timezone\":\"Asia/Calcutta\",\"sp_code\":\"\"}"
 
+        // ---------------------------------------------------------------
+        // KATEGORI HOME  (self-healing)
+        // ---------------------------------------------------------------
         private const val CAT_KEY = "categorylist"
 
         private val SEED_CATEGORIES = listOf(
@@ -69,8 +80,7 @@ class MovieBoxProvider : MainAPI() {
             "5720220657917522824" to "Reality"
         )
 
-        @Volatile
-        private var categories: List<Pair<String, String>> = SEED_CATEGORIES
+        @Volatile private var categories: List<Pair<String, String>> = SEED_CATEGORIES
 
         private const val FILTER_PREFIX = "filter:"
 
@@ -79,11 +89,8 @@ class MovieBoxProvider : MainAPI() {
         )
 
         private fun prefs() =
-            try {
-                appContext?.getSharedPreferences(ID_PREFS, Context.MODE_PRIVATE)
-            } catch (e: Exception) {
-                null
-            }
+            try { appContext?.getSharedPreferences(ID_PREFS, Context.MODE_PRIVATE) }
+            catch (e: Exception) { null }
 
         private fun mainPageEntries(): Array<Pair<String, String>> =
             (categories + EXTRA_ROWS).toTypedArray()
@@ -93,22 +100,13 @@ class MovieBoxProvider : MainAPI() {
                 ?.split("\n")
                 ?.mapNotNull { line ->
                     val p = line.split("\t")
-                    if (p.size == 2 && p[0].isNotBlank() && p[1].isNotBlank()) {
-                        p[0] to p[1]
-                    } else {
-                        null
-                    }
+                    if (p.size == 2 && p[0].isNotBlank() && p[1].isNotBlank()) p[0] to p[1] else null
                 }
                 ?.takeIf { it.isNotEmpty() }
-
             if (parsed != null) categories = parsed
-
-            Log.d(
-                TAG,
-                "[CATEGORY] dimuat ${categories.size} kategori " +
+            Log.d(TAG, "[CATEGORY] dimuat ${categories.size} kategori " +
                     "(${if (parsed != null) "tersimpan" else "seed"}): " +
-                    categories.joinToString(", ") { it.second }
-            )
+                    categories.joinToString(", ") { it.second })
         }
 
         private fun rememberCategories(fresh: List<CategoryItem>) {
@@ -117,22 +115,14 @@ class MovieBoxProvider : MainAPI() {
                 val n = c.name
                 if (t.isNullOrBlank() || n.isNullOrBlank()) null else t to n
             }
-
             if (list.isEmpty() || list == categories) return
-
             categories = list
-
             try {
                 prefs()?.edit()?.putString(
-                    CAT_KEY,
-                    list.joinToString("\n") { "${it.first}\t${it.second}" }
+                    CAT_KEY, list.joinToString("\n") { "${it.first}\t${it.second}" }
                 )?.apply()
-
-                Log.d(
-                    TAG,
-                    "[CATEGORY] daftar server berubah -> disimpan ${list.size}: " +
-                        list.joinToString(", ") { it.second }
-                )
+                Log.d(TAG, "[CATEGORY] daftar server berubah -> disimpan ${list.size}: " +
+                        list.joinToString(", ") { it.second })
             } catch (e: Exception) {
                 Log.e(TAG, "[CATEGORY] gagal menyimpan: ${e.message}")
             }
@@ -142,26 +132,16 @@ class MovieBoxProvider : MainAPI() {
         private const val ID_KEY = "apkdeviceid"
         private val ID_FORMAT = Regex("^[0-9a-f]{32}$")
 
-        @Volatile
-        private var appContext: Context? = null
-
-        @Volatile
-        private var cachedDeviceId: String? = null
-
-        @Volatile
-        private var persisted = false
+        @Volatile private var appContext: Context? = null
+        @Volatile private var cachedDeviceId: String? = null
+        @Volatile private var persisted = false
 
         fun attachContext(context: Context) {
             appContext = context.applicationContext
             loadCategories()
-
             val id = deviceId()
-
-            Log.d(
-                TAG,
-                "[IDENTITY] device_id=$id len=${id.length} " +
-                    "valid=${ID_FORMAT.matches(id)} persisted=$persisted"
-            )
+            Log.d(TAG, "[IDENTITY] device_id=$id len=${id.length} " +
+                    "valid=${ID_FORMAT.matches(id)} persisted=$persisted")
         }
 
         private fun deviceId(): String {
@@ -173,19 +153,13 @@ class MovieBoxProvider : MainAPI() {
                 try {
                     val sp = ctx.getSharedPreferences(ID_PREFS, Context.MODE_PRIVATE)
                     val existing = sp.getString(ID_KEY, null)
-
                     if (!existing.isNullOrBlank() && ID_FORMAT.matches(existing)) {
                         cachedDeviceId = existing
                         persisted = true
                         return existing
                     }
-
                     val fresh = cached ?: md5(UUID.randomUUID().toString())
-
-                    sp.edit()
-                        .putString(ID_KEY, fresh)
-                        .apply()
-
+                    sp.edit().putString(ID_KEY, fresh).apply()
                     cachedDeviceId = fresh
                     persisted = true
                     return fresh
@@ -194,50 +168,30 @@ class MovieBoxProvider : MainAPI() {
                 }
             }
 
-            return cached
-                ?: md5(UUID.randomUUID().toString())
-                    .also { cachedDeviceId = it }
+            return cached ?: md5(UUID.randomUUID().toString()).also { cachedDeviceId = it }
         }
 
         private val SECRET_BYTES: ByteArray by lazy {
-            val step1 = String(
-                Base64.decode(
-                    "NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw==",
-                    Base64.DEFAULT
-                ),
-                Charsets.UTF_8
-            )
-
+            val step1 = String(Base64.decode("NzZpUmwwN3MweFNOOWpxbUVXQXQ3OUVCSlp1bElRSXNWNjRGWnIyTw==", Base64.DEFAULT), Charsets.UTF_8)
             Base64.decode(step1, Base64.DEFAULT)
         }
 
         private val PLAYBACK_ALT_SECRET_BYTES: ByteArray by lazy {
             val step1 = String(
-                Base64.decode(
-                    PLAYBACK_ALT_SECRET_B64,
-                    Base64.DEFAULT
-                ),
+                Base64.decode(PLAYBACK_ALT_SECRET_B64, Base64.DEFAULT),
                 Charsets.UTF_8
             )
-
             Base64.decode(step1, Base64.DEFAULT)
         }
 
         private fun md5(input: String): String {
             val md = MessageDigest.getInstance("MD5")
-            return md.digest(input.toByteArray(Charsets.UTF_8))
-                .joinToString("") { "%02x".format(it) }
+            return md.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         }
 
-        private fun buildCanonical(
-            method: String,
-            pathWithQuery: String,
-            ts: String,
-            body: String
-        ): String {
+        private fun buildCanonical(method: String, pathWithQuery: String, ts: String, body: String): String {
             val length = if (body.isEmpty()) "" else body.length.toString()
             val digest = if (body.isEmpty()) "" else md5(body)
-
             return listOf(
                 method.uppercase(),
                 "application/json",
@@ -249,33 +203,16 @@ class MovieBoxProvider : MainAPI() {
             ).joinToString("\n")
         }
 
-        private fun generateSignature(
-            method: String,
-            pathWithQuery: String,
-            ts: String,
-            body: String = ""
-        ): String {
+        private fun generateSignature(method: String, pathWithQuery: String, ts: String, body: String = ""): String {
             val mac = Mac.getInstance("HmacMD5")
             mac.init(SecretKeySpec(SECRET_BYTES, "HmacMD5"))
-
-            val hmacBytes = mac.doFinal(
-                buildCanonical(
-                    method,
-                    pathWithQuery,
-                    ts,
-                    body
-                ).toByteArray(Charsets.UTF_8)
-            )
-
+            val hmacBytes = mac.doFinal(buildCanonical(method, pathWithQuery, ts, body).toByteArray(Charsets.UTF_8))
             return "$ts|2|${Base64.encodeToString(hmacBytes, Base64.NO_WRAP)}"
         }
 
-        private fun generateGuestToken(ts: String): String =
-            "$ts,${md5(ts.reversed())}"
+        private fun generateGuestToken(ts: String): String = "$ts,${md5(ts.reversed())}"
 
-        private const val ORACLE_BLOB_B64 =
-            "DTIykuYnWieJjJgXTGK+QzvFGBfR7pw7CKX532Rg/rxEImeG4XFYNNeXjUMSJKoba4VVBda+0mtT8JXQYST0rlQ8cofmIFoniYzSREIn+R861RlRje/Zf1/zntQte/ymRD0x0LN7CGfWn9lFR3LpAX6OWkbB6oY+NKPOlDpgtO1UPHKJ6TpKZN/CtAVVfrlIft0WRcapxnAGr8LTbGD+vCVdfbO+eAZHkYLJGERl6Rd+qXFh4sS4GTSX7/BJYOi8GWMPluI7TWzcwMlMAyD9D3DFRlDS4oU8SfqE/0Rg6LwFYA+D6C1bJ4mM3kcRIPsPcMVHTMb/jz80rMfYZzel+RMyasLuJxwpkdqCG0RrpEM5xQ4X9PiDM0SKx89hMrHsFzJ8wvI6W3fsx49UGzP9H2XSAg2Gut5gXPiVgjh386tEMnzC8SxMdtrBhSlCfq9Ift0WDIyy02tS+Z+PIm7m6BNiI4noJ2Fr0sOOVBsz/wNsyQQHm7vSYVruloUiPw=="
-
+        private const val ORACLE_BLOB_B64 = "DTIykuYnWieJjJgXTGK+QzvFGBfR7pw7CKX532Rg/rxEImeG4XFYNNeXjUMSJKoba4VVBda+0mtT8JXQYST0rlQ8cofmIFoniYzSREIn+R861RlRje/Zf1/zntQte/ymRD0x0LN7CGfWn9lFR3LpAX6OWkbB6oY+NKPOlDpgtO1UPHKJ6TpKZN/CtAVVfrlIft0WRcapxnAGr8LTbGD+vCVdfbO+eAZHkYLJGERl6Rd+qXFh4sS4GTSX7/BJYOi8GWMPluI7TWzcwMlMAyD9D3DFRlDS4oU8SfqE/0Rg6LwFYA+D6C1bJ4mM3kcRIPsPcMVHTMb/jz80rMfYZzel+RMyasLuJxwpkdqCG0RrpEM5xQ4X9PiDM0SKx89hMrHsFzJ8wvI6W3fsx49UGzP9H2XSAg2Gut5gXPiVgjh386tEMnzC8SxMdtrBhSlCfq9Ift0WDIyy02tS+Z+PIm7m6BNiI4noJ2Fr0sOOVBsz/wNsyQQHm7vSYVruloUiPw=="
         private const val ORACLE_KEY_DOMAIN = "MovieBoxOracleV1|"
 
         private data class OracleIdentity(
@@ -302,54 +239,28 @@ class MovieBoxProvider : MainAPI() {
 
         private fun oracleDecryptJson(): JSONObject? {
             return try {
-                val encrypted = Base64.decode(
-                    ORACLE_BLOB_B64,
-                    Base64.DEFAULT
-                )
-
+                val encrypted = Base64.decode(ORACLE_BLOB_B64, Base64.DEFAULT)
                 val key = MessageDigest.getInstance("SHA-256")
-                    .digest(
-                        (ORACLE_KEY_DOMAIN + Build.FINGERPRINT)
-                            .toByteArray(Charsets.UTF_8)
-                    )
-
+                    .digest((ORACLE_KEY_DOMAIN + Build.FINGERPRINT).toByteArray(Charsets.UTF_8))
                 val plain = ByteArray(encrypted.size)
-
                 for (i in encrypted.indices) {
-                    plain[i] =
-                        (encrypted[i].toInt() xor key[i % key.size].toInt())
-                            .toByte()
+                    plain[i] = (encrypted[i].toInt() xor key[i % key.size].toInt()).toByte()
                 }
-
                 JSONObject(String(plain, Charsets.UTF_8))
             } catch (e: Exception) {
-                Log.e(
-                    TAG,
-                    "[PLAYBACK] runtime identity decrypt gagal: ${e.javaClass.simpleName}"
-                )
+                Log.e(TAG, "[PLAYBACK] runtime identity decrypt gagal: ${e.javaClass.simpleName}")
                 null
             }
         }
 
-        private fun oracleString(
-            o: JSONObject,
-            key: String
-        ): String {
+        private fun oracleString(o: JSONObject, key: String): String {
             val value = o.opt(key)
-            return if (value == null || value == JSONObject.NULL) {
-                ""
-            } else {
-                value.toString()
-            }
+            return if (value == null || value == JSONObject.NULL) "" else value.toString()
         }
 
         private fun oracleIdentity(): OracleIdentity? {
             val o = oracleDecryptJson() ?: return null
-
-            val versionCode =
-                oracleString(o, "version_code")
-                    .toLongOrNull()
-                    ?: return null
+            val versionCode = oracleString(o, "version_code").toLongOrNull() ?: return null
 
             val identity = OracleIdentity(
                 userId = oracleString(o, "user_id"),
@@ -373,13 +284,9 @@ class MovieBoxProvider : MainAPI() {
                 identity.versionName != "4.0.02.0831.03" ||
                 identity.versionCode != 999999999L
             ) {
-                Log.e(
-                    TAG,
-                    "[PLAYBACK] runtime identity tidak cocok dengan build target"
-                )
+                Log.e(TAG, "[PLAYBACK] runtime identity tidak cocok dengan build target")
                 return null
             }
-
             return identity
         }
 
@@ -399,16 +306,12 @@ class MovieBoxProvider : MainAPI() {
                 .put("os", "android")
                 .put("os_version", id.osVersion)
 
-            if (id.installCh.isNotBlank()) {
-                info.put("install_ch", id.installCh)
-            }
+            if (id.installCh.isNotBlank()) info.put("install_ch", id.installCh)
 
             info.put("device_id", id.deviceId)
                 .put("install_store", id.installStore)
 
-            if (id.gaid.isNotBlank()) {
-                info.put("gaid", id.gaid)
-            }
+            if (id.gaid.isNotBlank()) info.put("gaid", id.gaid)
 
             info.put("brand", Build.BRAND ?: "")
                 .put("model", id.model)
@@ -424,34 +327,15 @@ class MovieBoxProvider : MainAPI() {
             )
         }
 
-        private fun playbackGetCanonical(
-            pathWithCanonicalQuery: String,
-            ts: String
-        ): String =
-            listOf(
-                "GET",
-                "",
-                "",
-                "",
-                ts,
-                "",
-                pathWithCanonicalQuery
-            ).joinToString("\n")
+        private fun playbackGetCanonical(pathWithCanonicalQuery: String, ts: String): String =
+            listOf("GET", "", "", "", ts, "", pathWithCanonicalQuery).joinToString("\n")
 
-        private fun playbackGetSignature(
-            pathWithCanonicalQuery: String,
-            ts: String
-        ): String {
+        private fun playbackGetSignature(pathWithCanonicalQuery: String, ts: String): String {
             val mac = Mac.getInstance("HmacMD5")
             mac.init(SecretKeySpec(SECRET_BYTES, "HmacMD5"))
-
             val bytes = mac.doFinal(
-                playbackGetCanonical(
-                    pathWithCanonicalQuery,
-                    ts
-                ).toByteArray(Charsets.UTF_8)
+                playbackGetCanonical(pathWithCanonicalQuery, ts).toByteArray(Charsets.UTF_8)
             )
-
             return "$ts|2|${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
         }
 
@@ -459,45 +343,32 @@ class MovieBoxProvider : MainAPI() {
             ts: String,
             signature: String,
             profile: PlaybackSessionProfile
-        ): Map<String, String> =
-            mapOf(
-                "x-client-token" to generateGuestToken(ts),
-                "x-tr-signature" to signature,
-                "x-client-info" to profile.clientInfo,
-                "x-client-status" to "1"
-            )
+        ): Map<String, String> = mapOf(
+            "x-client-token" to generateGuestToken(ts),
+            "x-tr-signature" to signature,
+            "x-client-info" to profile.clientInfo,
+            "x-client-status" to "1"
+        )
 
         private fun playbackPlayInfoHeaders(
             signature: String,
             bearer: String,
             profile: PlaybackSessionProfile
-        ): Map<String, String> =
-            mapOf(
-                "authorization" to "Bearer $bearer",
-                "x-tr-signature" to signature,
-                "x-client-info" to profile.clientInfo,
-                "x-client-status" to "1"
-            )
+        ): Map<String, String> = mapOf(
+            "authorization" to "Bearer $bearer",
+            "x-tr-signature" to signature,
+            "x-client-info" to profile.clientInfo,
+            "x-client-status" to "1"
+        )
 
         private fun enc(str: String?): String =
-            if (str.isNullOrBlank()) {
-                ""
-            } else {
-                URLEncoder.encode(str, "UTF-8")
-            }
+            if (str.isNullOrBlank()) "" else URLEncoder.encode(str, "UTF-8")
 
         private fun dec(str: String?): String =
-            if (str.isNullOrBlank()) {
-                ""
-            } else {
-                URLDecoder.decode(str, "UTF-8")
-            }
+            if (str.isNullOrBlank()) "" else URLDecoder.decode(str, "UTF-8")
     }
-    private fun headersFor(
-        ts: String,
-        signature: String,
-        bearer: String?
-    ): Map<String, String> {
+
+    private fun headersFor(ts: String, signature: String, bearer: String?): Map<String, String> {
         val h = mutableMapOf(
             "user-agent" to CS_USER_AGENT,
             "accept" to "application/json",
@@ -507,76 +378,37 @@ class MovieBoxProvider : MainAPI() {
             "x-client-info" to clientInfo(),
             "x-client-status" to "0"
         )
-
-        if (!bearer.isNullOrBlank()) {
-            h["authorization"] = "Bearer $bearer"
-        }
-
+        if (!bearer.isNullOrBlank()) h["authorization"] = "Bearer $bearer"
         return h
     }
 
-    private suspend fun getSigned(
-        path: String,
-        query: String,
-        bearer: String?
-    ): String? {
+    private suspend fun getSigned(path: String, query: String, bearer: String?): String? {
         val ts = System.currentTimeMillis().toString()
-
-        val pathWithQuery =
-            if (query.isBlank()) path else "$path?$query"
-
+        val pathWithQuery = if (query.isBlank()) path else "$path?$query"
         return try {
             app.get(
                 "$mainUrl$pathWithQuery",
-                headers = headersFor(
-                    ts,
-                    generateSignature(
-                        "GET",
-                        pathWithQuery,
-                        ts
-                    ),
-                    bearer
-                )
+                headers = headersFor(ts, generateSignature("GET", pathWithQuery, ts), bearer)
             ).text
         } catch (e: Exception) {
             null
         }
     }
 
-    private suspend fun postSigned(
-        path: String,
-        body: String,
-        bearer: String?
-    ): String? {
+    private suspend fun postSigned(path: String, body: String, bearer: String?): String? {
         val ts = System.currentTimeMillis().toString()
         val sig = generateSignature("POST", path, ts, body)
-
         return try {
             val res = app.post(
                 "$mainUrl$path",
-                headers = headersFor(
-                    ts,
-                    sig,
-                    bearer
-                ),
-                requestBody = body
-                    .toByteArray(Charsets.UTF_8)
-                    .toRequestBody(
-                        "application/json".toMediaTypeOrNull()
-                    )
+                headers = headersFor(ts, sig, bearer),
+                requestBody = body.toByteArray(Charsets.UTF_8)
+                    .toRequestBody("application/json".toMediaTypeOrNull())
             )
-
-            Log.d(
-                TAG,
-                "POST $path HTTP=${res.code} bytes=${res.text.length}"
-            )
-
+            Log.d(TAG, "POST $path HTTP=${res.code} bytes=${res.text.length}")
             if (res.code == 200) res.text else null
         } catch (e: Exception) {
-            Log.e(
-                TAG,
-                "POST $path gagal: ${e.javaClass.simpleName}: ${e.message}"
-            )
+            Log.e(TAG, "POST $path gagal: ${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }
@@ -588,113 +420,60 @@ class MovieBoxProvider : MainAPI() {
 
         val response = app.get(
             "$mainUrl$path?$query",
-            headers = headersFor(
-                ts,
-                generateSignature(
-                    "GET",
-                    "$path?$query",
-                    ts
-                ),
-                null
-            )
+            headers = headersFor(ts, generateSignature("GET", "$path?$query", ts), null)
         )
 
-        val xUserHeader =
-            response.headers["x-user"]
-                ?: return null
-
-        return """"token"\s*:\s*"([^"]+)""""
-            .toRegex()
-            .find(xUserHeader)
-            ?.groupValues
-            ?.get(1)
+        val xUserHeader = response.headers["x-user"] ?: return null
+        return """"token"\s*:\s*"([^"]+)"""".toRegex().find(xUserHeader)?.groupValues?.get(1)
     }
 
-    private suspend fun getPlaybackBearerToken(
-        profile: PlaybackSessionProfile
-    ): String? {
+    private suspend fun getPlaybackBearerToken(profile: PlaybackSessionProfile): String? {
         val ts = System.currentTimeMillis().toString()
         val path = "/wefeed-mobile-bff/tab/ranking-list"
         val query = "page=1&perPage=1&tabId=0"
-
-        val signature =
-            playbackGetSignature(
-                "$path?$query",
-                ts
-            )
+        val signature = playbackGetSignature("$path?$query", ts)
 
         return try {
             val response = app.get(
                 "$PLAYBACK_API_BASE$path?$query",
-                headers = playbackGuestHeaders(
-                    ts,
-                    signature,
-                    profile
-                )
+                headers = playbackGuestHeaders(ts, signature, profile)
             )
 
-            val xUserHeader =
-                response.headers["x-user"]
-                    ?: return null
-
+            val xUserHeader = response.headers["x-user"] ?: return null
             val xUser = JSONObject(xUserHeader)
+            val bearer = xUser.optString("token", "").ifBlank { return null }
 
-            val bearer =
-                xUser.optString("token", "")
-                    .ifBlank { return null }
+            val userIdValue = xUser.opt("userId")
+            val snakeUserIdValue = xUser.opt("user_id")
+            val sessionUserId = when {
+                userIdValue != null && userIdValue != JSONObject.NULL ->
+                    userIdValue.toString()
+                snakeUserIdValue != null && snakeUserIdValue != JSONObject.NULL ->
+                    snakeUserIdValue.toString()
+                else -> ""
+            }
 
-            val sessionUserId =
-                when {
-                    xUser.has("userId") &&
-                        xUser.opt("userId") != JSONObject.NULL ->
-                        xUser.opt("userId").toString()
-
-                    xUser.has("user_id") &&
-                        xUser.opt("user_id") != JSONObject.NULL ->
-                        xUser.opt("user_id").toString()
-
-                    else -> ""
-                }
-
-            val realUserId =
-                profile.identity.userId
-
+            val realUserId = profile.identity.userId
             val identityMatches =
                 realUserIdIsGuest(realUserId) ||
-                    (
-                        sessionUserId.isNotBlank() &&
-                            sessionUserId == realUserId
-                        )
+                    (sessionUserId.isNotBlank() && sessionUserId == realUserId)
 
             if (!identityMatches) {
-                Log.e(
-                    TAG,
-                    "[PLAYBACK] session user tidak cocok dengan runtime identity"
-                )
+                Log.e(TAG, "[PLAYBACK] session user tidak cocok dengan runtime identity")
                 null
             } else {
                 bearer
             }
         } catch (e: Exception) {
-            Log.e(
-                TAG,
-                "[PLAYBACK] gagal memperoleh bearer: ${e.javaClass.simpleName}: ${e.message}"
-            )
+            Log.e(TAG, "[PLAYBACK] gagal memperoleh bearer: ${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }
 
-    // ===============================================================
-    // MOVIEBOX CS3 V47 PLAYBACK
-    // ===============================================================
-
     private val modernPlaybackDeviceId: String by lazy {
         val bytes = ByteArray(16)
         java.security.SecureRandom().nextBytes(bytes)
-
-        bytes.joinToString("") {
-            "%02x".format(it)
-        }
+        bytes.joinToString("") { "%02x".format(it) }
     }
 
     private fun modernPlaybackClientInfo(): String =
@@ -706,10 +485,7 @@ class MovieBoxProvider : MainAPI() {
             .put("os_version", "14")
             .put("device_id", modernPlaybackDeviceId)
             .put("install_store", "official")
-            .put(
-                "gaid",
-                "1b2212c1-dadf-43c3-a0c8-bd6ce48ae22d"
-            )
+            .put("gaid", "1b2212c1-dadf-43c3-a0c8-bd6ce48ae22d")
             .put("brand", "Google")
             .put("model", "Pixel 8")
             .put("system_language", "en")
@@ -719,150 +495,76 @@ class MovieBoxProvider : MainAPI() {
             .put("sp_code", "")
             .toString()
 
-    private fun modernPlaybackCanonicalPath(
-        url: String
-    ): String {
+    private fun modernPlaybackCanonicalPath(url: String): String {
         val uri = URI(url)
+        val path = uri.path.orEmpty()
+        val query = uri.query.orEmpty()
+        if (query.isBlank()) return path
 
-        val path =
-            uri.path.orEmpty()
+        val sortedQuery = query
+            .split("&")
+            .filter { it.isNotBlank() }
+            .map { entry ->
+                val parts = entry.split("=", limit = 2)
+                parts[0] to parts.getOrElse(1) { "" }
+            }
+            .sortedBy { it.first }
+            .joinToString("&") { "${it.first}=${it.second}" }
 
-        val query =
-            uri.query.orEmpty()
-
-        if (query.isBlank()) {
-            return path
-        }
-
-        val sortedQuery =
-            query
-                .split("&")
-                .filter { it.isNotBlank() }
-                .map { entry ->
-                    val parts =
-                        entry.split(
-                            "=",
-                            limit = 2
-                        )
-
-                    parts[0] to
-                        parts.getOrElse(1) { "" }
-                }
-                .sortedBy { it.first }
-                .joinToString("&") {
-                    "${it.first}=${it.second}"
-                }
-
-        return if (sortedQuery.isBlank()) {
-            path
-        } else {
-            "$path?$sortedQuery"
-        }
+        return if (sortedQuery.isBlank()) path else "$path?$sortedQuery"
     }
 
-    private fun modernPlaybackSignature(
-        url: String,
-        ts: String
-    ): String {
-        val canonical =
-            listOf(
-                "GET",
-                "application/json",
-                "application/json",
-                "",
-                ts,
-                "",
-                modernPlaybackCanonicalPath(url)
-            ).joinToString("\n")
+    private fun modernPlaybackSignature(url: String, ts: String): String {
+        val canonical = listOf(
+            "GET",
+            "application/json",
+            "application/json",
+            "",
+            ts,
+            "",
+            modernPlaybackCanonicalPath(url)
+        ).joinToString("\n")
 
-        val mac =
-            Mac.getInstance("HmacMD5")
-
-        mac.init(
-            SecretKeySpec(
-                PLAYBACK_ALT_SECRET_BYTES,
-                "HmacMD5"
-            )
-        )
-
-        val signed =
-            mac.doFinal(
-                canonical.toByteArray(
-                    Charsets.UTF_8
-                )
-            )
-
-        return "$ts|2|${
-            Base64.encodeToString(
-                signed,
-                Base64.NO_WRAP
-            )
-        }"
+        val mac = Mac.getInstance("HmacMD5")
+        mac.init(SecretKeySpec(PLAYBACK_ALT_SECRET_BYTES, "HmacMD5"))
+        val signed = mac.doFinal(canonical.toByteArray(Charsets.UTF_8))
+        return "$ts|2|${Base64.encodeToString(signed, Base64.NO_WRAP)}"
     }
 
     private fun modernPlaybackHeaders(
         url: String,
         bearer: String? = null
     ): Map<String, String> {
-        val ts =
-            System.currentTimeMillis()
-                .toString()
-
-        val headers =
-            mutableMapOf(
-                "user-agent" to PLAYBACK_USER_AGENT,
-                "accept" to "application/json",
-                "content-type" to "application/json",
-                "connection" to "keep-alive",
-                "x-client-token" to generateGuestToken(ts),
-                "x-tr-signature" to
-                    modernPlaybackSignature(
-                        url,
-                        ts
-                    ),
-                "x-client-info" to
-                    modernPlaybackClientInfo(),
-                "x-client-status" to "0"
-            )
-
-        if (!bearer.isNullOrBlank()) {
-            headers["Authorization"] =
-                "Bearer $bearer"
-        }
-
+        val ts = System.currentTimeMillis().toString()
+        val headers = mutableMapOf(
+            "user-agent" to PLAYBACK_USER_AGENT,
+            "accept" to "application/json",
+            "content-type" to "application/json",
+            "connection" to "keep-alive",
+            "x-client-token" to generateGuestToken(ts),
+            "x-tr-signature" to modernPlaybackSignature(url, ts),
+            "x-client-info" to modernPlaybackClientInfo(),
+            "x-client-status" to "0"
+        )
+        if (!bearer.isNullOrBlank()) headers["Authorization"] = "Bearer $bearer"
         return headers
     }
 
     private suspend fun fetchModernPlaybackBearer(): String? {
         return try {
-            val response =
-                app.get(
-                    PLAYBACK_TOKEN_URL,
-                    headers =
-                        modernPlaybackHeaders(
-                            PLAYBACK_TOKEN_URL
-                        )
-                )
+            val response = app.get(
+                PLAYBACK_TOKEN_URL,
+                headers = modernPlaybackHeaders(PLAYBACK_TOKEN_URL)
+            )
 
-            val rawXUser =
-                response.headers["x-user"]
-
+            val rawXUser = response.headers["x-user"]
             if (rawXUser.isNullOrBlank()) {
-                Log.e(
-                    TAG,
-                    "[PLAYBACK-V47] x-user token header kosong HTTP=${response.code}"
-                )
+                Log.e(TAG, "[PLAYBACK-V47] x-user token header kosong HTTP=${response.code}")
                 null
             } else {
-                val token =
-                    JSONObject(rawXUser)
-                        .optString("token", "")
-
+                val token = JSONObject(rawXUser).optString("token", "")
                 if (token.isBlank()) {
-                    Log.e(
-                        TAG,
-                        "[PLAYBACK-V47] token anonymous kosong HTTP=${response.code}"
-                    )
+                    Log.e(TAG, "[PLAYBACK-V47] token anonymous kosong HTTP=${response.code}")
                     null
                 } else {
                     token
@@ -878,41 +580,26 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    private fun decodeEdgeUrlPrefix(
-        signCookie: String
-    ): String? {
-        val encoded =
-            Regex(
-                """Edge-Cache-Cookie=urlprefix=([^:;\s]+)""",
-                RegexOption.IGNORE_CASE
-            )
-                .find(signCookie)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.takeIf {
-                    it.isNotBlank()
-                }
-                ?: return null
+    private fun decodeEdgeUrlPrefix(signCookie: String): String? {
+        val encoded = Regex(
+            """Edge-Cache-Cookie=urlprefix=([^:;\s]+)""",
+            RegexOption.IGNORE_CASE
+        ).find(signCookie)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
 
         return try {
-            val normalized =
-                encoded
-                    .replace('_', '/')
-                    .replace('-', '+')
-                    .let {
-                        it + "=".repeat(
-                            (4 - it.length % 4) % 4
-                        )
-                    }
+            val normalized = encoded
+                .replace('_', '/')
+                .replace('-', '+')
+                .let { it + "=".repeat((4 - it.length % 4) % 4) }
 
-            val prefix =
-                String(
-                    Base64.decode(
-                        normalized,
-                        Base64.DEFAULT
-                    ),
-                    Charsets.UTF_8
-                ).trimEnd('/')
+            val prefix = String(
+                Base64.decode(normalized, Base64.DEFAULT),
+                Charsets.UTF_8
+            ).trimEnd('/')
 
             "$prefix/index.mpd"
         } catch (_: Exception) {
@@ -920,143 +607,74 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
-    private fun decodeCloudFrontPolicyResource(
-        signCookie: String
-    ): String? {
-        val encoded =
-            Regex(
-                """CloudFront-Policy=([^;]+)""",
-                RegexOption.IGNORE_CASE
-            )
-                .find(signCookie)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.takeIf {
-                    it.isNotBlank()
-                }
-                ?: return null
+    private fun decodeCloudFrontPolicyResource(signCookie: String): String? {
+        val encoded = Regex(
+            """CloudFront-Policy=([^;]+)""",
+            RegexOption.IGNORE_CASE
+        ).find(signCookie)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
 
         return try {
-            val normalized =
-                encoded
-                    .replace('-', '+')
-                    .replace('~', '/')
-                    .replace('_', '=')
-                    .let {
-                        it + "=".repeat(
-                            (4 - it.length % 4) % 4
-                        )
-                    }
+            val normalized = encoded
+                .replace('-', '+')
+                .replace('~', '/')
+                .replace('_', '=')
+                .let { it + "=".repeat((4 - it.length % 4) % 4) }
 
-            val policyJson =
-                String(
-                    Base64.decode(
-                        normalized,
-                        Base64.DEFAULT
-                    ),
-                    Charsets.UTF_8
-                )
+            val policyJson = String(
+                Base64.decode(normalized, Base64.DEFAULT),
+                Charsets.UTF_8
+            )
 
-            val resource =
-                JSONObject(policyJson)
-                    .optJSONArray("Statement")
-                    ?.optJSONObject(0)
-                    ?.optString("Resource")
-                    ?.trim()
-                    ?.takeIf {
-                        it.startsWith("http://") ||
-                            it.startsWith("https://")
-                    }
-                    ?: return null
+            val resource = JSONObject(policyJson)
+                .optJSONArray("Statement")
+                ?.optJSONObject(0)
+                ?.optString("Resource")
+                ?.trim()
+                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+                ?: return null
 
-            val base =
-                resource
-                    .trimEnd('*')
-                    .trimEnd('/')
-
-            if (
-                base.endsWith(
-                    ".mpd",
-                    ignoreCase = true
-                )
-            ) {
-                base
-            } else {
-                "$base/index.mpd"
-            }
+            val base = resource.trimEnd('*').trimEnd('/')
+            if (base.endsWith(".mpd", ignoreCase = true)) base else "$base/index.mpd"
         } catch (_: Exception) {
             null
         }
     }
 
-    private fun extractPlaybackPolicyResource(
-        signCookie: String?
-    ): String? {
-        if (signCookie.isNullOrBlank()) {
-            return null
-        }
-
+    private fun extractPlaybackPolicyResource(signCookie: String?): String? {
+        if (signCookie.isNullOrBlank()) return null
         return decodeEdgeUrlPrefix(signCookie)
-            ?: decodeCloudFrontPolicyResource(
-                signCookie
-            )
+            ?: decodeCloudFrontPolicyResource(signCookie)
     }
 
-    private fun highestPlaybackQuality(
-        resolutions: String?
-    ): Int? =
+    private fun highestPlaybackQuality(resolutions: String?): Int? =
         Regex("""\d{3,4}""")
             .findAll(resolutions.orEmpty())
-            .mapNotNull {
-                it.value.toIntOrNull()
-            }
-            .filter {
-                it in 144..4320
-            }
+            .mapNotNull { it.value.toIntOrNull() }
+            .filter { it in 144..4320 }
             .maxOrNull()
 
-    private fun playbackLinkType(
-        format: String?,
-        url: String
-    ): ExtractorLinkType {
-        val lowerUrl =
-            url.lowercase()
-
+    private fun playbackLinkType(format: String?, url: String): ExtractorLinkType {
+        val lowerUrl = url.lowercase()
         return when {
             lowerUrl.contains(".mpd") ||
-                format.equals(
-                    "dash",
-                    ignoreCase = true
-                ) ->
-                ExtractorLinkType.DASH
+                format.equals("dash", ignoreCase = true) -> ExtractorLinkType.DASH
 
             lowerUrl.contains(".m3u8") ||
-                format.equals(
-                    "hls",
-                    ignoreCase = true
-                ) ->
-                ExtractorLinkType.M3U8
+                format.equals("hls", ignoreCase = true) -> ExtractorLinkType.M3U8
 
-            else ->
-                ExtractorLinkType.VIDEO
+            else -> ExtractorLinkType.VIDEO
         }
     }
 
-    private fun isPlaybackNotice(
-        url: String
-    ): Boolean {
-        val lower =
-            url.lowercase()
-
-        return lower.contains(
-            "b164fbfb4347792950bdfbfb563d39d9"
-        ) ||
-            lower.contains(
-                "1c7de0bd3393702d9191801f15f88f8d"
-            ) ||
-            lower.contains(
-                "9a0461bc39da389663bf3dbb17091d3f"
-            ) ||
+    private fun isPlaybackNotice(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("b164fbfb4347792950bdfbfb563d39d9") ||
+            lower.contains("1c7de0bd3393702d9191801f15f88f8d") ||
+            lower.contains("9a0461bc39da389663bf3dbb17091d3f") ||
             lower.contains("/other/2026/09/") ||
             lower.contains("/notice.mp4") ||
             lower.contains("upgrade-notice")
@@ -1074,227 +692,86 @@ class MovieBoxProvider : MainAPI() {
         stream: StreamItem,
         dataCookie: String?
     ): ResolvedPlaybackStream? {
-        val originalUrl =
-            stream.url
-                ?.trim()
-                ?.takeIf {
-                    it.isNotBlank()
-                }
-                ?: return null
+        val originalUrl = stream.url?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        val cookie = stream.signCookie
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: dataCookie?.trim()?.takeIf { it.isNotBlank() }
 
-        val cookie =
-            stream.signCookie
-                ?.trim()
-                ?.takeIf {
-                    it.isNotBlank()
-                }
-                ?: dataCookie
-                    ?.trim()
-                    ?.takeIf {
-                        it.isNotBlank()
-                    }
-
-        val resolvedUrl =
-            extractPlaybackPolicyResource(
-                cookie
-            ) ?: originalUrl
-
-        if (isPlaybackNotice(resolvedUrl)) {
-            return null
-        }
+        val resolvedUrl = extractPlaybackPolicyResource(cookie) ?: originalUrl
+        if (isPlaybackNotice(resolvedUrl)) return null
 
         return ResolvedPlaybackStream(
             stream = stream,
             url = resolvedUrl,
             cookie = cookie,
-            type = playbackLinkType(
-                stream.format,
-                resolvedUrl
-            ),
-            quality =
-                highestPlaybackQuality(
-                    stream.resolutions
-                )
+            type = playbackLinkType(stream.format, resolvedUrl),
+            quality = highestPlaybackQuality(stream.resolutions)
         )
     }
-    private fun subjectToSearchResponse(
-        o: JSONObject
-    ): SearchResponse? {
-        val subjectId =
-            o.optString("subjectId", "")
 
-        val title =
-            o.optString("title", "")
+    private fun subjectToSearchResponse(o: JSONObject): SearchResponse? {
+        val subjectId = o.optString("subjectId", "")
+        val title = o.optString("title", "")
+        if (subjectId.isBlank() || title.isBlank()) return null
 
-        if (
-            subjectId.isBlank() ||
-            title.isBlank()
-        ) {
-            return null
-        }
+        val type = o.optInt("subjectType", 1)
+        if (type != 1 && type != 2) return null
 
-        val type =
-            o.optInt("subjectType", 1)
-
-        if (
-            type != 1 &&
-            type != 2
-        ) {
-            return null
-        }
-
-        val poster =
-            o.optJSONObject("cover")
-                ?.optString("url")
-                .orEmpty()
-
-        val detailUrl =
-            "$mainUrl/detail?id=$subjectId"
+        val poster = o.optJSONObject("cover")?.optString("url").orEmpty()
+        val detailUrl = "$mainUrl/detail?id=$subjectId"
 
         return if (type == 2) {
-            newTvSeriesSearchResponse(
-                title,
-                detailUrl,
-                TvType.TvSeries
-            ) {
-                posterUrl = poster
+            newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
+                this.posterUrl = poster
             }
         } else {
-            newMovieSearchResponse(
-                title,
-                detailUrl,
-                TvType.Movie
-            ) {
-                posterUrl = poster
+            newMovieSearchResponse(title, detailUrl, TvType.Movie) {
+                this.posterUrl = poster
             }
         }
     }
 
-    private fun parseSearchResults(
-        rawJson: String?
-    ): List<SearchResponse> {
-        if (rawJson.isNullOrBlank()) {
-            return emptyList()
-        }
-
+    private fun parseSearchResults(rawJson: String?): List<SearchResponse> {
+        if (rawJson.isNullOrBlank()) return emptyList()
         return try {
-            val root =
-                JSONObject(rawJson)
-
-            val code =
-                root.optInt("code", -1)
-
-            val data =
-                root.optJSONObject("data")
-
-            val results =
-                data?.optJSONArray("results")
-
-            val out =
-                mutableListOf<SearchResponse>()
-
-            val seen =
-                mutableSetOf<String>()
-
-            for (
-                i in 0 until
-                    (results?.length() ?: 0)
-            ) {
-                val subjects =
-                    results!!
-                        .optJSONObject(i)
-                        ?.optJSONArray("subjects")
-                        ?: continue
-
-                for (
-                    j in 0 until subjects.length()
-                ) {
-                    val obj =
-                        subjects.optJSONObject(j)
-                            ?: continue
-
-                    if (
-                        !seen.add(
-                            obj.optString(
-                                "subjectId",
-                                ""
-                            )
-                        )
-                    ) {
-                        continue
-                    }
-
-                    subjectToSearchResponse(obj)
-                        ?.let {
-                            out.add(it)
-                        }
+            val root = JSONObject(rawJson)
+            val code = root.optInt("code", -1)
+            val data = root.optJSONObject("data")
+            val results = data?.optJSONArray("results")
+            val out = mutableListOf<SearchResponse>()
+            val seen = mutableSetOf<String>()
+            for (i in 0 until (results?.length() ?: 0)) {
+                val subjects = results!!.optJSONObject(i)?.optJSONArray("subjects") ?: continue
+                for (j in 0 until subjects.length()) {
+                    val obj = subjects.optJSONObject(j) ?: continue
+                    if (!seen.add(obj.optString("subjectId", ""))) continue
+                    subjectToSearchResponse(obj)?.let { out.add(it) }
                 }
             }
-
-            Log.d(
-                TAG,
-                "[SEARCH] code=$code groups=${results?.length() ?: 0} mapped=${out.size}"
-            )
-
+            Log.d(TAG, "[SEARCH] code=$code groups=${results?.length() ?: 0} mapped=${out.size}")
             out
         } catch (e: Exception) {
-            Log.e(
-                TAG,
-                "[SEARCH] parse gagal: ${e.javaClass.simpleName}: ${e.message}"
-            )
-
+            Log.e(TAG, "[SEARCH] parse gagal: ${e.javaClass.simpleName}: ${e.message}")
             emptyList()
         }
     }
 
-    private fun parseRecommendations(
-        rawJson: String?
-    ): List<SearchResponse> {
-        if (rawJson.isNullOrBlank()) {
-            return emptyList()
-        }
-
+    private fun parseRecommendations(rawJson: String?): List<SearchResponse> {
+        if (rawJson.isNullOrBlank()) return emptyList()
         return try {
-            val root =
-                JSONObject(rawJson)
-
-            val code =
-                root.optInt("code", -1)
-
-            val items =
-                root.optJSONObject("data")
-                    ?.optJSONArray("items")
-
-            val out =
-                mutableListOf<SearchResponse>()
-
-            for (
-                i in 0 until
-                    (items?.length() ?: 0)
-            ) {
-                val obj =
-                    items!!
-                        .optJSONObject(i)
-                        ?: continue
-
-                subjectToSearchResponse(obj)
-                    ?.let {
-                        out.add(it)
-                    }
+            val root = JSONObject(rawJson)
+            val code = root.optInt("code", -1)
+            val items = root.optJSONObject("data")?.optJSONArray("items")
+            val out = mutableListOf<SearchResponse>()
+            for (i in 0 until (items?.length() ?: 0)) {
+                val obj = items!!.optJSONObject(i) ?: continue
+                subjectToSearchResponse(obj)?.let { out.add(it) }
             }
-
-            Log.d(
-                TAG,
-                "[RECOMMEND] code=$code items=${items?.length() ?: 0} mapped=${out.size}"
-            )
-
+            Log.d(TAG, "[RECOMMEND] code=$code items=${items?.length() ?: 0} mapped=${out.size}")
             out
         } catch (e: Exception) {
-            Log.e(
-                TAG,
-                "[RECOMMEND] parse gagal: ${e.javaClass.simpleName}: ${e.message}"
-            )
-
+            Log.e(TAG, "[RECOMMEND] parse gagal: ${e.javaClass.simpleName}: ${e.message}")
             emptyList()
         }
     }
@@ -1303,277 +780,105 @@ class MovieBoxProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse? {
-        if (
-            request.data.startsWith(
-                FILTER_PREFIX
-            )
-        ) {
-            return filterPage(
-                page,
-                request
-            )
-        }
+        if (request.data.startsWith(FILTER_PREFIX)) return filterPage(page, request)
 
-        Log.d(
-            TAG,
-            "[CATEGORY] name=${request.name} categoryType=${request.data} page=$page"
+        Log.d(TAG, "[CATEGORY] name=${request.name} categoryType=${request.data} page=$page")
+        val bearerToken = getBearerToken() ?: return null
+        val ts = System.currentTimeMillis().toString()
+        val path = "/wefeed-mobile-bff/tab/ranking-list"
+        val query = "categoryType=${request.data}&page=$page&perPage=10&tabId=0"
+
+        val response = app.get(
+            "$mainUrl$path?$query",
+            headers = headersFor(ts, generateSignature("GET", "$path?$query", ts), bearerToken)
         )
 
-        val bearerToken =
-            getBearerToken()
-                ?: return null
+        val jsonRes = response.parsedSafe<RankingResponse>() ?: return null
+        val dataObj = jsonRes.data ?: return null
+        dataObj.categoryList?.let { rememberCategories(it) }
 
-        val ts =
-            System.currentTimeMillis()
-                .toString()
+        val homeItems = dataObj.subjects?.mapNotNull { item ->
+            val subjectId = item.subjectId ?: return@mapNotNull null
+            val title = item.title ?: "Unknown"
+            val posterUrl = item.cover?.url ?: ""
+            val detailUrl = "$mainUrl/detail?id=$subjectId"
 
-        val path =
-            "/wefeed-mobile-bff/tab/ranking-list"
-
-        val query =
-            "categoryType=${request.data}&page=$page&perPage=10&tabId=0"
-
-        val response =
-            app.get(
-                "$mainUrl$path?$query",
-                headers =
-                    headersFor(
-                        ts,
-                        generateSignature(
-                            "GET",
-                            "$path?$query",
-                            ts
-                        ),
-                        bearerToken
-                    )
-            )
-
-        val jsonRes =
-            response.parsedSafe<RankingResponse>()
-                ?: return null
-
-        val dataObj =
-            jsonRes.data
-                ?: return null
-
-        dataObj.categoryList
-            ?.let {
-                rememberCategories(it)
-            }
-
-        val homeItems =
-            dataObj.subjects
-                ?.mapNotNull { item ->
-                    val subjectId =
-                        item.subjectId
-                            ?: return@mapNotNull null
-
-                    val title =
-                        item.title
-                            ?: "Unknown"
-
-                    val posterUrl =
-                        item.cover?.url
-                            ?: ""
-
-                    val detailUrl =
-                        "$mainUrl/detail?id=$subjectId"
-
-                    if (
-                        (item.subjectType ?: 1) == 2
-                    ) {
-                        newTvSeriesSearchResponse(
-                            title,
-                            detailUrl,
-                            TvType.TvSeries
-                        ) {
-                            this.posterUrl =
-                                posterUrl
-                        }
-                    } else {
-                        newMovieSearchResponse(
-                            title,
-                            detailUrl,
-                            TvType.Movie
-                        ) {
-                            this.posterUrl =
-                                posterUrl
-                        }
-                    }
+            if ((item.subjectType ?: 1) == 2) {
+                newTvSeriesSearchResponse(title, detailUrl, TvType.TvSeries) {
+                    this.posterUrl = posterUrl
                 }
-                ?: emptyList()
+            } else {
+                newMovieSearchResponse(title, detailUrl, TvType.Movie) {
+                    this.posterUrl = posterUrl
+                }
+            }
+        } ?: emptyList()
 
-        val first =
-            dataObj.subjects
-                ?.firstOrNull()
-
-        Log.d(
-            TAG,
-            "[CATEGORY] name=${request.name} HTTP=${response.code} " +
+        val first = dataObj.subjects?.firstOrNull()
+        Log.d(TAG, "[CATEGORY] name=${request.name} HTTP=${response.code} " +
                 "subjects=${homeItems.size} firstSubjectId=${first?.subjectId} " +
-                "firstTitle=${first?.title}"
-        )
+                "firstTitle=${first?.title}")
 
-        return newHomePageResponse(
-            request.name,
-            homeItems
-        )
+        return newHomePageResponse(request.name, homeItems)
     }
 
-    private suspend fun filterPage(
-        page: Int,
-        request: MainPageRequest
-    ): HomePageResponse? {
-        val spec =
-            request.data.removePrefix(
-                FILTER_PREFIX
-            )
+    private suspend fun filterPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        val spec = request.data.removePrefix(FILTER_PREFIX)
+        Log.d(TAG, "[CATEGORY] name=${request.name} filter=$spec page=$page")
 
-        Log.d(
-            TAG,
-            "[CATEGORY] name=${request.name} filter=$spec page=$page"
-        )
-
-        val bearerToken =
-            getBearerToken()
-                ?: return null
-
-        val body =
-            JSONObject()
-                .put("page", page)
-                .put("perPage", 10)
-
-        spec.split("&")
-            .forEach { pair ->
-                val kv =
-                    pair.split(
-                        "=",
-                        limit = 2
-                    )
-
-                if (
-                    kv.size == 2 &&
-                    kv[0].isNotBlank()
-                ) {
-                    val v = kv[1]
-
-                    if (
-                        v.toIntOrNull() != null
-                    ) {
-                        body.put(
-                            kv[0],
-                            v.toInt()
-                        )
-                    } else {
-                        body.put(
-                            kv[0],
-                            v
-                        )
-                    }
-                }
+        val bearerToken = getBearerToken() ?: return null
+        val body = JSONObject().put("page", page).put("perPage", 10)
+        spec.split("&").forEach { pair ->
+            val kv = pair.split("=", limit = 2)
+            if (kv.size == 2 && kv[0].isNotBlank()) {
+                val v = kv[1]
+                if (v.toIntOrNull() != null) body.put(kv[0], v.toInt()) else body.put(kv[0], v)
             }
-
-        val raw =
-            postSigned(
-                "/wefeed-mobile-bff/subject-api/list",
-                body.toString(),
-                bearerToken
-            )
-                ?: return null
-
-        val items =
-            try {
-                JSONObject(raw)
-                    .optJSONObject("data")
-                    ?.optJSONArray("items")
-            } catch (e: Exception) {
-                Log.e(
-                    TAG,
-                    "[CATEGORY] parse filter gagal: ${e.javaClass.simpleName}: ${e.message}"
-                )
-                null
-            }
-
-        val out =
-            mutableListOf<SearchResponse>()
-
-        for (
-            i in 0 until
-                (items?.length() ?: 0)
-        ) {
-            val obj =
-                items!!
-                    .optJSONObject(i)
-                    ?: continue
-
-            subjectToSearchResponse(obj)
-                ?.let {
-                    out.add(it)
-                }
         }
 
-        Log.d(
-            TAG,
-            "[CATEGORY] name=${request.name} items=${items?.length() ?: 0} mapped=${out.size} " +
-                "firstTitle=${items?.optJSONObject(0)?.optString("title")}"
-        )
+        val raw = postSigned("/wefeed-mobile-bff/subject-api/list", body.toString(), bearerToken)
+            ?: return null
 
-        return newHomePageResponse(
-            request.name,
-            out
-        )
+        val items = try {
+            JSONObject(raw).optJSONObject("data")?.optJSONArray("items")
+        } catch (e: Exception) {
+            Log.e(TAG, "[CATEGORY] parse filter gagal: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+
+        val out = mutableListOf<SearchResponse>()
+        for (i in 0 until (items?.length() ?: 0)) {
+            val obj = items!!.optJSONObject(i) ?: continue
+            subjectToSearchResponse(obj)?.let { out.add(it) }
+        }
+
+        Log.d(TAG, "[CATEGORY] name=${request.name} items=${items?.length() ?: 0} mapped=${out.size} " +
+                "firstTitle=${items?.optJSONObject(0)?.optString("title")}")
+
+        return newHomePageResponse(request.name, out)
     }
 
-    override suspend fun search(
-        query: String
-    ): List<SearchResponse> {
-        Log.d(
-            TAG,
-            "[SEARCH] keyword=$query"
-        )
-
-        val bearerToken =
-            getBearerToken()
-
+    override suspend fun search(query: String): List<SearchResponse> {
+        Log.d(TAG, "[SEARCH] keyword=$query")
+        val bearerToken = getBearerToken()
         if (bearerToken == null) {
-            Log.e(
-                TAG,
-                "[SEARCH] bearer token null"
-            )
-
+            Log.e(TAG, "[SEARCH] bearer token null")
             return emptyList()
         }
+        val body = JSONObject()
+            .put("page", 1)
+            .put("perPage", 10)
+            .put("keyword", query)
+            .put("tabId", "")
+            .toString()
 
-        val body =
-            JSONObject()
-                .put("page", 1)
-                .put("perPage", 10)
-                .put("keyword", query)
-                .put("tabId", "")
-                .toString()
-
-        val raw =
-            postSigned(
-                "/wefeed-mobile-bff/subject-api/search/v2",
-                body,
-                bearerToken
-            )
-
-        val out =
-            parseSearchResults(raw)
-
-        Log.d(
-            TAG,
-            "[SEARCH] returning=${out.size}"
-        )
-
+        val raw = postSigned("/wefeed-mobile-bff/subject-api/search/v2", body, bearerToken)
+        val out = parseSearchResults(raw)
+        Log.d(TAG, "[SEARCH] returning=${out.size}")
         return out
     }
 
-    override suspend fun quickSearch(
-        query: String
-    ): List<SearchResponse> =
-        search(query)
+    override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     data class EpData(
         val subjectId: String,
@@ -1582,55 +887,24 @@ class MovieBoxProvider : MainAPI() {
         val subjectType: Int = 1
     )
 
-    private suspend fun fetchRecommendations(
-        subjectId: String,
-        bearer: String?
-    ): List<SearchResponse> {
-        Log.d(
-            TAG,
-            "[RECOMMEND] subjectId=$subjectId"
-        )
-
-        val body =
-            JSONObject()
-                .put("subjectId", subjectId)
-                .put("page", 1)
-                .put("perPage", 6)
-                .toString()
-
-        val raw =
-            postSigned(
-                "/wefeed-mobile-bff/subject-api/detail-rec",
-                body,
-                bearer
-            )
-
-        val out =
-            parseRecommendations(raw)
-                .filterNot {
-                    it.url
-                        .substringAfter("id=")
-                        .substringBefore("&") ==
-                        subjectId
-                }
-
-        Log.d(
-            TAG,
-            "[RECOMMEND] returning=${out.size}"
-        )
-
+    private suspend fun fetchRecommendations(subjectId: String, bearer: String?): List<SearchResponse> {
+        Log.d(TAG, "[RECOMMEND] subjectId=$subjectId")
+        val body = JSONObject()
+            .put("subjectId", subjectId)
+            .put("page", 1)
+            .put("perPage", 6)
+            .toString()
+        val raw = postSigned("/wefeed-mobile-bff/subject-api/detail-rec", body, bearer)
+        val out = parseRecommendations(raw)
+            .filterNot { it.url.substringAfter("id=").substringBefore("&") == subjectId }
+        Log.d(TAG, "[RECOMMEND] returning=${out.size}")
         return out
     }
 
-    private fun normalizeTrailerTitle(
-        value: String?
-    ): String =
+    private fun normalizeTrailerTitle(value: String?): String =
         value.orEmpty()
             .lowercase()
-            .replace(
-                Regex("[^a-z0-9]+"),
-                " "
-            )
+            .replace(Regex("[^a-z0-9]+"), " ")
             .trim()
 
     private suspend fun resolveTmdbTrailer(
@@ -1638,183 +912,84 @@ class MovieBoxProvider : MainAPI() {
         year: Int?,
         subjectType: Int
     ): String? {
-        val mediaType =
-            if (subjectType == 2) {
-                "tv"
-            } else {
-                "movie"
-            }
-
-        val encodedTitle =
-            URLEncoder.encode(
-                title,
-                "UTF-8"
-            )
+        val mediaType = if (subjectType == 2) "tv" else "movie"
+        val encodedTitle = URLEncoder.encode(title, "UTF-8")
 
         return try {
             val searchUrl =
                 "https://api.themoviedb.org/3/search/$mediaType" +
                     "?api_key=$TMDB_API_KEY&query=$encodedTitle"
 
-            val search =
-                app.get(searchUrl)
-                    .parsedSafe<TmdbSearchResponse>()
+            val search = app.get(searchUrl).parsedSafe<TmdbSearchResponse>()
+            val wantedTitle = normalizeTrailerTitle(title)
 
-            val wantedTitle =
-                normalizeTrailerTitle(title)
+            val exactTitleMatches = search?.results.orEmpty().filter { item ->
+                val candidates = listOf(
+                    item.title,
+                    item.name,
+                    item.originalTitle,
+                    item.originalName
+                ).map(::normalizeTrailerTitle)
 
-            val exactTitleMatches =
-                search?.results
-                    .orEmpty()
-                    .filter { item ->
-                        val candidates =
-                            listOf(
-                                item.title,
-                                item.name,
-                                item.originalTitle,
-                                item.originalName
-                            )
-                                .map(
-                                    ::normalizeTrailerTitle
-                                )
+                candidates.any { it.isNotBlank() && it == wantedTitle }
+            }
 
-                        candidates.any {
-                            it.isNotBlank() &&
-                                it == wantedTitle
-                        }
+            val safeMatch = when {
+                exactTitleMatches.isEmpty() -> null
+                year != null -> {
+                    exactTitleMatches.firstOrNull { item ->
+                        val candidateYear =
+                            (item.releaseDate ?: item.firstAirDate)
+                                ?.take(4)
+                                ?.toIntOrNull()
+                        candidateYear == year
+                    } ?: exactTitleMatches.firstOrNull { item ->
+                        val candidateYear =
+                            (item.releaseDate ?: item.firstAirDate)
+                                ?.take(4)
+                                ?.toIntOrNull()
+                        candidateYear != null && kotlin.math.abs(candidateYear - year) <= 1
                     }
-
-            val safeMatch =
-                when {
-                    exactTitleMatches.isEmpty() ->
-                        null
-
-                    year != null ->
-                        exactTitleMatches.firstOrNull { item ->
-                            val candidateYear =
-                                (
-                                    item.releaseDate
-                                        ?: item.firstAirDate
-                                    )
-                                    ?.take(4)
-                                    ?.toIntOrNull()
-
-                            candidateYear == year
-                        }
-                            ?: exactTitleMatches.firstOrNull { item ->
-                                val candidateYear =
-                                    (
-                                        item.releaseDate
-                                            ?: item.firstAirDate
-                                        )
-                                        ?.take(4)
-                                        ?.toIntOrNull()
-
-                                candidateYear != null &&
-                                    kotlin.math.abs(
-                                        candidateYear - year
-                                    ) <= 1
-                            }
-
-                    else ->
-                        exactTitleMatches
-                            .firstOrNull()
                 }
+                else -> exactTitleMatches.firstOrNull()
+            }
 
             if (safeMatch == null) {
-                Log.d(
-                    TAG,
-                    "[TRAILER] TMDB safe match tidak ditemukan title=$title year=$year type=$mediaType"
-                )
-
+                Log.d(TAG, "[TRAILER] TMDB safe match tidak ditemukan title=$title year=$year type=$mediaType")
                 null
             } else {
                 val videosUrl =
                     "https://api.themoviedb.org/3/$mediaType/${safeMatch.id}/videos" +
                         "?api_key=$TMDB_API_KEY"
 
-                val videos =
-                    app.get(videosUrl)
-                        .parsedSafe<TmdbVideosResponse>()
-                        ?.results
-                        .orEmpty()
-                        .filter {
-                            it.site.equals(
-                                "YouTube",
-                                ignoreCase = true
-                            ) &&
-                                !it.key.isNullOrBlank() &&
-                                (
-                                    it.type.equals(
-                                        "Trailer",
-                                        ignoreCase = true
-                                    ) ||
-                                        it.type.equals(
-                                            "Teaser",
-                                            ignoreCase = true
-                                        )
-                                    )
-                        }
-
-                val picked =
-                    videos.maxByOrNull { video ->
-                        var score = 0
-
-                        if (
-                            video.type.equals(
-                                "Trailer",
-                                ignoreCase = true
+                val videos = app.get(videosUrl)
+                    .parsedSafe<TmdbVideosResponse>()
+                    ?.results
+                    .orEmpty()
+                    .filter {
+                        it.site.equals("YouTube", ignoreCase = true) &&
+                            !it.key.isNullOrBlank() &&
+                            (
+                                it.type.equals("Trailer", ignoreCase = true) ||
+                                it.type.equals("Teaser", ignoreCase = true)
                             )
-                        ) {
-                            score += 100
-                        }
-
-                        if (
-                            video.official == true
-                        ) {
-                            score += 50
-                        }
-
-                        val name =
-                            video.name.orEmpty()
-
-                        if (
-                            name.contains(
-                                "official trailer",
-                                ignoreCase = true
-                            )
-                        ) {
-                            score += 30
-                        } else if (
-                            name.contains(
-                                "trailer",
-                                ignoreCase = true
-                            )
-                        ) {
-                            score += 15
-                        }
-
-                        if (
-                            name.contains(
-                                "teaser",
-                                ignoreCase = true
-                            )
-                        ) {
-                            score += 5
-                        }
-
-                        score
                     }
 
-                val ytKey =
-                    picked?.key
+                val picked = videos.maxByOrNull { video ->
+                    var score = 0
+                    if (video.type.equals("Trailer", ignoreCase = true)) score += 100
+                    if (video.official == true) score += 50
 
+                    val name = video.name.orEmpty()
+                    if (name.contains("official trailer", ignoreCase = true)) score += 30
+                    else if (name.contains("trailer", ignoreCase = true)) score += 15
+                    if (name.contains("teaser", ignoreCase = true)) score += 5
+                    score
+                }
+
+                val ytKey = picked?.key
                 if (ytKey.isNullOrBlank()) {
-                    Log.d(
-                        TAG,
-                        "[TRAILER] TMDB match ada tetapi trailer YouTube tidak ditemukan id=${safeMatch.id}"
-                    )
-
+                    Log.d(TAG, "[TRAILER] TMDB match ada tetapi trailer YouTube tidak ditemukan id=${safeMatch.id}")
                     null
                 } else {
                     Log.d(
@@ -1822,300 +997,116 @@ class MovieBoxProvider : MainAPI() {
                         "[TRAILER] TMDB trailer id=${safeMatch.id} type=${picked.type} " +
                             "official=${picked.official == true} keyHash12=${md5(ytKey).take(12)}"
                     )
-
                     "https://www.youtube.com/watch?v=$ytKey"
                 }
             }
         } catch (e: Exception) {
-            Log.e(
-                TAG,
-                "[TRAILER] TMDB resolver gagal: ${e.javaClass.simpleName}: ${e.message}"
-            )
-
+            Log.e(TAG, "[TRAILER] TMDB resolver gagal: ${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }
 
-        override suspend fun load(
-        url: String
-    ): LoadResponse? {
-        val cleanId =
-            when {
-                url.contains("id=") ->
-                    url
-                        .substringAfter("id=")
-                        .substringBefore("&")
+    override suspend fun load(url: String): LoadResponse? {
+        val cleanId = when {
+            url.contains("id=") -> url.substringAfter("id=").substringBefore("&")
+            url.contains("/") -> url.substringAfterLast("/").substringBefore("?")
+            else -> url.trim()
+        }
 
-                url.contains("/") ->
-                    url
-                        .substringAfterLast("/")
-                        .substringBefore("?")
+        val bearerToken = getBearerToken() ?: return null
+        val ts = System.currentTimeMillis().toString()
+        val pathGet = "/wefeed-mobile-bff/subject-api/get"
+        val queryGet = "subjectId=$cleanId"
 
-                else ->
-                    url.trim()
-            }
+        val responseGet = app.get(
+            "$mainUrl$pathGet?$queryGet",
+            headers = headersFor(ts, generateSignature("GET", "$pathGet?$queryGet", ts), bearerToken)
+        )
 
-        val bearerToken =
-            getBearerToken()
-                ?: return null
+        val detailRes = responseGet.parsedSafe<SubjectDetailResponse>()
+        val subject = detailRes?.data ?: return null
 
-        val ts =
-            System.currentTimeMillis()
-                .toString()
+        val displayTitle = subject.title ?: "MovieBox Content"
+        val poster = subject.cover?.url
+        val typeInt = subject.subjectType ?: 1
+        val description = subject.description
+        val yearInt = subject.releaseDate?.take(4)?.toIntOrNull()
+        val ratingStr = subject.imdbRatingValue ?: subject.imdbRate
+        val trailerUrl = resolveTmdbTrailer(displayTitle, yearInt, typeInt)
+        val genreTags = subject.genre?.split(",")?.map { it.trim() } ?: emptyList()
 
-        val pathGet =
-            "/wefeed-mobile-bff/subject-api/get"
-
-        val queryGet =
-            "subjectId=$cleanId"
-
-        val responseGet =
-            app.get(
-                "$mainUrl$pathGet?$queryGet",
-                headers =
-                    headersFor(
-                        ts,
-                        generateSignature(
-                            "GET",
-                            "$pathGet?$queryGet",
-                            ts
-                        ),
-                        bearerToken
-                    )
+        val castActors = subject.staffList?.mapNotNull { staff ->
+            val staffName = staff.name ?: return@mapNotNull null
+            ActorData(
+                actor = Actor(staffName, staff.avatarUrl),
+                roleString = staff.character
             )
+        } ?: emptyList()
 
-        val detailRes =
-            responseGet
-                .parsedSafe<SubjectDetailResponse>()
+        val recs = fetchRecommendations(cleanId, bearerToken)
+        val tsSeason = System.currentTimeMillis().toString()
+        val pathSeason = "/wefeed-mobile-bff/subject-api/season-info"
+        val querySeason = "subjectId=$cleanId"
 
-        val subject =
-            detailRes?.data
-                ?: return null
+        val responseSeason = app.get(
+            "$mainUrl$pathSeason?$querySeason",
+            headers = headersFor(tsSeason, generateSignature("GET", "$pathSeason?$querySeason", tsSeason), bearerToken)
+        )
 
-        val displayTitle =
-            subject.title
-                ?: "MovieBox Content"
-
-        val poster =
-            subject.cover?.url
-
-        val typeInt =
-            subject.subjectType
-                ?: 1
-
-        val description =
-            subject.description
-
-        val yearInt =
-            subject.releaseDate
-                ?.take(4)
-                ?.toIntOrNull()
-
-        val ratingStr =
-            subject.imdbRatingValue
-                ?: subject.imdbRate
-
-        val trailerUrl =
-            resolveTmdbTrailer(
-                displayTitle,
-                yearInt,
-                typeInt
-            )
-
-        val genreTags =
-            subject.genre
-                ?.split(",")
-                ?.map {
-                    it.trim()
-                }
-                ?: emptyList()
-
-        val castActors =
-            subject.staffList
-                ?.mapNotNull { staff ->
-                    val staffName =
-                        staff.name
-                            ?: return@mapNotNull null
-
-                    ActorData(
-                        actor =
-                            Actor(
-                                staffName,
-                                staff.avatarUrl
-                            ),
-                        roleString =
-                            staff.character
-                    )
-                }
-                ?: emptyList()
-
-        val recs =
-            fetchRecommendations(
-                cleanId,
-                bearerToken
-            )
-
-        val tsSeason =
-            System.currentTimeMillis()
-                .toString()
-
-        val pathSeason =
-            "/wefeed-mobile-bff/subject-api/season-info"
-
-        val querySeason =
-            "subjectId=$cleanId"
-
-        val responseSeason =
-            app.get(
-                "$mainUrl$pathSeason?$querySeason",
-                headers =
-                    headersFor(
-                        tsSeason,
-                        generateSignature(
-                            "GET",
-                            "$pathSeason?$querySeason",
-                            tsSeason
-                        ),
-                        bearerToken
-                    )
-            )
-
-        val seasonRes =
-            responseSeason
-                .parsedSafe<SeasonInfoResponse>()
-
-        val seasons =
-            seasonRes
-                ?.data
-                ?.seasons
-
-        val episodesList =
-            mutableListOf<Episode>()
+        val seasonRes = responseSeason.parsedSafe<SeasonInfoResponse>()
+        val seasons = seasonRes?.data?.seasons
+        val episodesList = mutableListOf<Episode>()
 
         seasons?.forEach { seasonItem ->
-            val seNum =
-                seasonItem.se
-                    ?: 1
+            val seNum = seasonItem.se ?: 1
+            val maxEp = seasonItem.maxEp ?: 1
 
-            val maxEp =
-                seasonItem.maxEp
-                    ?: 1
-
-            for (
-                epNum in 1..maxEp
-            ) {
+            for (epNum in 1..maxEp) {
                 episodesList.add(
-                    newEpisode(
-                        EpData(
-                            cleanId,
-                            seNum,
-                            epNum,
-                            typeInt
-                        )
-                    ) {
-                        name =
-                            "Episode $epNum"
-
-                        season =
-                            seNum
-
-                        episode =
-                            epNum
+                    newEpisode(EpData(cleanId, seNum, epNum, typeInt)) {
+                        this.name = "Episode $epNum"
+                        this.season = seNum
+                        this.episode = epNum
                     }
                 )
             }
         }
 
-        val isSeries =
-            typeInt == 2 ||
-                episodesList.size > 1
+        val isSeries = typeInt == 2 || episodesList.size > 1
 
         return if (isSeries) {
             if (episodesList.isEmpty()) {
                 episodesList.add(
-                    newEpisode(
-                        EpData(
-                            cleanId,
-                            1,
-                            1,
-                            2
-                        )
-                    ) {
-                        name = "Episode 1"
-                        season = 1
-                        episode = 1
+                    newEpisode(EpData(cleanId, 1, 1, 2)) {
+                        this.name = "Episode 1"
+                        this.season = 1
+                        this.episode = 1
                     }
                 )
             }
-
-            newTvSeriesLoadResponse(
-                displayTitle,
-                url,
-                TvType.TvSeries,
-                episodesList
-            ) {
-                posterUrl = poster
-                plot = description
-                year = yearInt
-                score =
-                    Score.from(
-                        ratingStr,
-                        10
-                    )
-                actors = castActors
-                tags = genreTags
-                recommendations = recs
-
-                if (
-                    !trailerUrl.isNullOrBlank()
-                ) {
-                    trailers.add(
-                        TrailerData(
-                            extractorUrl =
-                                trailerUrl,
-                            referer = null,
-                            raw = false
-                        )
-                    )
+            newTvSeriesLoadResponse(displayTitle, url, TvType.TvSeries, episodesList) {
+                this.posterUrl = poster
+                this.plot = description
+                this.year = yearInt
+                this.score = Score.from(ratingStr, 10)
+                this.actors = castActors
+                this.tags = genreTags
+                this.recommendations = recs
+                if (!trailerUrl.isNullOrBlank()) {
+                    this.trailers.add(TrailerData(extractorUrl = trailerUrl, referer = null, raw = false))
                 }
             }
         } else {
-            newMovieLoadResponse(
-                displayTitle,
-                url,
-                TvType.Movie,
-                EpData(
-                    cleanId,
-                    0,
-                    0,
-                    1
-                )
-            ) {
-                posterUrl = poster
-                plot = description
-                year = yearInt
-
-                score =
-                    Score.from(
-                        ratingStr,
-                        10
-                    )
-
-                actors = castActors
-                tags = genreTags
-                recommendations = recs
-
-                if (
-                    !trailerUrl.isNullOrBlank()
-                ) {
-                    trailers.add(
-                        TrailerData(
-                            extractorUrl =
-                                trailerUrl,
-                            referer = null,
-                            raw = false
-                        )
-                    )
+            newMovieLoadResponse(displayTitle, url, TvType.Movie, EpData(cleanId, 0, 0, 1)) {
+                this.posterUrl = poster
+                this.plot = description
+                this.year = yearInt
+                this.score = Score.from(ratingStr, 10)
+                this.actors = castActors
+                this.tags = genreTags
+                this.recommendations = recs
+                if (!trailerUrl.isNullOrBlank()) {
+                    this.trailers.add(TrailerData(extractorUrl = trailerUrl, referer = null, raw = false))
                 }
             }
         }
@@ -2127,81 +1118,28 @@ class MovieBoxProvider : MainAPI() {
         bearer: String?,
         subtitleCallback: (SubtitleFile) -> Unit
     ) {
-        if (streamId.isNullOrBlank()) {
-            return
-        }
-
-        val raw =
-            getSigned(
-                "/wefeed-mobile-bff/subject-api/get-stream-captions",
-                "streamId=$streamId&subjectId=$subjectId",
-                bearer
-            )
-                ?: return
-
+        if (streamId.isNullOrBlank()) return
+        val raw = getSigned(
+            "/wefeed-mobile-bff/subject-api/get-stream-captions",
+            "streamId=$streamId&subjectId=$subjectId",
+            bearer
+        ) ?: return
         try {
-            val caps =
-                JSONObject(raw)
-                    .optJSONObject("data")
-                    ?.optJSONArray(
-                        "extCaptions"
-                    )
-
+            val caps = JSONObject(raw).optJSONObject("data")?.optJSONArray("extCaptions")
             var sent = 0
-
-            for (
-                i in 0 until
-                    (caps?.length() ?: 0)
-            ) {
-                val c =
-                    caps!!
-                        .optJSONObject(i)
-                        ?: continue
-
-                val url =
-                    c.optString(
-                        "url",
-                        ""
-                    )
-
-                if (url.isBlank()) {
-                    continue
+            for (i in 0 until (caps?.length() ?: 0)) {
+                val c = caps!!.optJSONObject(i) ?: continue
+                val url = c.optString("url", "")
+                if (url.isBlank()) continue
+                val label = c.optString("lanName", "").ifBlank {
+                    c.optString("lan", "").ifBlank { "Unknown" }
                 }
-
-                val label =
-                    c.optString(
-                        "lanName",
-                        ""
-                    )
-                        .ifBlank {
-                            c.optString(
-                                "lan",
-                                ""
-                            )
-                                .ifBlank {
-                                    "Unknown"
-                                }
-                        }
-
-                subtitleCallback(
-                    SubtitleFile(
-                        label,
-                        url
-                    )
-                )
-
+                subtitleCallback(newSubtitleFile(label, url))
                 sent++
             }
-
-            Log.d(
-                TAG,
-                "[SUBTITLE] extCaptions=${caps?.length() ?: 0} sent=$sent"
-            )
+            Log.d(TAG, "[SUBTITLE] extCaptions=${caps?.length() ?: 0} sent=$sent")
         } catch (e: Exception) {
-            Log.e(
-                TAG,
-                "[SUBTITLE] parse gagal: ${e.javaClass.simpleName}: ${e.message}"
-            )
+            Log.e(TAG, "[SUBTITLE] parse gagal: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
@@ -2211,141 +1149,71 @@ class MovieBoxProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val epData =
-            AppUtils.tryParseJson<EpData>(
-                data
-            )
-                ?: return false
-
-        var bearerToken =
-            fetchModernPlaybackBearer()
-                ?: return false
+        val epData = AppUtils.tryParseJson<EpData>(data) ?: return false
+        var bearerToken = fetchModernPlaybackBearer() ?: return false
 
         val candidatePairs =
-            if (
-                epData.subjectType == 1 ||
-                (
-                    epData.se == 0 &&
-                        epData.ep == 0
-                    )
-            ) {
-                listOf(
-                    0 to 0,
-                    1 to 0,
-                    1 to 1,
-                    0 to 1
-                )
+            if (epData.subjectType == 1 || (epData.se == 0 && epData.ep == 0)) {
+                listOf(0 to 0, 1 to 0, 1 to 1, 0 to 1)
             } else {
-                listOf(
-                    epData.se to epData.ep,
-                    1 to 1,
-                    0 to 0
-                )
+                listOf(epData.se to epData.ep, 1 to 1, 0 to 0)
             }
 
-        fun queriesFor(
-            se: Int,
-            ep: Int
-        ): List<String> =
-            listOf(
-                "subjectId=${epData.subjectId}&se=$se&ep=$ep",
+        fun queriesFor(se: Int, ep: Int): List<String> = listOf(
+            "subjectId=${epData.subjectId}&se=$se&ep=$ep",
+            "subjectId=${epData.subjectId}&se=$se&ep=$ep" +
+                "&streamSignType=1" +
+                "&supportCodecs%5Bhevc%5D=1" +
+                "&supportCodecs%5Bh264%5D=1"
+        )
 
-                "subjectId=${epData.subjectId}&se=$se&ep=$ep" +
-                    "&streamSignType=1" +
-                    "&supportCodecs%5Bhevc%5D=1" +
-                    "&supportCodecs%5Bh264%5D=1"
-            )
+        for ((se, ep) in candidatePairs) {
+            for (host in PLAYBACK_HOSTS) {
+                for (query in queriesFor(se, ep)) {
+                    val path = "/wefeed-mobile-bff/subject-api/play-info"
+                    val requestUrl = "$host$path?$query"
 
-        for (
-            (se, ep) in candidatePairs
-        ) {
-            for (
-                host in PLAYBACK_HOSTS
-            ) {
-                for (
-                    query in queriesFor(
-                        se,
-                        ep
-                    )
-                ) {
-                    val path =
-                        "/wefeed-mobile-bff/subject-api/play-info"
-
-                    val requestUrl =
-                        "$host$path?$query"
-
-                    var response =
-                        try {
-                            app.get(
-                                requestUrl,
-                                headers =
-                                    modernPlaybackHeaders(
-                                        requestUrl,
-                                        bearerToken
-                                    )
-                            )
-                        } catch (e: Exception) {
-                            Log.e(
-                                TAG,
-                                "[PLAYBACK-V47] play-info gagal host=$host " +
-                                    "${e.javaClass.simpleName}: ${e.message}"
-                            )
-                            continue
-                        }
-
-                    if (
-                        response.code == 401 ||
-                        response.code == 441
-                    ) {
-                        val refreshed =
-                            fetchModernPlaybackBearer()
-
-                        if (
-                            !refreshed.isNullOrBlank()
-                        ) {
-                            bearerToken =
-                                refreshed
-
-                            response =
-                                try {
-                                    app.get(
-                                        requestUrl,
-                                        headers =
-                                            modernPlaybackHeaders(
-                                                requestUrl,
-                                                bearerToken
-                                            )
-                                    )
-                                } catch (e: Exception) {
-                                    Log.e(
-                                        TAG,
-                                        "[PLAYBACK-V47] retry play-info gagal host=$host " +
-                                            "${e.javaClass.simpleName}: ${e.message}"
-                                    )
-                                    continue
-                                }
-                        }
-                    }
-
-                    if (
-                        response.code != 200
-                    ) {
-                        Log.d(
+                    var response = try {
+                        app.get(
+                            requestUrl,
+                            headers = modernPlaybackHeaders(requestUrl, bearerToken)
+                        )
+                    } catch (e: Exception) {
+                        Log.e(
                             TAG,
-                            "[PLAYBACK-V47] host=$host HTTP=${response.code}"
+                            "[PLAYBACK-V47] play-info gagal host=$host " +
+                                "${e.javaClass.simpleName}: ${e.message}"
                         )
                         continue
                     }
 
-                    val playInfo =
-                        response
-                            .parsedSafe<PlayInfoResponse>()
-                            ?: continue
+                    if (response.code == 401 || response.code == 441) {
+                        val refreshed = fetchModernPlaybackBearer()
+                        if (!refreshed.isNullOrBlank()) {
+                            bearerToken = refreshed
+                            response = try {
+                                app.get(
+                                    requestUrl,
+                                    headers = modernPlaybackHeaders(requestUrl, bearerToken)
+                                )
+                            } catch (e: Exception) {
+                                Log.e(
+                                    TAG,
+                                    "[PLAYBACK-V47] retry play-info gagal host=$host " +
+                                        "${e.javaClass.simpleName}: ${e.message}"
+                                )
+                                continue
+                            }
+                        }
+                    }
 
-                    if (
-                        playInfo.code != null &&
-                        playInfo.code != 0
-                    ) {
+                    if (response.code != 200) {
+                        Log.d(TAG, "[PLAYBACK-V47] host=$host HTTP=${response.code}")
+                        continue
+                    }
+
+                    val playInfo = response.parsedSafe<PlayInfoResponse>() ?: continue
+                    if (playInfo.code != null && playInfo.code != 0) {
                         Log.d(
                             TAG,
                             "[PLAYBACK-V47] API code=${playInfo.code} " +
@@ -2354,27 +1222,13 @@ class MovieBoxProvider : MainAPI() {
                         continue
                     }
 
-                    val dataNode =
-                        playInfo.data
-                            ?: continue
+                    val dataNode = playInfo.data ?: continue
+                    val resolvedStreams = dataNode.streams
+                        .orEmpty()
+                        .mapNotNull { resolvePlaybackStream(it, dataNode.signCookie) }
+                        .sortedByDescending { it.type == ExtractorLinkType.DASH }
 
-                    val resolvedStreams =
-                        dataNode.streams
-                            .orEmpty()
-                            .mapNotNull {
-                                resolvePlaybackStream(
-                                    it,
-                                    dataNode.signCookie
-                                )
-                            }
-                            .sortedByDescending {
-                                it.type ==
-                                    ExtractorLinkType.DASH
-                            }
-
-                    if (
-                        resolvedStreams.isEmpty()
-                    ) {
+                    if (resolvedStreams.isEmpty()) {
                         Log.d(
                             TAG,
                             "[PLAYBACK-V47] no usable streams host=$host se=$se ep=$ep"
@@ -2383,88 +1237,43 @@ class MovieBoxProvider : MainAPI() {
                     }
 
                     var emitted = 0
+                    for (candidate in resolvedStreams) {
+                        val formatLabel = when (candidate.type) {
+                            ExtractorLinkType.DASH -> "DASH"
+                            ExtractorLinkType.M3U8 -> "HLS"
+                            else -> "VIDEO"
+                        }
+                        val qualityLabel = candidate.quality?.let { " ${it}p" }.orEmpty()
+                        val codecLabel = candidate.stream.codecName
+                            ?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { " ${it.uppercase()}" }
+                            .orEmpty()
 
-                    for (
-                        candidate in resolvedStreams
-                    ) {
-                        val formatLabel =
-                            when (
-                                candidate.type
-                            ) {
-                                ExtractorLinkType.DASH ->
-                                    "DASH"
-
-                                ExtractorLinkType.M3U8 ->
-                                    "HLS"
-
-                                else ->
-                                    "VIDEO"
-                            }
-
-                        val qualityLabel =
-                            candidate.quality
-                                ?.let {
-                                    " ${it}p"
-                                }
-                                .orEmpty()
-
-                        val codecLabel =
-                            candidate.stream.codecName
-                                ?.trim()
-                                ?.takeIf {
-                                    it.isNotBlank()
-                                }
-                                ?.let {
-                                    " ${it.uppercase()}"
-                                }
-                                .orEmpty()
-
-                        val playbackHeaders =
-                            mutableMapOf(
-                                "Referer" to
-                                    "${mainUrl.trimEnd('/')}/",
-
-                                "User-Agent" to
-                                    PLAYBACK_USER_AGENT
-                            )
-
-                        candidate.cookie
-                            ?.let {
-                                playbackHeaders[
-                                    "Cookie"
-                                ] = it
-                            }
+                        val playbackHeaders = mutableMapOf(
+                            "Referer" to "${mainUrl.trimEnd('/')}/",
+                            "User-Agent" to PLAYBACK_USER_AGENT
+                        )
+                        candidate.cookie?.let { playbackHeaders["Cookie"] = it }
 
                         callback(
                             newExtractorLink(
                                 source = name,
-                                name =
-                                    "$name $formatLabel$qualityLabel$codecLabel",
-                                url =
-                                    candidate.url,
-                                type =
-                                    candidate.type
+                                name = "$name $formatLabel$qualityLabel$codecLabel",
+                                url = candidate.url,
+                                type = candidate.type
                             ) {
-                                candidate.quality
-                                    ?.let {
-                                        this.quality =
-                                            it
-                                    }
-
-                                this.headers =
-                                    playbackHeaders
+                                candidate.quality?.let { this.quality = it }
+                                this.headers = playbackHeaders
                             }
                         )
-
                         emitted++
                     }
 
-                    val subtitleStreamId =
-                        resolvedStreams
-                            .firstOrNull()
-                            ?.stream
-                            ?.id
-
+                    val subtitleStreamId = resolvedStreams
+                        .firstOrNull()
+                        ?.stream
+                        ?.id
                     try {
                         loadSubtitles(
                             epData.subjectId,
@@ -2483,20 +1292,9 @@ class MovieBoxProvider : MainAPI() {
                     Log.d(
                         TAG,
                         "[PLAYBACK-V47] emitted=$emitted host=$host se=$se ep=$ep " +
-                            "dash=${
-                                resolvedStreams.count {
-                                    it.type ==
-                                        ExtractorLinkType.DASH
-                                }
-                            } " +
-                            "hls=${
-                                resolvedStreams.count {
-                                    it.type ==
-                                        ExtractorLinkType.M3U8
-                                }
-                            }"
+                            "dash=${resolvedStreams.count { it.type == ExtractorLinkType.DASH }} " +
+                            "hls=${resolvedStreams.count { it.type == ExtractorLinkType.M3U8 }}"
                     )
-
                     return emitted > 0
                 }
             }
@@ -2505,26 +1303,14 @@ class MovieBoxProvider : MainAPI() {
         return false
     }
 
-    data class RankingResponse(
-        val code: Int?,
-        val data: RankingData?
-    )
-
+    data class RankingResponse(val code: Int?, val data: RankingData?)
     data class RankingData(
         val categoryList: List<CategoryItem>?,
         val subjects: List<SubjectItem>?
     )
+    data class CategoryItem(val name: String?, val type: String?)
 
-    data class CategoryItem(
-        val name: String?,
-        val type: String?
-    )
-
-    data class SubjectDetailResponse(
-        val code: Int?,
-        val data: SubjectDetailItem?
-    )
-
+    data class SubjectDetailResponse(val code: Int?, val data: SubjectDetailItem?)
     data class SubjectDetailItem(
         val subjectId: String?,
         val title: String?,
@@ -2545,10 +1331,7 @@ class MovieBoxProvider : MainAPI() {
         val cover: CoverItem?,
         val subjectType: Int?
     )
-
-    data class CoverItem(
-        val url: String?
-    )
+    data class CoverItem(val url: String?)
 
     data class StaffItem(
         val staffId: String?,
@@ -2558,107 +1341,57 @@ class MovieBoxProvider : MainAPI() {
     )
 
     data class TmdbSearchResponse(
-        val results:
-            List<TmdbSearchItem>? = null
+        val results: List<TmdbSearchItem>? = null
     )
 
     data class TmdbSearchItem(
         val id: Int,
-
-        val title:
-            String? = null,
-
-        val name:
-            String? = null,
-
-        @JsonProperty("original_title")
-        val originalTitle:
-            String? = null,
-
-        @JsonProperty("original_name")
-        val originalName:
-            String? = null,
-
-        @JsonProperty("release_date")
-        val releaseDate:
-            String? = null,
-
-        @JsonProperty("first_air_date")
-        val firstAirDate:
-            String? = null
+        val title: String? = null,
+        val name: String? = null,
+        @JsonProperty("original_title") val originalTitle: String? = null,
+        @JsonProperty("original_name") val originalName: String? = null,
+        @JsonProperty("release_date") val releaseDate: String? = null,
+        @JsonProperty("first_air_date") val firstAirDate: String? = null
     )
 
     data class TmdbVideosResponse(
-        val results:
-            List<TmdbVideoItem>? = null
+        val results: List<TmdbVideoItem>? = null
     )
 
     data class TmdbVideoItem(
-        val key:
-            String? = null,
-
-        val site:
-            String? = null,
-
-        val type:
-            String? = null,
-
-        val official:
-            Boolean? = null,
-
-        val name:
-            String? = null
+        val key: String? = null,
+        val site: String? = null,
+        val type: String? = null,
+        val official: Boolean? = null,
+        val name: String? = null
     )
 
     data class TrailerItem(
-        @JsonProperty("VideoAddress")
-        val videoAddressUpper:
-            VideoAddressItem? = null,
-
-        @JsonProperty("videoAddress")
-        val videoAddressLower:
-            VideoAddressItem? = null
+        @JsonProperty("VideoAddress") val videoAddressUpper: VideoAddressItem? = null,
+        @JsonProperty("videoAddress") val videoAddressLower: VideoAddressItem? = null
     )
-
     data class VideoAddressItem(
         val url: String?,
-        val definition:
-            String? = null,
-        val duration:
-            Int? = null
+        val definition: String? = null,
+        val duration: Int? = null
     )
 
-    data class SeasonInfoResponse(
-        val code: Int?,
-        val data: SeasonInfoData?
-    )
-
+    data class SeasonInfoResponse(val code: Int?, val data: SeasonInfoData?)
     data class SeasonInfoData(
         val subjectId: String?,
         val subjectType: Int?,
-        val seasons:
-            List<SeasonItem>?
+        val seasons: List<SeasonItem>?
     )
-
     data class SeasonItem(
         val se: Int?,
         val maxEp: Int?
     )
 
-    data class PlayInfoResponse(
-        val code: Int?,
-        val message: String?,
-        val data: PlayData?
-    )
-
+    data class PlayInfoResponse(val code: Int?, val message: String?, val data: PlayData?)
     data class PlayData(
-        val streams:
-            List<StreamItem>?,
-
-        val signCookie:
-            String? = null
+        val streams: List<StreamItem>?,
+        val signCookie: String? = null
     )
-
     data class StreamItem(
         val format: String?,
         val id: String?,
