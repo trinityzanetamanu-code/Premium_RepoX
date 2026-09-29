@@ -140,8 +140,10 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
 
     private fun isDeprecationNoticeUrl(url: String): Boolean {
         val lower = url.lowercase()
-        return lower.contains("1c7de0bd3393702d9191801f15f88f8d") ||
+        return lower.contains("b164fbfb4347792950bdfbfb563d39d9") ||
+            lower.contains("1c7de0bd3393702d9191801f15f88f8d") ||
             lower.contains("9a0461bc39da389663bf3dbb17091d3f") ||
+            lower.contains("/other/2026/09/") ||
             lower.contains("/notice.mp4") ||
             lower.contains("notice") ||
             (lower.contains("macdn.aoneroom.com") && lower.contains("/other/"))
@@ -159,58 +161,69 @@ class MovieBoxPlaybackFixedProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // The delegate callback is non-suspend, while newExtractorLink is built
-        // safely from this suspend body after delegate resolution completes.
         val originals = mutableListOf<ExtractorLink>()
 
         delegate.loadLinks(
             data = data,
             isCasting = isCasting,
             subtitleCallback = subtitleCallback,
-            callback = { originalLink -> originals.add(originalLink) }
+            callback = { originals.add(it) }
         )
 
         var emitted = 0
 
         for (link in originals) {
-            val recoveredUrl = recoveredMediaUrl(link)
-
-            if (recoveredUrl != null) {
-                Log.d(
-                    "MovieBox",
-                    "[PLAYBACK-FIX] recovered signed manifest " +
-                        "directHost=${link.url.substringAfter("://").substringBefore('/')} " +
-                        "realHost=${recoveredUrl.substringAfter("://").substringBefore('/')}"
-                )
-
-                callback(
-                    newExtractorLink(
-                        source = "MovieBox",
-                        name = "MovieBox",
-                        url = recoveredUrl,
-                        type = INFER_TYPE
-                    ) {
-                        referer = link.referer
-                        quality = link.quality
-                        headers = link.headers
-                    }
-                )
-                emitted += 1
+            // CS3 v47 already resolves valid signed DASH/HLS links inside the
+            // provider. Do not rewrite a healthy URL just because its cookie
+            // contains urlprefix/CloudFront-Policy.
+            if (!isDeprecationNoticeUrl(link.url)) {
+                callback(link)
+                emitted++
                 continue
             }
 
-            if (isDeprecationNoticeUrl(link.url)) {
+            // Recovery is now a narrow safety fallback for known update/notice
+            // dummy URLs only.
+            val recoveredUrl = recoveredMediaUrl(link)
+            if (recoveredUrl.isNullOrBlank() || isDeprecationNoticeUrl(recoveredUrl)) {
                 Log.e(
                     "MovieBox",
-                    "[PLAYBACK-FIX] update/deprecation dummy detected but signed manifest was not recoverable; suppressing dummy"
+                    "[PLAYBACK-FIX] update/deprecation dummy suppressed; " +
+                        "signed manifest was not recoverable"
                 )
                 continue
             }
 
-            callback(link)
-            emitted += 1
+            val recoveredType = when {
+                recoveredUrl.contains(".mpd", ignoreCase = true) ->
+                    ExtractorLinkType.DASH
+                recoveredUrl.contains(".m3u8", ignoreCase = true) ->
+                    ExtractorLinkType.M3U8
+                else -> INFER_TYPE
+            }
+
+            Log.d(
+                "MovieBox",
+                "[PLAYBACK-FIX] recovered dummy to signed manifest " +
+                    "realHost=${recoveredUrl.substringAfter("://").substringBefore('/')}"
+            )
+
+            callback(
+                newExtractorLink(
+                    source = "MovieBox",
+                    name = "MovieBox",
+                    url = recoveredUrl,
+                    type = recoveredType
+                ) {
+                    quality = link.quality
+                    headers = link.headers
+                    referer = link.referer
+                }
+            )
+            emitted++
         }
 
         return emitted > 0
     }
+
 }
