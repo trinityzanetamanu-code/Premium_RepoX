@@ -1356,15 +1356,54 @@ class MovieBoxProvider : MainAPI() {
 
         val path = "/wefeed-mobile-bff/subject-api/play-info/v2"
 
+        fun canonicalPlaybackQuery(query: String): String =
+            query.split("&")
+                .filter { it.isNotBlank() }
+                .sortedBy { it.substringBefore("=") }
+                .joinToString("&")
+
+        fun playbackV2ClientInfo(): String =
+            JSONObject()
+                .put("package_name", "com.community.oneroom")
+                .put("version_name", "4.0.03.0922.03")
+                .put("version_code", 50020131L)
+                .put("os", "android")
+                .put("os_version", Build.VERSION.RELEASE ?: "")
+                .put("device_id", deviceId())
+                .put("install_store", "ps")
+                .put("brand", Build.BRAND ?: "")
+                .put("model", Build.MODEL ?: "")
+                .put("system_language", java.util.Locale.getDefault().language)
+                .put("net", "NETWORK_WIFI")
+                .put("region", java.util.Locale.getDefault().country)
+                .put("timezone", java.util.TimeZone.getDefault().id)
+                .put("sp_code", "")
+                .toString()
+
         fun signedHeaders(query: String, bearer: String): Map<String, String> {
             val ts = System.currentTimeMillis().toString()
-            val pathWithQuery = "$path?$query"
-            return headersFor(
-                ts,
-                generateSignature("GET", pathWithQuery, ts),
-                bearer
+            val canonicalQuery = canonicalPlaybackQuery(query)
+            val signature = playbackGetSignature("$path?$canonicalQuery", ts)
+
+            // Stage 6D: Request.Builder() is created without explicit headers,
+            // then MovieBox's own OkHttp interceptor chain supplies playback
+            // authentication.  At that boundary the GET canonical has blank
+            // Accept/Content-Type fields.  Reproduce only the authenticated
+            // playback headers here; do not reuse headersFor(), whose canonical
+            // representation is for the normal JSON API and is rejected by the
+            // playback gateway.
+            return mapOf(
+                "authorization" to "Bearer $bearer",
+                "x-tr-signature" to signature,
+                "x-client-info" to playbackV2ClientInfo(),
+                "x-client-status" to "1"
             )
         }
+
+        Log.d(
+            TAG,
+            "[PLAYBACK-V2] signing=blank-canonical client=50020131 path=$path"
+        )
 
         for ((se, ep) in candidatePairs) {
             for (host in playbackHosts) {
