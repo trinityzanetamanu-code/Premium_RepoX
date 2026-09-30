@@ -14,6 +14,7 @@ android {
             "com/Adicinemax21/Adicinemax21VidSrcShared.kt",
             "com/Adicinemax21/Adicinemax21IdlixShared.kt",
             "com/Adicinemax21/MovieBoxV2Shared.kt",
+            "com/lagradost/cloudstream3/utils/MovieBoxSubtitleCompat.kt",
         )
     }
 }
