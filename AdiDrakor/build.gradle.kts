@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 16
+version = 17
 
 
 // Reuse ONLY the shared playback engine source files from Adicinemax21.
@@ -13,6 +13,7 @@ android {
             "com/Adicinemax21/Adicinemax21VidSrcResolver.kt",
             "com/Adicinemax21/Adicinemax21VidSrcShared.kt",
             "com/Adicinemax21/Adicinemax21IdlixShared.kt",
+            "com/Adicinemax21/MovieBoxV2Shared.kt",
         )
     }
 }
