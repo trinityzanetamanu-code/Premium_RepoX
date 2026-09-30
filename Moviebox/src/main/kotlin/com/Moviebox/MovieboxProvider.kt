@@ -66,6 +66,18 @@ class MovieBoxProvider : MainAPI() {
 
         // ---------------------------------------------------------------
         // KATEGORI HOME  (self-healing)
+        //
+        // Setiap respons tab/ranking-list membawa data.categoryList lengkap
+        // (name + type). Daftar itu disimpan, lalu dipakai menyusun mainPage
+        // pada pemuatan berikutnya. Daftar di bawah hanya seed untuk
+        // instalasi baru.
+        //
+        // Server membalas categoryType yang tidak dikenal dengan feed default
+        // (HTTP 200, tanpa error), sehingga kategori basi tampil sebagai
+        // daftar film yang sama berulang-ulang. Itu yang diperbaiki di sini.
+        //
+        // Parameter request TIDAK diubah: tabId=0, perPage=10, tanpa
+        // rankingListId -- terbukti identik dengan default APK (Ltl/d$a;->a).
         // ---------------------------------------------------------------
         private const val CAT_KEY = "categorylist"
 
@@ -82,6 +94,18 @@ class MovieBoxProvider : MainAPI() {
 
         @Volatile private var categories: List<Pair<String, String>> = SEED_CATEGORIES
 
+        // ---------------------------------------------------------------
+        // BARIS FILTER  (subject-api/list, bukan tab/ranking-list)
+        //
+        // "Horror" sudah tidak ada di categoryList server, jadi tidak mungkin
+        // didapat lewat ranking-list. Layar Filter APK memakai endpoint lain:
+        //
+        //   GET  subject-api/filter-items  tl.c->b   (daftar opsi filter)
+        //   POST subject-api/list          tl.c->a   @Query(host) @Body()
+        //
+        // Nilai filter berupa string apa adanya dari filter-items
+        // ("Horror", "Indonesia"), bukan id.
+        // ---------------------------------------------------------------
         private const val FILTER_PREFIX = "filter:"
 
         private val EXTRA_ROWS = listOf(
@@ -92,6 +116,7 @@ class MovieBoxProvider : MainAPI() {
             try { appContext?.getSharedPreferences(ID_PREFS, Context.MODE_PRIVATE) }
             catch (e: Exception) { null }
 
+        /** Dipakai oleh mainPage. Sudah terisi karena attachContext() dipanggil duluan. */
         private fun mainPageEntries(): Array<Pair<String, String>> =
             (categories + EXTRA_ROWS).toTypedArray()
 
@@ -109,6 +134,7 @@ class MovieBoxProvider : MainAPI() {
                     categories.joinToString(", ") { it.second })
         }
 
+        /** Dipanggil dari getMainPage. Menyimpan hanya bila daftar server berubah. */
         private fun rememberCategories(fresh: List<CategoryItem>) {
             val list = fresh.mapNotNull { c ->
                 val t = c.type
@@ -128,6 +154,17 @@ class MovieBoxProvider : MainAPI() {
             }
         }
 
+        // ---------------------------------------------------------------
+        // IDENTITY  (meniru Lmh/b;->h pada APK: UUID -> MD5 -> persist)
+        //
+        //   APK : MMKV("vshow")["apkdeviceid"]      <- Lph/a$a;->d(UUID)
+        //   sini: SharedPreferences("moviebox_identity")["apkdeviceid"]
+        //
+        // md5() yang sudah ada di companion ini identik dengan Lph/a$a;->d:
+        // MD5 hex huruf kecil 32 karakter. Cabang Android-ID pada APK sengaja
+        // TIDAK ditiru; jalur UUID adalah cabang yang sama yang dipakai APK
+        // pada Android modern, dan tidak menyentuh identifier perangkat.
+        // ---------------------------------------------------------------
         private const val ID_PREFS = "moviebox_identity"
         private const val ID_KEY = "apkdeviceid"
         private val ID_FORMAT = Regex("^[0-9a-f]{32}$")
@@ -136,14 +173,22 @@ class MovieBoxProvider : MainAPI() {
         @Volatile private var cachedDeviceId: String? = null
         @Volatile private var persisted = false
 
+        /** Dipanggil dari MovieboxPlugin.load() sebelum provider didaftarkan. */
         fun attachContext(context: Context) {
             appContext = context.applicationContext
             loadCategories()
             val id = deviceId()
+            // Logging sementara: verifikasi stabil setelah restart, lalu boleh dihapus.
             Log.d(TAG, "[IDENTITY] device_id=$id len=${id.length} " +
                     "valid=${ID_FORMAT.matches(id)} persisted=$persisted")
         }
 
+        /**
+         * Storage adalah sumber kebenaran. Nilai hanya dibuat sekali, lalu
+         * dipakai selamanya. Nilai in-memory hanya dipakai bila storage sedang
+         * tidak tersedia, dan akan dipersist pada kesempatan pertama sehingga
+         * identity tidak berganti antar-restart.
+         */
         private fun deviceId(): String {
             val cached = cachedDeviceId
             if (cached != null && persisted) return cached
@@ -176,6 +221,8 @@ class MovieBoxProvider : MainAPI() {
             Base64.decode(step1, Base64.DEFAULT)
         }
 
+        // MovieBox 4.0.03.0920.03 / CS3 v47 uses the alternate HMAC key for
+        // modern mobile API authentication. This is playback-only.
         private val PLAYBACK_ALT_SECRET_BYTES: ByteArray by lazy {
             val step1 = String(
                 Base64.decode(PLAYBACK_ALT_SECRET_B64, Base64.DEFAULT),
@@ -189,6 +236,25 @@ class MovieBoxProvider : MainAPI() {
             return md.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         }
 
+        /**
+         * Canonical string mengikuti GatewaySignManager.doSign pada APK resmi.
+         *
+         * Tujuh baris dipisah "\n":
+         *   1. HTTP method (huruf besar)
+         *   2. accept
+         *   3. content-type
+         *   4. panjang body      -> kosong bila tanpa body
+         *   5. timestamp
+         *   6. md5 hex body      -> kosong bila tanpa body
+         *   7. path (+query)
+         *
+         * Tanpa body, baris 4 dan 6 kosong sehingga hasilnya IDENTIK dengan
+         * canonical GET yang selama ini bekerja. Karena itu satu fungsi ini
+         * aman dipakai untuk GET maupun POST.
+         *
+         * Kegagalan search sebelumnya terjadi karena percobaan hanya mengisi
+         * SALAH SATU dari baris 4 atau 6, tidak pernah keduanya sekaligus.
+         */
         private fun buildCanonical(method: String, pathWithQuery: String, ts: String, body: String): String {
             val length = if (body.isEmpty()) "" else body.length.toString()
             val digest = if (body.isEmpty()) "" else md5(body)
@@ -212,6 +278,17 @@ class MovieBoxProvider : MainAPI() {
 
         private fun generateGuestToken(ts: String): String = "$ts,${md5(ts.reversed())}"
 
+        // ---------------------------------------------------------------
+        // PLAYBACK PROFILE — exact runtime identity proven against the
+        // official MovieBox build 4.0.02.0831.03 on this device.
+        //
+        // Scope is intentionally playback-only. Non-playback request code
+        // above/below remains unchanged.
+        //
+        // The blob is device-bound (keyed by Build.FINGERPRINT) and contains
+        // the official runtime identity in obfuscated form. Do not publish
+        // this provider source or reuse it on another device.
+        // ---------------------------------------------------------------
         private const val ORACLE_BLOB_B64 = "DTIykuYnWieJjJgXTGK+QzvFGBfR7pw7CKX532Rg/rxEImeG4XFYNNeXjUMSJKoba4VVBda+0mtT8JXQYST0rlQ8cofmIFoniYzSREIn+R861RlRje/Zf1/zntQte/ymRD0x0LN7CGfWn9lFR3LpAX6OWkbB6oY+NKPOlDpgtO1UPHKJ6TpKZN/CtAVVfrlIft0WRcapxnAGr8LTbGD+vCVdfbO+eAZHkYLJGERl6Rd+qXFh4sS4GTSX7/BJYOi8GWMPluI7TWzcwMlMAyD9D3DFRlDS4oU8SfqE/0Rg6LwFYA+D6C1bJ4mM3kcRIPsPcMVHTMb/jz80rMfYZzel+RMyasLuJxwpkdqCG0RrpEM5xQ4X9PiDM0SKx89hMrHsFzJ8wvI6W3fsx49UGzP9H2XSAg2Gut5gXPiVgjh386tEMnzC8SxMdtrBhSlCfq9Ift0WDIyy02tS+Z+PIm7m6BNiI4noJ2Fr0sOOVBsz/wNsyQQHm7vSYVruloUiPw=="
         private const val ORACLE_KEY_DOMAIN = "MovieBoxOracleV1|"
 
@@ -327,6 +404,9 @@ class MovieBoxProvider : MainAPI() {
             )
         }
 
+        // The real APK signs playback GET requests with blank canonical
+        // Accept/Content-Type fields because those headers are absent at the
+        // pre-Cronet boundary.
         private fun playbackGetCanonical(pathWithCanonicalQuery: String, ts: String): String =
             listOf("GET", "", "", "", ts, "", pathWithCanonicalQuery).joinToString("\n")
 
@@ -360,6 +440,7 @@ class MovieBoxProvider : MainAPI() {
             "x-client-info" to profile.clientInfo,
             "x-client-status" to "1"
         )
+
 
         private fun enc(str: String?): String =
             if (str.isNullOrBlank()) "" else URLEncoder.encode(str, "UTF-8")
@@ -395,6 +476,16 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
+    /**
+     * POST ber-signature.
+     *
+     * PENTING: RequestBody dibuat dari ByteArray, bukan String.
+     * Overload String pada OkHttp menambahkan "; charset=utf-8" ke media type
+     * kalau belum ada, lalu BridgeInterceptor menimpa header Content-Type dari
+     * body tersebut. Akibatnya yang DIKIRIM "application/json; charset=utf-8"
+     * sedangkan yang DITANDATANGANI "application/json" -> server menolak 407.
+     * Overload ByteArray memakai media type apa adanya.
+     */
     private suspend fun postSigned(path: String, body: String, bearer: String?): String? {
         val ts = System.currentTimeMillis().toString()
         val sig = generateSignature("POST", path, ts, body)
@@ -426,6 +517,7 @@ class MovieBoxProvider : MainAPI() {
         val xUserHeader = response.headers["x-user"] ?: return null
         return """"token"\s*:\s*"([^"]+)"""".toRegex().find(xUserHeader)?.groupValues?.get(1)
     }
+
 
     private suspend fun getPlaybackBearerToken(profile: PlaybackSessionProfile): String? {
         val ts = System.currentTimeMillis().toString()
@@ -470,6 +562,11 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
+
+    // ---------------------------------------------------------------
+    // PLAYBACK MODERN AUTH + STREAM RESOLUTION (ported from MovieBox CS3 v47)
+    // ---------------------------------------------------------------
+
     private val modernPlaybackDeviceId: String by lazy {
         val bytes = ByteArray(16)
         java.security.SecureRandom().nextBytes(bytes)
@@ -495,6 +592,11 @@ class MovieBoxProvider : MainAPI() {
             .put("sp_code", "")
             .toString()
 
+    /**
+     * CS3 v47 canonicalizes an absolute request URL by sorting query keys
+     * before signing. URI.query is intentionally used (not rawQuery), matching
+     * java.net.URI#getQuery from the compiled provider.
+     */
     private fun modernPlaybackCanonicalPath(url: String): String {
         val uri = URI(url)
         val path = uri.path.orEmpty()
@@ -698,6 +800,7 @@ class MovieBoxProvider : MainAPI() {
             ?.takeIf { it.isNotBlank() }
             ?: dataCookie?.trim()?.takeIf { it.isNotBlank() }
 
+        // Current CS3 prefers a signed policy resource when MovieBox supplies it.
         val resolvedUrl = extractPlaybackPolicyResource(cookie) ?: originalUrl
         if (isPlaybackNotice(resolvedUrl)) return null
 
@@ -710,11 +813,22 @@ class MovieBoxProvider : MainAPI() {
         )
     }
 
+    // ---------------------------------------------------------------
+    // Struktur response sudah terbukti dari server, jadi parser mengikuti
+    // jalurnya secara eksplisit, bukan menelusuri seluruh pohon JSON:
+    //
+    //   search/v2   -> data.results[].subjects[]
+    //   detail-rec  -> data.items[]
+    //
+    // Keduanya berisi objek Subject yang sama bentuknya.
+    // ---------------------------------------------------------------
     private fun subjectToSearchResponse(o: JSONObject): SearchResponse? {
         val subjectId = o.optString("subjectId", "")
         val title = o.optString("title", "")
         if (subjectId.isBlank() || title.isBlank()) return null
 
+        // subjectType 1 = Movie, 2 = TV. Nilai lain (mis. 9 = UGC) dibuang
+        // karena tidak bisa diputar lewat play-info.
         val type = o.optInt("subjectType", 1)
         if (type != 1 && type != 2) return null
 
@@ -732,6 +846,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
+    /** search/v2 : data.results[].subjects[] */
     private fun parseSearchResults(rawJson: String?): List<SearchResponse> {
         if (rawJson.isNullOrBlank()) return emptyList()
         return try {
@@ -757,6 +872,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
+    /** detail-rec : data.items[] */
     private fun parseRecommendations(rawJson: String?): List<SearchResponse> {
         if (rawJson.isNullOrBlank()) return emptyList()
         return try {
@@ -776,6 +892,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
+    // 1. MAIN PAGE
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -795,6 +912,8 @@ class MovieBoxProvider : MainAPI() {
 
         val jsonRes = response.parsedSafe<RankingResponse>() ?: return null
         val dataObj = jsonRes.data ?: return null
+
+        // Daftar kategori terbaru ikut menumpang di setiap respons. Nol request tambahan.
         dataObj.categoryList?.let { rememberCategories(it) }
 
         val homeItems = dataObj.subjects?.mapNotNull { item ->
@@ -822,11 +941,21 @@ class MovieBoxProvider : MainAPI() {
         return newHomePageResponse(request.name, homeItems)
     }
 
+    /**
+     * Baris home yang bersumber dari layar Filter APK, bukan dari kategori.
+     *
+     * request.data berformat "filter:k=v&k=v"; pasangan tersebut dikirim apa
+     * adanya sebagai field body POST subject-api/list, ditambah page/perPage.
+     * Nama field dan nilainya terbukti dari runtime: body datar menghasilkan
+     * 10/10 item bergenre Horror dan bernegara Indonesia, sedangkan body tanpa
+     * filter mengembalikan katalog campur termasuk subjectType 6.
+     */
     private suspend fun filterPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val spec = request.data.removePrefix(FILTER_PREFIX)
         Log.d(TAG, "[CATEGORY] name=${request.name} filter=$spec page=$page")
 
         val bearerToken = getBearerToken() ?: return null
+
         val body = JSONObject().put("page", page).put("perPage", 10)
         spec.split("&").forEach { pair ->
             val kv = pair.split("=", limit = 2)
@@ -858,6 +987,7 @@ class MovieBoxProvider : MainAPI() {
         return newHomePageResponse(request.name, out)
     }
 
+    // 2. SEARCH
     override suspend fun search(query: String): List<SearchResponse> {
         Log.d(TAG, "[SEARCH] keyword=$query")
         val bearerToken = getBearerToken()
@@ -901,6 +1031,14 @@ class MovieBoxProvider : MainAPI() {
         return out
     }
 
+    // ---------------------------------------------------------------
+    // TRAILER ONLY — external fallback karena MovieBox current backend
+    // mengembalikan "App Upgrade Notice" sebagai trailer untuk semua judul.
+    //
+    // Hanya title/year/type yang dipakai untuk mencari match TMDB.
+    // Jika match aman atau trailer YouTube tidak ditemukan, trailer DIHILANGKAN
+    // daripada memakai promo MovieBox yang salah.
+    // ---------------------------------------------------------------
     private fun normalizeTrailerTitle(value: String?): String =
         value.orEmpty()
             .lowercase()
@@ -936,6 +1074,7 @@ class MovieBoxProvider : MainAPI() {
 
             val safeMatch = when {
                 exactTitleMatches.isEmpty() -> null
+
                 year != null -> {
                     exactTitleMatches.firstOrNull { item ->
                         val candidateYear =
@@ -951,6 +1090,7 @@ class MovieBoxProvider : MainAPI() {
                         candidateYear != null && kotlin.math.abs(candidateYear - year) <= 1
                     }
                 }
+
                 else -> exactTitleMatches.firstOrNull()
             }
 
@@ -984,6 +1124,7 @@ class MovieBoxProvider : MainAPI() {
                     if (name.contains("official trailer", ignoreCase = true)) score += 30
                     else if (name.contains("trailer", ignoreCase = true)) score += 15
                     if (name.contains("teaser", ignoreCase = true)) score += 5
+
                     score
                 }
 
@@ -1006,6 +1147,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
+    // 3. LOAD
     override suspend fun load(url: String): LoadResponse? {
         val cleanId = when {
             url.contains("id=") -> url.substringAfter("id=").substringBefore("&")
@@ -1014,6 +1156,7 @@ class MovieBoxProvider : MainAPI() {
         }
 
         val bearerToken = getBearerToken() ?: return null
+
         val ts = System.currentTimeMillis().toString()
         val pathGet = "/wefeed-mobile-bff/subject-api/get"
         val queryGet = "subjectId=$cleanId"
@@ -1032,7 +1175,14 @@ class MovieBoxProvider : MainAPI() {
         val description = subject.description
         val yearInt = subject.releaseDate?.take(4)?.toIntOrNull()
         val ratingStr = subject.imdbRatingValue ?: subject.imdbRate
+
+        // TRAILER ONLY:
+        // MovieBox current backend mengembalikan App Upgrade Notice untuk semua
+        // judul. Jangan gunakan subject.trailer.videoAddress sebagai fallback,
+        // karena itu menghasilkan trailer yang salah. Jika TMDB tidak punya
+        // safe match/trailer, lebih aman tidak menampilkan trailer.
         val trailerUrl = resolveTmdbTrailer(displayTitle, yearInt, typeInt)
+
         val genreTags = subject.genre?.split(",")?.map { it.trim() } ?: emptyList()
 
         val castActors = subject.staffList?.mapNotNull { staff ->
@@ -1044,6 +1194,7 @@ class MovieBoxProvider : MainAPI() {
         } ?: emptyList()
 
         val recs = fetchRecommendations(cleanId, bearerToken)
+
         val tsSeason = System.currentTimeMillis().toString()
         val pathSeason = "/wefeed-mobile-bff/subject-api/season-info"
         val querySeason = "subjectId=$cleanId"
@@ -1055,6 +1206,7 @@ class MovieBoxProvider : MainAPI() {
 
         val seasonRes = responseSeason.parsedSafe<SeasonInfoResponse>()
         val seasons = seasonRes?.data?.seasons
+
         val episodesList = mutableListOf<Episode>()
 
         seasons?.forEach { seasonItem ->
@@ -1112,6 +1264,15 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
+    // 4. VIDEO INTERCEPTOR
+    // Cloudstream's default interceptor is intentionally used. The current
+    // MovieBox CS3 provider does not override it; ExtractorLink headers are
+    // allowed to flow through the player stack unchanged.
+
+    // SUBTITLE
+    // Struktur terbukti dari server:
+    //   data.extCaptions[] { id, lan, lanName, url, size, delay }
+    // URL berakhiran .srt dengan query Policy/Signature -> dipakai apa adanya.
     private suspend fun loadSubtitles(
         subjectId: String,
         streamId: String?,
@@ -1119,6 +1280,7 @@ class MovieBoxProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit
     ) {
         if (streamId.isNullOrBlank()) return
+        // parameter diurutkan alfabetis, sama seperti endpoint lain yang bekerja
         val raw = getSigned(
             "/wefeed-mobile-bff/subject-api/get-stream-captions",
             "streamId=$streamId&subjectId=$subjectId",
@@ -1143,6 +1305,7 @@ class MovieBoxProvider : MainAPI() {
         }
     }
 
+    // 5. LOAD LINKS
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -1150,9 +1313,20 @@ class MovieBoxProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val epData = AppUtils.tryParseJson<EpData>(data) ?: return false
-        var bearerToken = fetchModernPlaybackBearer()
-            ?: getBearerToken()
-            ?: return false
+
+        // Stage 6D confirmed that the working MovieBox playback patch uses the
+        // application's normal OkHttp/Retrofit session and play-info/v2.  Do
+        // not bootstrap playback through the older mbox.in/apig V47 path.
+        var bearerToken = try {
+            getBearerToken()
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "[PLAYBACK-V2] bearer bootstrap gagal: " +
+                    "${e.javaClass.simpleName}: ${e.message}"
+            )
+            null
+        } ?: return false
 
         val candidatePairs =
             if (epData.subjectType == 1 || (epData.se == 0 && epData.ep == 0)) {
@@ -1161,6 +1335,9 @@ class MovieBoxProvider : MainAPI() {
                 listOf(epData.se to epData.ep, 1 to 1, 0 to 0)
             }
 
+        // The decompiled classes3 playback layer proves the base request is
+        // subjectId + se + ep against play-info/v2.  The codec query is kept
+        // only as a secondary compatibility retry; no VIP/member flag is used.
         fun queriesFor(se: Int, ep: Int): List<String> = listOf(
             "subjectId=${epData.subjectId}&se=$se&ep=$ep",
             "subjectId=${epData.subjectId}&se=$se&ep=$ep" +
@@ -1169,126 +1346,139 @@ class MovieBoxProvider : MainAPI() {
                 "&supportCodecs%5Bh264%5D=1"
         )
 
+        // api3 is the provider's already-working authenticated API base.
+        // api4sg is retained as the only evidence-backed routing fallback from
+        // the runtime remote endpoint configuration captured in Stage 6B/6C.
+        val playbackHosts = listOf(
+            mainUrl.trimEnd('/'),
+            "https://api4sg.aoneroom.com"
+        ).distinct()
+
+        val path = "/wefeed-mobile-bff/subject-api/play-info/v2"
+
+        fun signedHeaders(query: String, bearer: String): Map<String, String> {
+            val ts = System.currentTimeMillis().toString()
+            val pathWithQuery = "$path?$query"
+            return headersFor(
+                ts,
+                generateSignature("GET", pathWithQuery, ts),
+                bearer
+            )
+        }
+
         for ((se, ep) in candidatePairs) {
-            for (host in PLAYBACK_HOSTS) {
-                for (query in queriesFor(se, ep)) {
-                    val path = "/wefeed-mobile-bff/subject-api/play-info"
+            for (host in playbackHosts) {
+                for ((queryIndex, query) in queriesFor(se, ep).withIndex()) {
                     val requestUrl = "$host$path?$query"
 
                     var response = try {
                         app.get(
                             requestUrl,
-                            headers = modernPlaybackHeaders(requestUrl, bearerToken)
+                            headers = signedHeaders(query, bearerToken)
                         )
                     } catch (e: Exception) {
-                        val useLegacyApi3Fallback =
-                            host.trimEnd('/') == mainUrl.trimEnd('/')
+                        Log.e(
+                            TAG,
+                            "[PLAYBACK-V2] request gagal host=$host se=$se ep=$ep " +
+                                "q=${if (queryIndex == 0) "basic" else "codec"} " +
+                                "${e.javaClass.simpleName}: ${e.message}"
+                        )
+                        continue
+                    }
 
-                        if (!useLegacyApi3Fallback) {
+                    Log.d(
+                        TAG,
+                        "[PLAYBACK-V2] host=$host HTTP=${response.code} " +
+                            "se=$se ep=$ep q=${if (queryIndex == 0) "basic" else "codec"}"
+                    )
+
+                    if (response.code == 401 || response.code == 441) {
+                        val refreshed = try {
+                            getBearerToken()
+                        } catch (e: Exception) {
                             Log.e(
                                 TAG,
-                                "[PLAYBACK-V47] play-info gagal host=$host " +
+                                "[PLAYBACK-V2] bearer refresh gagal: " +
                                     "${e.javaClass.simpleName}: ${e.message}"
                             )
-                            continue
-                        }
-
-                        val legacyBearer = try {
-                            getBearerToken()
-                        } catch (_: Exception) {
                             null
                         }
 
-                        if (legacyBearer.isNullOrBlank()) {
-                            Log.e(
-                                TAG,
-                                "[PLAYBACK-LEGACY-FALLBACK] bearer legacy kosong " +
-                                    "setelah V47 gagal: ${e.javaClass.simpleName}: ${e.message}"
-                            )
-                            continue
-                        }
-
-                        val legacyTs = System.currentTimeMillis().toString()
-                        val legacyPathWithQuery = "$path?$query"
-
-                        try {
-                            val legacyResponse = app.get(
-                                "$mainUrl$legacyPathWithQuery",
-                                headers = headersFor(
-                                    legacyTs,
-                                    generateSignature(
-                                        "GET",
-                                        legacyPathWithQuery,
-                                        legacyTs
-                                    ),
-                                    legacyBearer
-                                )
-                            )
-                            Log.d(
-                                TAG,
-                                "[PLAYBACK-LEGACY-FALLBACK] host=$mainUrl " +
-                                    "HTTP=${legacyResponse.code} se=$se ep=$ep"
-                            )
-                            legacyResponse
-                        } catch (legacyError: Exception) {
-                            Log.e(
-                                TAG,
-                                "[PLAYBACK-LEGACY-FALLBACK] gagal: " +
-                                    "${legacyError.javaClass.simpleName}: ${legacyError.message}"
-                            )
-                            continue
-                        }
-                    }
-
-                    if (response.code == 401 || response.code == 441) {
-                        val refreshed = fetchModernPlaybackBearer()
-                            ?: getBearerToken()
                         if (!refreshed.isNullOrBlank()) {
                             bearerToken = refreshed
                             response = try {
                                 app.get(
                                     requestUrl,
-                                    headers = modernPlaybackHeaders(requestUrl, bearerToken)
+                                    headers = signedHeaders(query, bearerToken)
                                 )
                             } catch (e: Exception) {
                                 Log.e(
                                     TAG,
-                                    "[PLAYBACK-V47] retry play-info gagal host=$host " +
+                                    "[PLAYBACK-V2] retry gagal host=$host se=$se ep=$ep " +
                                         "${e.javaClass.simpleName}: ${e.message}"
                                 )
                                 continue
                             }
+
+                            Log.d(
+                                TAG,
+                                "[PLAYBACK-V2] retry host=$host HTTP=${response.code} " +
+                                    "se=$se ep=$ep"
+                            )
                         }
                     }
 
-                    if (response.code != 200) {
-                        Log.d(TAG, "[PLAYBACK-V47] host=$host HTTP=${response.code}")
+                    if (response.code != 200) continue
+
+                    val playInfo = response.parsedSafe<PlayInfoResponse>()
+                    if (playInfo == null) {
+                        Log.e(
+                            TAG,
+                            "[PLAYBACK-V2] parse response gagal host=$host " +
+                                "se=$se ep=$ep bytes=${response.text.length}"
+                        )
                         continue
                     }
 
-                    val playInfo = response.parsedSafe<PlayInfoResponse>() ?: continue
                     if (playInfo.code != null && playInfo.code != 0) {
                         Log.d(
                             TAG,
-                            "[PLAYBACK-V47] API code=${playInfo.code} " +
-                                "message=${playInfo.message.orEmpty()} host=$host"
+                            "[PLAYBACK-V2] API code=${playInfo.code} " +
+                                "message=${playInfo.message.orEmpty()} host=$host se=$se ep=$ep"
                         )
                         continue
                     }
 
-                    val dataNode = playInfo.data ?: continue
-                    val resolvedStreams = dataNode.streams
-                        .orEmpty()
-                        .mapNotNull { resolvePlaybackStream(it, dataNode.signCookie) }
-                        .sortedByDescending { it.type == ExtractorLinkType.DASH }
-
-                    if (resolvedStreams.isEmpty()) {
+                    val dataNode = playInfo.data
+                    if (dataNode == null) {
                         Log.d(
                             TAG,
-                            "[PLAYBACK-V47] no usable streams host=$host se=$se ep=$ep"
+                            "[PLAYBACK-V2] data kosong host=$host se=$se ep=$ep"
                         )
                         continue
                     }
+
+                    val rawStreams = dataNode.streams.orEmpty()
+                    val resolvedStreams = rawStreams
+                        .mapNotNull { resolvePlaybackStream(it, dataNode.signCookie) }
+                        .sortedWith(
+                            compareByDescending<ResolvedPlaybackStream> {
+                                it.type == ExtractorLinkType.DASH
+                            }.thenByDescending { it.quality ?: 0 }
+                        )
+
+                    val signedDashCount = resolvedStreams.count {
+                        it.type == ExtractorLinkType.DASH &&
+                            !it.cookie.isNullOrBlank()
+                    }
+
+                    Log.d(
+                        TAG,
+                        "[PLAYBACK-V2] streams=${rawStreams.size} usable=${resolvedStreams.size} " +
+                            "signedDash=$signedDashCount host=$host se=$se ep=$ep"
+                    )
+
+                    if (resolvedStreams.isEmpty()) continue
 
                     var emitted = 0
                     for (candidate in resolvedStreams) {
@@ -1306,7 +1496,7 @@ class MovieBoxProvider : MainAPI() {
 
                         val playbackHeaders = mutableMapOf(
                             "Referer" to "${mainUrl.trimEnd('/')}/",
-                            "User-Agent" to PLAYBACK_USER_AGENT
+                            "User-Agent" to CS_USER_AGENT
                         )
                         candidate.cookie?.let { playbackHeaders["Cookie"] = it }
 
@@ -1328,11 +1518,12 @@ class MovieBoxProvider : MainAPI() {
                         .firstOrNull()
                         ?.stream
                         ?.id
+
                     try {
                         loadSubtitles(
                             epData.subjectId,
                             subtitleStreamId,
-                            getBearerToken(),
+                            bearerToken,
                             subtitleCallback
                         )
                     } catch (e: Exception) {
@@ -1345,7 +1536,7 @@ class MovieBoxProvider : MainAPI() {
 
                     Log.d(
                         TAG,
-                        "[PLAYBACK-V47] emitted=$emitted host=$host se=$se ep=$ep " +
+                        "[PLAYBACK-V2] emitted=$emitted host=$host se=$se ep=$ep " +
                             "dash=${resolvedStreams.count { it.type == ExtractorLinkType.DASH }} " +
                             "hls=${resolvedStreams.count { it.type == ExtractorLinkType.M3U8 }}"
                     )
@@ -1354,6 +1545,11 @@ class MovieBoxProvider : MainAPI() {
             }
         }
 
+        Log.e(
+            TAG,
+            "[PLAYBACK-V2] tidak ada stream usable subject=${epData.subjectId} " +
+                "se=${epData.se} ep=${epData.ep}"
+        )
         return false
     }
 
