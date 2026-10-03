@@ -49,6 +49,7 @@ internal object BestServerClient {
         val quality: String?,
         val fileSize: String?,
         val fileName: String?,
+        val directUrls: List<String> = emptyList(),
     )
 
     suspend fun emit(
@@ -163,15 +164,45 @@ internal object BestServerClient {
         season: Int?,
         episode: Int?,
     ): List<Server> {
-        val type = if (isTv) "tv" else "movie"
-        val url = buildString {
-            append("$BASE/api/v1/s?type=$type&tmdb=${enc(tmdbId)}")
-            if (isTv) {
-                append("&season=${season ?: 1}")
-                append("&episode=${episode ?: 1}")
-            }
-        }
+        // PrimeSrc documents /api/v1/list_servers as its public Info API.
+        // Keep /api/v1/s only as compatibility fallback.
+        val official = buildDiscoveryUrl(
+            endpoint = "list_servers",
+            tmdbId = tmdbId,
+            isTv = isTv,
+            season = season,
+            episode = episode,
+        )
+        fetchServerList(official, "list_servers")
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { return it }
 
+        val legacy = buildDiscoveryUrl(
+            endpoint = "s",
+            tmdbId = tmdbId,
+            isTv = isTv,
+            season = season,
+            episode = episode,
+        )
+        return fetchServerList(legacy, "legacy-s").orEmpty()
+    }
+
+    private fun buildDiscoveryUrl(
+        endpoint: String,
+        tmdbId: String,
+        isTv: Boolean,
+        season: Int?,
+        episode: Int?,
+    ): String = buildString {
+        append("$BASE/api/v1/$endpoint?type=${if (isTv) "tv" else "movie"}")
+        append("&tmdb=${enc(tmdbId)}")
+        if (isTv) {
+            append("&season=${season ?: 1}")
+            append("&episode=${episode ?: 1}")
+        }
+    }
+
+    private suspend fun fetchServerList(url: String, label: String): List<Server>? {
         val response = try {
             withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
                 app.get(
@@ -184,39 +215,66 @@ internal object BestServerClient {
                 )
             }
         } catch (e: Exception) {
-            issue(RivePlaybackIssue.NETWORK, "server discovery failed: ${e.message.orEmpty()}")
+            issue(
+                RivePlaybackIssue.NETWORK,
+                "$label discovery failed: ${e.message.orEmpty()}",
+            )
             null
-        } ?: run {
-            issue(RivePlaybackIssue.NETWORK, "server discovery timed out")
-            return emptyList()
-        }
+        } ?: return null
 
         if (response.code !in 200..299) {
             issue(
                 RivePlaybackIssue.HTTP_SOURCE_FAILURE,
-                "server discovery HTTP ${response.code}",
+                "$label discovery HTTP ${response.code}",
             )
-            return emptyList()
+            return null
         }
 
         val root = runCatching { JSONObject(response.text) }.getOrNull() ?: run {
-            issue(RivePlaybackIssue.HTTP_SOURCE_FAILURE, "invalid server-list JSON")
-            return emptyList()
+            issue(RivePlaybackIssue.HTTP_SOURCE_FAILURE, "$label returned invalid JSON")
+            return null
         }
-        val arr = root.optJSONArray("servers") ?: return emptyList()
-        val out = ArrayList<Server>(arr.length())
 
+        val arr = root.optJSONArray("servers")
+            ?: root.optJSONObject("data")?.optJSONArray("servers")
+            ?: return emptyList()
+
+        val out = ArrayList<Server>(arr.length())
         for (i in 0 until arr.length()) {
             val item = arr.optJSONObject(i) ?: continue
             val name = item.optString("name", "").trim()
-            val key = item.optString("key", "").trim()
-            if (name.isBlank() || key.isBlank()) continue
+            if (name.isBlank()) continue
+
+            // key is optional for the official WebView path. Requiring it
+            // previously could discard a valid Voe/Streamtape server before
+            // the selected embed page was even attempted.
+            val key = firstString(
+                item,
+                "key",
+                "id",
+                "file_code",
+                "fileCode",
+                "file",
+            ).orEmpty()
+
+            val directUrls = linkedSetOf<String>()
+            for (field in listOf("url", "link", "embed", "embed_url", "embedUrl", "src")) {
+                item.optString(field, "").trim()
+                    .takeIf { it.startsWith("https://") || it.startsWith("http://") }
+                    ?.let { directUrls += it }
+            }
+
             out += Server(
                 name = name,
                 key = key,
                 quality = item.optString("quality", "").takeIf { it.isNotBlank() },
-                fileSize = item.optString("file_size", "").takeIf { it.isNotBlank() && it != "null" },
-                fileName = item.optString("file_name", "").takeIf { it.isNotBlank() && it != "null" },
+                fileSize = item.optString("file_size", "").takeIf {
+                    it.isNotBlank() && it != "null"
+                },
+                fileName = item.optString("file_name", "").takeIf {
+                    it.isNotBlank() && it != "null"
+                },
+                directUrls = directUrls.toList(),
             )
         }
         return out
@@ -225,11 +283,13 @@ internal object BestServerClient {
     /**
      * Resolve hanya dua host yang diminta: Voe dan Streamtape.
      *
-     * /api/v1/s hanya memberi opaque key. Pertama coba link API normal.
-     * Bila link API sedang challenge-gated, gunakan halaman embed PrimeSrc
-     * sendiri melalui WebView dan tangkap URL iframe upstream yang memang
-     * dimuat oleh halaman tersebut. Tidak ada token yang dibuat/dipalsukan
-     * atau disuntikkan oleh client ini.
+     * Urutan:
+     * 1. absolute URL dari server-list bila tersedia;
+     * 2. halaman embed PrimeSrc dengan parameter resmi serverOrder dan
+     *    whitelistServers;
+     * 3. /api/v1/l hanya fallback terakhir bila menjawab normal.
+     *
+     * Tidak ada token Turnstile yang dibuat, dipalsukan, atau disuntikkan.
      */
     private suspend fun resolveEmbed(
         server: Server,
@@ -238,20 +298,27 @@ internal object BestServerClient {
         season: Int?,
         episode: Int?,
     ): String? {
-        if (server.key.startsWith("http://") || server.key.startsWith("https://")) {
-            return server.key
-        }
         if (!isRequestedBestServerHost(server)) return null
 
-        resolveViaPrimeSrc(server)?.let { return it }
+        server.directUrls.firstOrNull()?.let {
+            return normalizeResolvedHost(server, it)
+        }
 
-        return resolveViaEmbedPage(
+        if (server.key.startsWith("http://") || server.key.startsWith("https://")) {
+            return normalizeResolvedHost(server, server.key)
+        }
+
+        // The browser path must run before the private resolver. The previous
+        // order let a challenge-gated /api/v1/l hide both required hosts.
+        resolveViaEmbedPage(
             server = server,
             tmdbId = tmdbId,
             isTv = isTv,
             season = season,
             episode = episode,
-        )
+        )?.let { return it }
+
+        return resolveViaPrimeSrc(server)
     }
 
     private suspend fun resolveViaEmbedPage(
@@ -262,10 +329,28 @@ internal object BestServerClient {
         episode: Int?,
     ): String? {
         val normalized = normalize(server.name)
-        val targetRegex = when {
-            "streamtape" in normalized || "streamta" in normalized -> streamTapeEmbedRegex
-            "voe" in normalized -> voeEmbedRegex
+        val knownHostPattern = when {
+            "streamtape" in normalized || "streamta" in normalized ->
+                """(?:streamtape[.]com|streamtape[.]net|streamtape[.]xyz|watchadsontape[.]com|shavetape[.]cash|streamta[.]site)"""
+            "voe" in normalized ->
+                """(?:voe[.]sx|tubelessceliolymph[.]com|simpulumlamerop[.]com|urochsunloath[.]com|nathanfromsubject[.]com|yip[.]su|metagnathtuggers[.]com|donaldlineelse[.]com|charlestoughrace[.]com|walterprettytheir[.]com|rebeccapracticeloss[.]com|johnbeyondnation[.]com)"""
             else -> return null
+        }
+
+        val escapedKey = server.key
+            .takeIf { it.isNotBlank() && it.length >= 5 }
+            ?.let { Regex.escape(it) }
+
+        val targetRegex = if (escapedKey != null) {
+            Regex(
+                """(?:https?://[^/]*$knownHostPattern(?:/|\z)|https?://(?![^/]*primesrc[.]me)[^\s]*$escapedKey[^\s]*)""",
+                RegexOption.IGNORE_CASE,
+            )
+        } else {
+            Regex(
+                """https?://[^/]*$knownHostPattern(?:/|\z)""",
+                RegexOption.IGNORE_CASE,
+            )
         }
 
         val pageUrl = buildString {
@@ -277,10 +362,10 @@ internal object BestServerClient {
                 append("&episode=${episode ?: 1}")
             }
             append("&fallback=false")
-            append("&server_order=${enc(server.name)}")
-            if ("streamtape" in normalized || "streamta" in normalized) {
-                append("&ds=streamtape")
-            }
+            // PrimeSrc public docs use camelCase. server_order and ds were
+            // not documented and did not reliably select the requested host.
+            append("&serverOrder=${enc(server.name)}")
+            append("&whitelistServers=${enc(server.name)}")
             append("&autoplay=1&muted=1")
         }
 
@@ -299,11 +384,11 @@ internal object BestServerClient {
             if (resolved.isNullOrBlank()) {
                 issue(
                     RivePlaybackIssue.EXTRACTOR_FAILURE,
-                    "${server.name}: PrimeSrc embed page did not expose a host URL",
+                    "${server.name}: official PrimeSrc embed page did not expose the selected host",
                 )
                 null
             } else {
-                resolved
+                normalizeResolvedHost(server, resolved)
             }
         } catch (e: Exception) {
             issue(
@@ -313,7 +398,32 @@ internal object BestServerClient {
             null
         }
     }
+
+    /**
+     * PrimeSrc and Voe/Streamtape rotate mirror domains. Once the official
+     * embed page has exposed the upstream path, normalize the authority to a
+     * canonical domain already registered by CloudStream's built-in
+     * extractor. No CloudStream-core alias table needs to be modified.
+     */
+    private fun normalizeResolvedHost(server: Server, url: String): String {
+        val n = normalize(server.name)
+        val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return url
+        val rawPath = uri.rawPath.orEmpty().ifBlank { "/" }
+        val suffix = buildString {
+            append(rawPath)
+            if (!uri.rawQuery.isNullOrBlank()) append('?').append(uri.rawQuery)
+        }
+
+        return when {
+            "voe" in n -> "https://voe.sx$suffix"
+            "streamtape" in n || "streamta" in n -> "https://streamtape.com$suffix"
+            else -> url
+        }
+    }
+
     private suspend fun resolveViaPrimeSrc(server: Server): String? {
+        if (server.key.isBlank()) return null
+
         val url = "$BASE/api/v1/l?key=${enc(server.key)}"
         val response = try {
             withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
@@ -331,7 +441,7 @@ internal object BestServerClient {
         } catch (e: Exception) {
             issue(
                 RivePlaybackIssue.NETWORK,
-                "${server.name}: resolver failed: ${e.message.orEmpty()}",
+                "${server.name}: optional resolver failed: ${e.message.orEmpty()}",
             )
             null
         } ?: return null
@@ -339,7 +449,7 @@ internal object BestServerClient {
         if (response.code !in 200..299) {
             issue(
                 RivePlaybackIssue.HTTP_SOURCE_FAILURE,
-                "${server.name}: resolver HTTP ${response.code}; next mirror will be tried",
+                "${server.name}: optional resolver HTTP ${response.code}; no Turnstile bypass attempted",
             )
             return null
         }
@@ -349,10 +459,13 @@ internal object BestServerClient {
             .orEmpty()
             .trim()
         if (link.isBlank()) {
-            issue(RivePlaybackIssue.NO_SOURCE, "${server.name}: resolver returned no link")
+            issue(
+                RivePlaybackIssue.NO_SOURCE,
+                "${server.name}: optional resolver returned no link",
+            )
             return null
         }
-        return link
+        return normalizeResolvedHost(server, link)
     }
 
     private suspend fun emitIndonesianSubtitles(
