@@ -5,10 +5,13 @@ import com.RiveStream.api.RiveApi
 import com.RiveStream.playback.RivePlaybackIssue
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.newSubtitleFile
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -26,7 +29,19 @@ internal object BestServerClient {
     private const val BASE = "https://primesrc.me"
     private const val REQUEST_TIMEOUT_MS = 10_000L
     private const val EXTRACTOR_TIMEOUT_MS = 12_000L
-    private const val MAX_SUCCESSFUL_HOSTS = 4
+    private const val WEBVIEW_TIMEOUT_MS = 25_000L
+    private const val SUBTITLE_TIMEOUT_MS = 8_000L
+    private const val MAX_SUCCESSFUL_HOSTS = 2
+    private const val SUBTITLE_BASE = "https://sub.wyzie.ru"
+
+    private val voeEmbedRegex = Regex(
+        """https?://[^/]*(?:voe[.]sx|tubelessceliolymph[.]com|simpulumlamerop[.]com|urochsunloath[.]com|nathanfromsubject[.]com|yip[.]su|metagnathtuggers[.]com|donaldlineelse[.]com|charlestoughrace[.]com)(?:/|\z)""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val streamTapeEmbedRegex = Regex(
+        """https?://[^/]*(?:streamtape[.]com|streamtape[.]net|streamtape[.]xyz|watchadsontape[.]com|shavetape[.]cash|streamta[.]site)(?:/|\z)""",
+        RegexOption.IGNORE_CASE,
+    )
 
     data class Server(
         val name: String,
@@ -45,9 +60,16 @@ internal object BestServerClient {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Int {
+        // Subtitle Indonesia tidak bergantung pada resolver host PrimeSrc.
+        emitIndonesianSubtitles(tmdbId, isTv, season, episode, subtitleCallback)
+
         val servers = discover(tmdbId, isTv, season, episode)
+            .filter(::isRequestedBestServerHost)
         if (servers.isEmpty()) {
-            issue(RivePlaybackIssue.NO_SOURCE, "PrimeSrc returned no servers for tmdb=$tmdbId")
+            issue(
+                RivePlaybackIssue.NO_SOURCE,
+                "PrimeSrc returned no Voe/Streamtape server for tmdb=$tmdbId",
+            )
             return 0
         }
 
@@ -61,7 +83,13 @@ internal object BestServerClient {
             val hostFamily = normalize(server.name)
             if (hostFamily in completedHostFamilies) continue
 
-            val embedUrl = resolveEmbed(server) ?: continue
+            val embedUrl = resolveEmbed(
+                server = server,
+                tmdbId = tmdbId,
+                isTv = isTv,
+                season = season,
+                episode = episode,
+            ) ?: continue
             var hostEmitted = 0
             val extractedLinks = ArrayList<ExtractorLink>()
 
@@ -195,45 +223,96 @@ internal object BestServerClient {
     }
 
     /**
-     * Return a host embed URL without bypassing anti-bot protection.
+     * Resolve hanya dua host yang diminta: Voe dan Streamtape.
      *
-     * Most PrimeSrc hosts expose a stable /e/{key} URL directly. Voe and
-     * Streamtape are resolved through /api/v1/l because their raw key is not
-     * reliably portable across mirrors. If that endpoint is challenge-gated,
-     * the host is skipped and the next mirror is tried.
+     * /api/v1/s hanya memberi opaque key. Pertama coba link API normal.
+     * Bila link API sedang challenge-gated, gunakan halaman embed PrimeSrc
+     * sendiri melalui WebView dan tangkap URL iframe upstream yang memang
+     * dimuat oleh halaman tersebut. Tidak ada token yang dibuat/dipalsukan
+     * atau disuntikkan oleh client ini.
      */
-    private suspend fun resolveEmbed(server: Server): String? {
+    private suspend fun resolveEmbed(
+        server: Server,
+        tmdbId: String,
+        isTv: Boolean,
+        season: Int?,
+        episode: Int?,
+    ): String? {
         if (server.key.startsWith("http://") || server.key.startsWith("https://")) {
             return server.key
         }
+        if (!isRequestedBestServerHost(server)) return null
 
-        val normalized = normalize(server.name)
-        val direct = when {
-            "filemoon" in normalized -> "https://filemoon.sx/e/${server.key}"
-            normalized == "dood" || normalized.startsWith("dood") -> "https://dood.wf/e/${server.key}"
-            "streamwish" in normalized -> "https://streamwish.com/e/${server.key}"
-            "filelions" in normalized -> "https://filelions.sx/e/${server.key}"
-            "mixdrop" in normalized -> "https://mixdrop.ag/e/${server.key}"
-            "vidmoly" in normalized -> "https://vidmoly.to/e/${server.key}"
-            "luluvdoo" in normalized -> "https://luluvdoo.com/e/${server.key}"
-            "streamplay" in normalized -> "https://streamplay.cc/e/${server.key}"
-            "vidara" in normalized -> "https://vidara.online/e/${server.key}"
-            else -> null
-        }
-        if (direct != null) return direct
+        resolveViaPrimeSrc(server)?.let { return it }
 
-        // These providers are known to require PrimeSrc link resolution.
-        if ("voe" in normalized || "streamtape" in normalized) {
-            return resolveViaPrimeSrc(server)
-        }
-
-        issue(
-            RivePlaybackIssue.EXTRACTOR_UNSUPPORTED,
-            "${server.name}: no safe direct mapping; host skipped",
+        return resolveViaEmbedPage(
+            server = server,
+            tmdbId = tmdbId,
+            isTv = isTv,
+            season = season,
+            episode = episode,
         )
-        return null
     }
 
+    private suspend fun resolveViaEmbedPage(
+        server: Server,
+        tmdbId: String,
+        isTv: Boolean,
+        season: Int?,
+        episode: Int?,
+    ): String? {
+        val normalized = normalize(server.name)
+        val targetRegex = when {
+            "streamtape" in normalized || "streamta" in normalized -> streamTapeEmbedRegex
+            "voe" in normalized -> voeEmbedRegex
+            else -> return null
+        }
+
+        val pageUrl = buildString {
+            append("$BASE/embed/")
+            append(if (isTv) "tv" else "movie")
+            append("?tmdb=${enc(tmdbId)}")
+            if (isTv) {
+                append("&season=${season ?: 1}")
+                append("&episode=${episode ?: 1}")
+            }
+            append("&fallback=false")
+            append("&server_order=${enc(server.name)}")
+            if ("streamtape" in normalized || "streamta" in normalized) {
+                append("&ds=streamtape")
+            }
+            append("&autoplay=1&muted=1")
+        }
+
+        return try {
+            val request = WebViewResolver(
+                interceptUrl = targetRegex,
+                userAgent = null,
+                useOkhttp = false,
+                timeout = WEBVIEW_TIMEOUT_MS,
+            ).resolveUsingWebView(
+                url = pageUrl,
+                referer = "$BASE/",
+            ).first
+
+            val resolved = request?.url?.toString()
+            if (resolved.isNullOrBlank()) {
+                issue(
+                    RivePlaybackIssue.EXTRACTOR_FAILURE,
+                    "${server.name}: PrimeSrc embed page did not expose a host URL",
+                )
+                null
+            } else {
+                resolved
+            }
+        } catch (e: Exception) {
+            issue(
+                RivePlaybackIssue.EXTRACTOR_FAILURE,
+                "${server.name}: WebView resolve failed: ${e.javaClass.simpleName}: ${e.message.orEmpty()}",
+            )
+            null
+        }
+    }
     private suspend fun resolveViaPrimeSrc(server: Server): String? {
         val url = "$BASE/api/v1/l?key=${enc(server.key)}"
         val response = try {
@@ -245,6 +324,7 @@ internal object BestServerClient {
                         "Accept" to "application/json, text/plain, */*",
                         "Referer" to "$BASE/",
                         "Origin" to BASE,
+                        "X-Requested-With" to "XMLHttpRequest",
                     )
                 )
             }
@@ -275,24 +355,109 @@ internal object BestServerClient {
         return link
     }
 
-    private fun priority(name: String): Int {
-        val n = normalize(name)
-        return when {
-            "filemoon" in n -> 0
-            "streamwish" in n -> 1
-            n.startsWith("dood") -> 2
-            "mixdrop" in n -> 3
-            "vidmoly" in n -> 4
-            "luluvdoo" in n -> 5
-            "streamplay" in n -> 6
-            "vidara" in n -> 7
-            "filelions" in n -> 8
-            "voe" in n -> 9
-            "streamtape" in n -> 10
-            else -> 50
+    private suspend fun emitIndonesianSubtitles(
+        tmdbId: String,
+        isTv: Boolean,
+        season: Int?,
+        episode: Int?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+    ) {
+        val url = buildString {
+            append("$SUBTITLE_BASE/search?id=${enc(tmdbId)}")
+            if (isTv) {
+                append("&season=${season ?: 1}")
+                append("&episode=${episode ?: 1}")
+            }
+            append("&language=id&format=srt")
+        }
+
+        val response = try {
+            withTimeoutOrNull(SUBTITLE_TIMEOUT_MS) {
+                app.get(
+                    url,
+                    headers = mapOf(
+                        "User-Agent" to RiveApi.USER_AGENT,
+                        "Accept" to "application/json, text/plain, */*",
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            issue(
+                RivePlaybackIssue.NETWORK,
+                "Indonesian subtitle request failed: ${e.message.orEmpty()}",
+            )
+            null
+        } ?: return
+
+        if (response.code !in 200..299) {
+            issue(
+                RivePlaybackIssue.HTTP_SOURCE_FAILURE,
+                "Indonesian subtitle HTTP ${response.code}",
+            )
+            return
+        }
+
+        val items = parseSubtitleArray(response.text) ?: return
+        val seen = HashSet<String>()
+
+        for (i in 0 until items.length()) {
+            val item = items.optJSONObject(i) ?: continue
+            val rawUrl = firstString(item, "url", "file", "src") ?: continue
+            val label = firstString(item, "display", "label", "name", "language", "lang").orEmpty()
+            val language = firstString(item, "lang", "language", "language_code", "iso639").orEmpty()
+
+            if (!isIndonesianSubtitle(language, label)) continue
+
+            val finalUrl = when {
+                rawUrl.startsWith("http://") || rawUrl.startsWith("https://") -> rawUrl
+                rawUrl.startsWith("/") -> "$SUBTITLE_BASE$rawUrl"
+                else -> "$SUBTITLE_BASE/$rawUrl"
+            }
+            if (!seen.add(finalUrl)) continue
+
+            subtitleCallback(newSubtitleFile("Indonesian", finalUrl))
         }
     }
 
+    private fun parseSubtitleArray(text: String): JSONArray? {
+        val clean = text.trim()
+        if (clean.isBlank()) return null
+
+        return runCatching { JSONArray(clean) }.getOrNull()
+            ?: runCatching { JSONObject(clean).optJSONArray("subtitles") }.getOrNull()
+            ?: runCatching { JSONObject(clean).optJSONArray("results") }.getOrNull()
+    }
+
+    private fun firstString(item: JSONObject, vararg keys: String): String? {
+        for (key in keys) {
+            val value = item.optString(key, "").trim()
+            if (value.isNotBlank() && value != "null") return value
+        }
+        return null
+    }
+
+    private fun isIndonesianSubtitle(language: String, label: String): Boolean {
+        val lang = language.trim().lowercase()
+        val text = label.trim().lowercase()
+        return lang in setOf("id", "ind", "indonesian", "id-id", "in_id") ||
+            text.contains("indonesian") ||
+            text.contains("bahasa indonesia") ||
+            text == "id"
+    }
+
+    private fun isRequestedBestServerHost(server: Server): Boolean {
+        val n = normalize(server.name)
+        return "voe" in n || "streamtape" in n || "streamta" in n
+    }
+
+    private fun priority(name: String): Int {
+        val n = normalize(name)
+        return when {
+            "voe" in n -> 0
+            "streamtape" in n || "streamta" in n -> 1
+            else -> 50
+        }
+    }
     private fun normalize(value: String): String =
         value.lowercase().replace(Regex("[^a-z0-9]"), "")
 
