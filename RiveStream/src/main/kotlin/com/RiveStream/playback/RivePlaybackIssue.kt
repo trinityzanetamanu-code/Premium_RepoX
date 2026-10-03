@@ -1,0 +1,13 @@
+package com.RiveStream.playback
+
+internal enum class RivePlaybackIssue {
+    NO_SOURCE,
+    NETWORK,
+    HTTP_SOURCE_FAILURE,
+    HLS_MASTER_INVALID,
+    HLS_RENDITION_UNHEALTHY,
+    EXTRACTOR_UNSUPPORTED,
+    EXTRACTOR_FAILURE,
+    VANGUARD_CDN_502,
+    VANGUARD_AUDIO_MAP,
+}

@@ -1,7 +1,11 @@
 package com.RiveStream
 
+import android.util.Log
 import com.RiveStream.api.RiveApi
+import com.RiveStream.bestserver.BestServerClient
 import com.RiveStream.byse.ByseClient
+import com.RiveStream.playback.RivePlaybackIssue
+import com.RiveStream.vanguard.VanguardHlsValidator
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.HomePageResponse
@@ -21,6 +25,7 @@ import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -248,6 +253,8 @@ import org.json.JSONObject
  * ============================================================================
  */
 class RiveStreamProvider : MainAPI() {
+
+    private val logTag = "RiveStream"
 
     override var mainUrl = RiveApi.MAIN_URL
     override var name = "RiveStream"
@@ -494,6 +501,11 @@ class RiveStreamProvider : MainAPI() {
                     RiveApi.movieVideoProvider(id, service)
                 }
             } catch (e: Exception) {
+                Log.d(
+                    logTag,
+                    "[${RivePlaybackIssue.NETWORK}] service=$service: " +
+                        "${e.javaClass.simpleName}: ${e.message.orEmpty()}"
+                )
                 null
             } ?: continue
 
@@ -501,11 +513,37 @@ class RiveStreamProvider : MainAPI() {
             emitCaptions(result, seenSubs, subtitleCallback)
         }
 
+        // Server 2 — Best-Server (PrimeSrc) adalah source tambahan, bukan
+        // pengganti Vanguard/Citadel/source existing.
+        emitted += try {
+            BestServerClient.emit(
+                tmdbId = id,
+                isTv = isTv,
+                season = season,
+                episode = episode,
+                seen = seenLinks,
+                subtitleCallback = subtitleCallback,
+                callback = callback,
+            )
+        } catch (e: Exception) {
+            Log.w(
+                logTag,
+                "[${RivePlaybackIssue.EXTRACTOR_FAILURE}] Best-Server: " +
+                    "${e.javaClass.simpleName}: ${e.message.orEmpty()}"
+            )
+            0
+        }
+
         // Sumber embed. Terpisah dari VideoProvider dan memakai rantai
         // sendiri; kegagalannya tidak boleh menjatuhkan sumber non-embed.
         emitted += try {
             emitEmbed(id, isTv, season, episode, seenLinks, callback)
         } catch (e: Exception) {
+            Log.d(
+                logTag,
+                "[${RivePlaybackIssue.EXTRACTOR_FAILURE}] legacy embed: " +
+                    "${e.javaClass.simpleName}: ${e.message.orEmpty()}"
+            )
             0
         }
 
@@ -621,25 +659,79 @@ class RiveStreamProvider : MainAPI() {
             // lebih cepat. Lihat catatan nomor 23 dan 24.
             val (finalUrl, finalHeaders) = resolveLink(url)
 
-            // Periksa memakai header HASIL EKSTRAKSI, bukan Referer situs.
-            // Hulu menolak Referer rivestream.app dengan 429 (catatan 25),
-            // jadi memakai header seragam justru akan membuang sumber sehat.
-            if (!isReachable(finalUrl, finalHeaders)) continue
-
             // Nama layanan versi server lebih informatif, mis. "Vietsub (Tap 1)"
             // milik ophim. Kalau tidak ada, pakai nama service apa adanya.
             val label = item.optStringOrNull("source") ?: service
 
             // quality bertipe campuran: 720 (angka) maupun "tcloud" (teks).
-            // getQualityFromName mengembalikan Qualities.Unknown untuk teks.
             val quality = getQualityFromName(item.optStringOrNull("quality"))
 
             val linkType = when (item.optStringOrNull("format")?.lowercase()) {
                 "hls" -> ExtractorLinkType.M3U8
                 "mp4" -> ExtractorLinkType.VIDEO
-                // Format tak dikenal dibiarkan ditebak CloudStream.
                 else -> null
             }
+
+            // Vanguard/Cinejoy: jangan serahkan master yang punya rendition
+            // rusak langsung ke Media3. Pilih child video sehat dan pasangkan
+            // external audio sehat melalui ExtractorLink.audioTracks.
+            if (linkType == ExtractorLinkType.M3U8 &&
+                isVanguardSource(service, label, finalUrl)
+            ) {
+                when (val decision = VanguardHlsValidator.validate(finalUrl, finalHeaders)) {
+                    VanguardHlsValidator.Decision.KeepOriginal -> {
+                        if (!isReachable(finalUrl, finalHeaders)) continue
+                        callback(
+                            newExtractorLink(
+                                source = this.name,
+                                name = label,
+                                url = finalUrl,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.quality = quality
+                                this.referer = finalHeaders["Referer"] ?: RiveApi.REFERER
+                                this.headers = finalHeaders.filterKeys { it != "Referer" }
+                            }
+                        )
+                        count++
+                    }
+                    is VanguardHlsValidator.Decision.UseRenditions -> {
+                        for (rendition in decision.renditions) {
+                            if (!seen.add(rendition.videoUrl)) continue
+                            val renditionLabel = if (rendition.quality > 0 && rendition.quality != 400) {
+                                "$label ${rendition.quality}p"
+                            } else label
+                            val audioTracks = rendition.audioUrl?.let { audioUrl ->
+                                listOf(newAudioFile(audioUrl) { this.headers = finalHeaders })
+                            }.orEmpty()
+                            callback(
+                                newExtractorLink(
+                                    source = this.name,
+                                    name = renditionLabel,
+                                    url = rendition.videoUrl,
+                                    type = ExtractorLinkType.M3U8
+                                ) {
+                                    this.quality = rendition.quality
+                                    this.referer = finalHeaders["Referer"] ?: RiveApi.REFERER
+                                    this.headers = finalHeaders.filterKeys { it != "Referer" }
+                                    this.audioTracks = audioTracks
+                                }
+                            )
+                            count++
+                        }
+                    }
+                    is VanguardHlsValidator.Decision.Reject -> {
+                        Log.w(
+                            logTag,
+                            "[${decision.issue}] Vanguard source rejected by targeted preflight: $finalUrl"
+                        )
+                    }
+                }
+                continue
+            }
+
+            // Existing sources keep the old lightweight reachability check.
+            if (!isReachable(finalUrl, finalHeaders)) continue
 
             callback(
                 newExtractorLink(
@@ -660,6 +752,11 @@ class RiveStreamProvider : MainAPI() {
         }
         return count
     }
+
+    private fun isVanguardSource(service: String, label: String, url: String): Boolean =
+        service.equals("vanguard", ignoreCase = true) ||
+            label.contains("vanguard", ignoreCase = true) ||
+            url.contains("cheaptruckrepairs.cc", ignoreCase = true)
 
     /**
      * Uji cepat apakah sebuah URL sumber benar-benar bisa dibuka, sebelum
