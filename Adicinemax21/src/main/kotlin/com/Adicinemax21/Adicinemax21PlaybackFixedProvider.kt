@@ -31,7 +31,7 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
     private fun sourceKey(link: ExtractorLink): String {
         val raw = link.source.ifBlank { link.name }.trim().lowercase()
         return when {
-            raw.contains("moviebox") -> "moviebox"
+            MovieBoxV2Shared.isMovieBoxLink(link) || raw.contains("moviebox") -> "moviebox"
             raw.contains("vidsrc") -> "vidsrc"
             raw.contains("idlix") -> "idlix"
             else -> raw
@@ -196,6 +196,9 @@ class Adicinemax21PlaybackFixedProvider : Adicinemax21() {
     }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        if (MovieBoxV2Shared.isMovieBoxLink(extractorLink)) {
+            return MovieBoxV2Shared.videoInterceptor
+        }
         val cookie = extractorLink.headers["Cookie"]
         if (cookie.isNullOrBlank()) return super.getVideoInterceptor(extractorLink)
         val userAgent = extractorLink.headers["User-Agent"]

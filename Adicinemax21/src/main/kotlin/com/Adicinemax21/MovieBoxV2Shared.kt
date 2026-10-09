@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.newSubtitleFile
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -26,6 +27,14 @@ import kotlin.math.abs
  * provider remain owned by their original implementation.
  */
 object MovieBoxV2Shared {
+    // A non-null provider hook selects CloudStream's OkHttp media data source.
+    // Signed media requests and responses pass through unchanged.
+    val videoInterceptor = Interceptor { chain -> chain.proceed(chain.request()) }
+
+    fun isMovieBoxLink(link: ExtractorLink): Boolean =
+        link.source.equals("MovieBox", ignoreCase = true) ||
+            link.name.startsWith("MovieBox ")
+
     private const val API_URL = "https://api3.aoneroom.com"
     private const val API_FALLBACK = "https://api4sg.aoneroom.com"
     private const val USER_AGENT =
@@ -405,11 +414,7 @@ object MovieBoxV2Shared {
                 "=".repeat((4 - encoded.length % 4) % 4)
             val prefix = String(Base64.decode(normalized, Base64.DEFAULT), Charsets.UTF_8)
                 .trimEnd('/')
-            if (prefix.endsWith(".mpd", true) || prefix.endsWith(".m3u8", true)) {
-                prefix
-            } else {
-                "$prefix/index.mpd"
-            }
+            "$prefix/index.mpd"
         } catch (_: Exception) {
             null
         }
@@ -431,10 +436,11 @@ object MovieBoxV2Shared {
                 .optJSONArray("Statement")
                 ?.optJSONObject(0)
                 ?.optString("Resource")
+                ?.trim()
                 ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
                 ?: return null
             val base = resource.trimEnd('*').trimEnd('/')
-            if (base.endsWith(".mpd", true) || base.endsWith(".m3u8", true)) {
+            if (base.endsWith(".mpd", true)) {
                 base
             } else {
                 "$base/index.mpd"
@@ -496,14 +502,15 @@ object MovieBoxV2Shared {
                     val root = JSONObject(response.text)
                     if (root.has("code") && root.optInt("code", 0) != 0) continue
                     val data = root.optJSONObject("data") ?: continue
-                    val dataCookie = data.optString("signCookie", "").takeIf { it.isNotBlank() }
+                    val dataCookie = data.optString("signCookie", "").trim().takeIf { it.isNotBlank() }
                     val array = data.optJSONArray("streams") ?: continue
                     buildList {
                         for (i in 0 until array.length()) {
                             val item = array.optJSONObject(i) ?: continue
-                            val rawUrl = item.optString("url", "")
+                            val rawUrl = item.optString("url", "").trim()
                             if (rawUrl.isBlank()) continue
                             val cookie = item.optString("signCookie", "")
+                                .trim()
                                 .takeIf { it.isNotBlank() }
                                 ?: dataCookie
                             val url = resolvedUrl(rawUrl, cookie) ?: continue
@@ -525,7 +532,11 @@ object MovieBoxV2Shared {
 
                 if (parsed.isNotEmpty()) {
                     Log.d(tag, "[MOVIEBOX-V2] subject=$subjectId se=$se ep=$ep streams=${parsed.size}")
-                    return PlaybackResult(parsed.distinctBy { it.url }, bearer)
+                    val ordered = parsed.distinctBy { it.url }.sortedWith(
+                        compareByDescending<Stream> { linkType(it) == ExtractorLinkType.DASH }
+                            .thenByDescending { quality(it) ?: 0 }
+                    )
+                    return PlaybackResult(ordered, bearer)
                 }
             }
         }
@@ -541,12 +552,12 @@ object MovieBoxV2Shared {
         }
     }
 
-    private fun quality(stream: Stream): Int =
+    private fun quality(stream: Stream): Int? =
         Regex("""\d{3,4}""")
             .findAll(stream.resolutions.orEmpty())
             .mapNotNull { it.value.toIntOrNull() }
             .filter { it in 144..4320 }
-            .maxOrNull() ?: 1080
+            .maxOrNull()
 
     private suspend fun subtitles(
         subjectId: String,
@@ -679,12 +690,14 @@ object MovieBoxV2Shared {
         for (stream in streams) {
             val type = linkType(stream)
             val q = quality(stream)
+            val qualityLabel = q?.let { " ${it}p" }.orEmpty()
             val kind = when (type) {
                 ExtractorLinkType.DASH -> "DASH"
                 ExtractorLinkType.M3U8 -> "HLS"
                 else -> "VIDEO"
             }
-            val codec = stream.codec?.let { " ${it.uppercase()}" }.orEmpty()
+            val codec = stream.codec?.trim()?.takeIf { it.isNotBlank() }
+                ?.let { " ${it.uppercase()}" }.orEmpty()
             val headers = mutableMapOf(
                 "Referer" to "$API_URL/",
                 "User-Agent" to USER_AGENT
@@ -693,12 +706,13 @@ object MovieBoxV2Shared {
 
             callback(
                 newExtractorLink(
-                    source = "MovieBox",
-                    name = "MovieBox $kind ${q}p$codec",
+                    // CloudStream resolves getVideoInterceptor by link.source.
+                    source = sourceTag,
+                    name = "MovieBox $kind$qualityLabel$codec",
                     url = stream.url,
                     type = type
                 ) {
-                    quality = q
+                    q?.let { quality = it }
                     this.headers = headers
                 }
             )

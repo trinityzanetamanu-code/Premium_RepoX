@@ -46,7 +46,7 @@ class Adicinemax21PrefetchProvider : Adicinemax21() {
     private fun family(link: ExtractorLink): String {
         val raw = link.source.ifBlank { link.name }.lowercase()
         return when {
-            raw.contains("moviebox") -> "moviebox"
+            MovieBoxV2Shared.isMovieBoxLink(link) || raw.contains("moviebox") -> "moviebox"
             raw.contains("vidsrc") -> "vidsrc"
             raw.contains("idlix") || raw.contains("majorplay") -> "idlix"
             else -> raw.trim()

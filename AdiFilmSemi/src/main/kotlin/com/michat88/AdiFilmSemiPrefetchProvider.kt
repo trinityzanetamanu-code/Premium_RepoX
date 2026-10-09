@@ -1,6 +1,7 @@
 package com.michat88
 
 import android.util.Log
+import com.Adicinemax21.MovieBoxV2Shared
 import com.Adicinemax21.Adicinemax21IdlixShared
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.SubtitleFile
@@ -43,7 +44,7 @@ class AdiFilmSemiPrefetchProvider : AdiFilmSemi() {
     private fun family(link: ExtractorLink): String {
         val raw = link.source.ifBlank { link.name }.lowercase()
         return when {
-            raw.contains("moviebox") -> "moviebox"
+            MovieBoxV2Shared.isMovieBoxLink(link) || raw.contains("moviebox") -> "moviebox"
             raw.contains("vidsrc") -> "vidsrc"
             raw.contains("idlix") || raw.contains("majorplay") -> "idlix"
             else -> raw.trim()
