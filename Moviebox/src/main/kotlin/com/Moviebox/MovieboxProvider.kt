@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.app
 import com.fasterxml.jackson.annotation.JsonProperty
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -177,10 +178,7 @@ class MovieBoxProvider : MainAPI() {
         fun attachContext(context: Context) {
             appContext = context.applicationContext
             loadCategories()
-            val id = deviceId()
-            // Logging sementara: verifikasi stabil setelah restart, lalu boleh dihapus.
-            Log.d(TAG, "[IDENTITY] device_id=$id len=${id.length} " +
-                    "valid=${ID_FORMAT.matches(id)} persisted=$persisted")
+            deviceId()
         }
 
         /**
@@ -1265,9 +1263,14 @@ class MovieBoxProvider : MainAPI() {
     }
 
     // 4. VIDEO INTERCEPTOR
-    // Cloudstream's default interceptor is intentionally used. The current
-    // MovieBox CS3 provider does not override it; ExtractorLink headers are
-    // allowed to flow through the player stack unchanged.
+    // A non-null interceptor selects CloudStream's OkHttp media data source.
+    // Keep the request and response unchanged, including signed media headers.
+    private val videoInterceptor = Interceptor { chain ->
+        chain.proceed(chain.request())
+    }
+
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor =
+        videoInterceptor
 
     // SUBTITLE
     // Struktur terbukti dari server:
