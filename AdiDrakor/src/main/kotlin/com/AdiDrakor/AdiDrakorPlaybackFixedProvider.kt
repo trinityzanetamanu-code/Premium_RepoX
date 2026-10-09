@@ -5,12 +5,10 @@ import com.Adicinemax21.Adicinemax21VidSrcShared
 import com.Adicinemax21.MovieBoxV2Shared
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Interceptor
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
@@ -19,10 +17,10 @@ import kotlin.coroutines.cancellation.CancellationException
 
 class AdiDrakorPlaybackFixedProvider : AdiDrakor() {
     companion object {
-        private const val SOURCE_GRACE_MS = 12_000L
-        private const val GRACE_POLL_MS = 75L
-        private const val TARGET_SOURCE_COUNT = 3
-        private const val FINAL_SETTLE_MS = 250L
+        // Idlix includes a server countdown up to 30s plus matching/claim HTTP.
+        private const val IDLIX_TIMEOUT_MS = 90_000L
+        // VidSrc includes a 15s WASM phase plus page traversal and fallback.
+        private const val VIDSRC_TIMEOUT_MS = 60_000L
     }
 
     private fun sourceKey(link: ExtractorLink): String {
@@ -35,9 +33,8 @@ class AdiDrakorPlaybackFixedProvider : AdiDrakor() {
         }
     }
 
-    private fun graceForwarder(
+    private fun forwarder(
         emitted: AtomicInteger,
-        firstReady: CompletableDeferred<Boolean>,
         sourceKeys: MutableSet<String>,
         callback: (ExtractorLink) -> Unit
     ): (ExtractorLink) -> Unit = { link ->
@@ -46,7 +43,6 @@ class AdiDrakorPlaybackFixedProvider : AdiDrakor() {
         val position = emitted.incrementAndGet()
         callback(link)
         Log.i("AdiDrakor", "[THREE-SOURCE] callback|FAMILY=$family|LINKS=$position|FAMILIES=${sourceKeys.size}")
-        if (position == 1) firstReady.complete(true)
     }
 
     private fun intOrNull(payload: JSONObject, key: String): Int? =
@@ -125,15 +121,25 @@ class AdiDrakorPlaybackFixedProvider : AdiDrakor() {
             }
         }
         val idlix = launch {
-            try { loadIdlix(data, subtitleCallback, callback) }
-            catch (error: Exception) {
+            try {
+                val completed = withTimeoutOrNull(IDLIX_TIMEOUT_MS) {
+                    loadIdlix(data, subtitleCallback, callback)
+                    true
+                }
+                if (completed != true) Log.w("AdiDrakor", "[IDLIX] resolver timeout=${IDLIX_TIMEOUT_MS}ms")
+            } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 Log.e("AdiDrakor", "[IDLIX] ${error.javaClass.simpleName}: ${error.message}")
             }
         }
         val vidSrc = launch {
-            try { loadVidSrc(data, subtitleCallback, callback) }
-            catch (error: Exception) {
+            try {
+                val completed = withTimeoutOrNull(VIDSRC_TIMEOUT_MS) {
+                    loadVidSrc(data, subtitleCallback, callback)
+                    true
+                }
+                if (completed != true) Log.w("AdiDrakor", "[VIDSRC] resolver timeout=${VIDSRC_TIMEOUT_MS}ms")
+            } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 Log.e("AdiDrakor", "[VIDSRC] ${error.javaClass.simpleName}: ${error.message}")
             }
@@ -148,38 +154,14 @@ class AdiDrakorPlaybackFixedProvider : AdiDrakor() {
         callback: (ExtractorLink) -> Unit
     ): Boolean = supervisorScope {
         val emitted = AtomicInteger(0)
-        val firstReady = CompletableDeferred<Boolean>()
         val sourceKeys = ConcurrentHashMap.newKeySet<String>()
-        val forward = graceForwarder(emitted, firstReady, sourceKeys, callback)
+        val forward = forwarder(emitted, sourceKeys, callback)
 
-        val loaderJob = launch {
-            try {
-                loadAllSources(data, subtitleCallback, forward)
-            } catch (error: Exception) {
-                if (error is CancellationException) throw error
-                Log.e("AdiDrakor", "[THREE-SOURCE] resolver error: ${error.message}")
-            } finally {
-                if (!firstReady.isCompleted) firstReady.complete(emitted.get() > 0)
-            }
-        }
+        // Forward immediately; another source's first link never ends this scope.
+        // Parent cancellation still stops every resolver; slow sources own their deadlines.
+        loadAllSources(data, subtitleCallback, forward)
 
-        val ready = firstReady.await()
-        if (!ready) {
-            loaderJob.join()
-            return@supervisorScope false
-        }
-
-        val started = System.nanoTime()
-        while (loaderJob.isActive && sourceKeys.size < TARGET_SOURCE_COUNT) {
-            val elapsed = (System.nanoTime() - started) / 1_000_000L
-            if (elapsed >= SOURCE_GRACE_MS) break
-            delay(minOf(GRACE_POLL_MS, SOURCE_GRACE_MS - elapsed))
-        }
-
-        if (loaderJob.isActive && sourceKeys.size >= TARGET_SOURCE_COUNT) delay(FINAL_SETTLE_MS)
-        if (loaderJob.isActive) loaderJob.cancelAndJoin()
-
-        Log.i("AdiDrakor", "[THREE-SOURCE] release-player|LINKS=${emitted.get()}|FAMILIES=${sourceKeys.joinToString(",")}")
+        Log.i("AdiDrakor", "[THREE-SOURCE] complete|LINKS=${emitted.get()}|FAMILIES=${sourceKeys.joinToString(",")}")
         emitted.get() > 0
     }
 

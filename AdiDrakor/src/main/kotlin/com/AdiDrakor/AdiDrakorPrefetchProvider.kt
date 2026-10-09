@@ -7,12 +7,10 @@ import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Interceptor
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
@@ -21,10 +19,8 @@ import kotlin.coroutines.cancellation.CancellationException
 
 class AdiDrakorPrefetchProvider : AdiDrakor() {
     companion object {
-        private const val SOURCE_WINDOW_MS = 14_500L
-        private const val POLL_MS = 75L
-        private const val TARGET_FAMILIES = 3
-        private const val FINAL_SETTLE_MS = 200L
+        // Same countdown + network budget as the delegate's Idlix resolver.
+        private const val IDLIX_TIMEOUT_MS = 90_000L
     }
 
     private val playbackDelegate = AdiDrakorPlaybackFixedProvider()
@@ -53,18 +49,17 @@ class AdiDrakorPrefetchProvider : AdiDrakor() {
 
     private fun forwarder(
         emitted: AtomicInteger,
-        firstReady: CompletableDeferred<Boolean>,
         families: MutableSet<String>,
+        idlixUrls: MutableSet<String>,
         callback: (ExtractorLink) -> Unit
     ): (ExtractorLink) -> Unit = { link ->
         val key = family(link)
-        val duplicateIdlix = key == "idlix" && families.contains("idlix")
+        val duplicateIdlix = key == "idlix" && !idlixUrls.add(link.url)
         if (!duplicateIdlix) {
             families.add(key)
             val count = emitted.incrementAndGet()
             callback(link)
             Log.i("AdiDrakor", "[IDLIX-PREFETCH] callback|FAMILY=$key|LINKS=$count|FAMILIES=${families.size}")
-            if (count == 1) firstReady.complete(true)
         }
     }
 
@@ -100,48 +95,30 @@ class AdiDrakorPrefetchProvider : AdiDrakor() {
         callback: (ExtractorLink) -> Unit
     ): Boolean = supervisorScope {
         val emitted = AtomicInteger(0)
-        val firstReady = CompletableDeferred<Boolean>()
         val families = ConcurrentHashMap.newKeySet<String>()
-        val forward = forwarder(emitted, firstReady, families, callback)
+        val idlixUrls = ConcurrentHashMap.newKeySet<String>()
+        val forward = forwarder(emitted, families, idlixUrls, callback)
 
-        val loader = launch {
+        // Keep the cached Idlix path and delegate alive independently of first-link timing.
+        // Both remain children of this request; returning completes all owned work.
+        val proven = launch {
+            playbackDelegate.loadLinks(data, isCasting, subtitleCallback, forward)
+        }
+        val prefetchedIdlix = launch {
             try {
-                supervisorScope {
-                    val proven = launch {
-                        playbackDelegate.loadLinks(data, isCasting, subtitleCallback, forward)
-                    }
-                    val prefetchedIdlix = launch {
-                        try {
-                            loadFastIdlix(data, subtitleCallback, forward)
-                        } catch (error: Exception) {
-                            if (error is CancellationException) throw error
-                            Log.e("AdiDrakor", "[IDLIX-PREFETCH] ${error.javaClass.simpleName}: ${error.message}")
-                        }
-                    }
-                    joinAll(proven, prefetchedIdlix)
+                val completed = withTimeoutOrNull(IDLIX_TIMEOUT_MS) {
+                    loadFastIdlix(data, subtitleCallback, forward)
+                    true
                 }
-            } finally {
-                if (!firstReady.isCompleted) firstReady.complete(emitted.get() > 0)
+                if (completed != true) Log.w("AdiDrakor", "[IDLIX-PREFETCH] resolver timeout=${IDLIX_TIMEOUT_MS}ms")
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                Log.e("AdiDrakor", "[IDLIX-PREFETCH] ${error.javaClass.simpleName}: ${error.message}")
             }
         }
+        joinAll(proven, prefetchedIdlix)
 
-        val ready = firstReady.await()
-        if (!ready) {
-            loader.join()
-            return@supervisorScope false
-        }
-
-        val started = System.nanoTime()
-        while (loader.isActive && families.size < TARGET_FAMILIES) {
-            val elapsed = (System.nanoTime() - started) / 1_000_000L
-            if (elapsed >= SOURCE_WINDOW_MS) break
-            delay(minOf(POLL_MS, SOURCE_WINDOW_MS - elapsed))
-        }
-
-        if (loader.isActive && families.size >= TARGET_FAMILIES) delay(FINAL_SETTLE_MS)
-        if (loader.isActive) loader.cancelAndJoin()
-
-        Log.i("AdiDrakor", "[IDLIX-PREFETCH] release|FAMILIES=${families.joinToString(",")}|LINKS=${emitted.get()}")
+        Log.i("AdiDrakor", "[IDLIX-PREFETCH] complete|FAMILIES=${families.joinToString(",")}|LINKS=${emitted.get()}")
         emitted.get() > 0
     }
 
