@@ -23,7 +23,7 @@
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiDrakor.cs3",
         "status": 1,
-        "version": 18,
+        "version": 19,
         "name": "AdiDrakor",
         "internalName": "AdiDrakor",
         "authors": [
@@ -39,7 +39,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
         "apiVersion": 1,
-        "fileHash": "sha256-6c2b44c6373ff6d614bd4a9e4ffac0d7bd48155349d42c9f4cd981465463854a"
+        "fileHash": "sha256-f4165b97c6ddd47f73333abff9fdb823e2f1247f39f4639342f086cb98835942"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiFilmSemi.cs3",
