@@ -65,13 +65,13 @@
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiXtream.cs3",
         "status": 1,
-        "version": 22,
+        "version": 23,
         "name": "AdiXtream",
         "internalName": "AdiXtream",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 119214,
+        "fileSize": 119215,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -81,7 +81,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
         "apiVersion": 1,
-        "fileHash": "sha256-e4c88efd9f461c01582ff894ddef80604d481c207e198e111acdabf2a0b57005"
+        "fileHash": "sha256-71559736774ee425158b624b1e1bce32d0a00f3fb640ddbdf6fc71a20541e46f"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Cinemacity.cs3",
