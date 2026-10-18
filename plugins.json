@@ -2,13 +2,13 @@
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Adicinemax21.cs3",
         "status": 1,
-        "version": 30,
+        "version": 31,
         "name": "Adicinemax21",
         "internalName": "Adicinemax21",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 207855,
+        "fileSize": 316962,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -18,18 +18,18 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
         "apiVersion": 1,
-        "fileHash": "sha256-598cd90660fbe8b3782a50cf81a0d2029af5e37eb338f394d5158b54e4999220"
+        "fileHash": "sha256-3eecb61b5723cf4644dc59a746d192e6da67fa1397fc992829bf60a15ea74a0f"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiDrakor.cs3",
         "status": 1,
-        "version": 25,
+        "version": 26,
         "name": "AdiDrakor",
         "internalName": "AdiDrakor",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 207348,
+        "fileSize": 316239,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -39,18 +39,18 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
         "apiVersion": 1,
-        "fileHash": "sha256-721c179d61da97f9c0769776e12c7f122b750b107178c9f909be5cd594df9944"
+        "fileHash": "sha256-fd1d9453810b8c144f82d7bc2f1f9f22ca56b35af5709ba03ca337dc22cd7716"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiFilmSemi.cs3",
         "status": 1,
-        "version": 23,
+        "version": 24,
         "name": "AdiFilmSemi",
         "internalName": "AdiFilmSemi",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 207329,
+        "fileSize": 316177,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -60,18 +60,18 @@
         ],
         "iconUrl": "https://klikxxi.me/wp-content/uploads/2024/02/cropped-site-icon.png",
         "apiVersion": 1,
-        "fileHash": "sha256-e29e94eccc06fa52e67ed67a0116e32f842bd70bd06d5d88405508df1646f32f"
+        "fileHash": "sha256-b68ca9187a88dbf41b98bc45ca50fea2b0dd3ea7fd5f8dbf13ae3d93e124e38b"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/AdiXtream.cs3",
         "status": 1,
-        "version": 29,
+        "version": 30,
         "name": "AdiXtream",
         "internalName": "AdiXtream",
         "authors": [
             "aldry84"
         ],
-        "fileSize": 193980,
+        "fileSize": 302909,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -81,7 +81,7 @@
         ],
         "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/aa97004f4d1d74ed69245e56da2c6ad3293b6106/Icons/Adi.png",
         "apiVersion": 1,
-        "fileHash": "sha256-b038bbe536a7dcaaae41d7b548a8a4d05544821a698bebe2f761084a6dcf701d"
+        "fileHash": "sha256-33a58c24cce6a20ad31bc49215af882a7b03c45ece08f8ab1be1891e3b12d4fa"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Cinemacity.cs3",
