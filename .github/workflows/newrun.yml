@@ -165,46 +165,74 @@ jobs:
     if: contains(github.event.head_commit.message, '[probe-only]')
     runs-on: ubuntu-latest
     steps:
-      - name: Verify exact Muvipro AJAX and embedded host
+      - name: Node 26 for REA
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: Inspect turtle4up and kr21 sources and runtime requests
         shell: bash
         run: |
           python3 - <<'PY'
-          import urllib.request,urllib.parse,re,html
+          import urllib.request,re,urllib.parse
           pages=[
-            "https://kurakura21.com/sub-indo-siping-2026/",
-            "https://kurakura21.com/sub-indo-jur-770-nanami-mihi/"
+            ("turtle4up","https://turtle4up.top/#owmx8n","https://turtle4up.top/assets/index-B_XTu8nA.js"),
+            ("kr21","https://kr21.click/e/azyg0cfvg24r/siping-2026-h","https://kr21.click/assets/index-DocunfmE.js")
           ]
-          def fetch(url,data=None,referer=None):
-              h={"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36","Referer":referer or "https://kurakura21.com/","Accept":"*/*"}
-              if data is not None:h["Content-Type"]="application/x-www-form-urlencoded; charset=UTF-8";h["X-Requested-With"]="XMLHttpRequest"
-              req=urllib.request.Request(url,data=urllib.parse.urlencode(data).encode() if data else None,headers=h)
-              with urllib.request.urlopen(req,timeout=18) as r:return r.status,r.read(1000000).decode("utf-8","replace"),r.url
-          for page in pages:
-              print("PAGE",page,flush=True)
+          def fetch(url,referer):
+              req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 Chrome/134.0.0.0 Safari/537.36","Referer":referer})
+              with urllib.request.urlopen(req,timeout=20) as res:return res.status,res.read(6000000).decode("utf-8","replace")
+          for name,page,js in pages:
+              print("HOST",name,"PAGE",page,flush=True)
               try:
-                  code,markup,_=fetch(page)
-                  m=re.search(r'id="muvipro_player_content_id"[^>]*data-id="(\d+)"',markup)
-                  print("PAGE_STATUS",code,"ID",m.group(1) if m else "NOT_FOUND",flush=True)
-                  if not m:continue
-                  tabs=re.findall(r'<a href="#(p\d+)"[^>]*>([^<]+)',markup,re.I)
-                  print("TABS",tabs,flush=True)
-                  for tab,label in tabs:
-                      post={"action":"muvipro_player_content","tab":tab,"post_id":m.group(1)}
-                      try:
-                          status,body,final=fetch("https://kurakura21.com/wp-admin/admin-ajax.php",post,page)
-                          print("AJAX",tab,label,"STATUS",status,"LEN",len(body),"HTML",repr(body[:1800]),flush=True)
-                          urls=re.findall(r'<iframe[^>]+src=["\x27]([^"\x27]+)',body,re.I)
-                          print("IFRAMES",tab,urls[:8],flush=True)
-                          for target in urls[:2]:
-                              print("EMBED",target,flush=True)
-                              try:
-                                  st,raw,_=fetch(target,referer=page)
-                                  print("EMBED_STATUS",st,"SIZE",len(raw),"START",repr(raw[:650]),flush=True)
-                                  print("PLAYER_SCRIPT_PATHS",re.findall(r'<script[^>]+src=["\x27]([^"\x27]+)',raw,re.I)[-12:],flush=True)
-                                  for pattern in ["jwplayer","m3u8","mp4","file:","source:","location.hash","atob","eval(","fetch(","axios","window.location","hls.js"]:
-                                      hits=list(re.finditer(re.escape(pattern),raw,re.I))
-                                      if hits:print("EMBED_MATCH",pattern,len(hits),repr(raw[max(0,hits[0].start()-100):hits[0].end()+240])[:380],flush=True)
-                              except Exception as e:print("EMBED_ERROR",type(e).__name__,str(e)[:200],flush=True)
-                      except Exception as e:print("AJAX_ERROR",tab,type(e).__name__,str(e)[:200],flush=True)
-              except Exception as e:print("PAGE_ERROR",type(e).__name__,str(e)[:200],flush=True)
+                  status,s=fetch(js,page)
+                  print("SCRIPT_HTTP",status,"SCRIPT_LEN",len(s),flush=True)
+                  patterns=[".m3u8",".mp4","/api/","axios","fetch(","location.hash","window.location.hash","/e/","/embed/","videoUrl","streamUrl","getVideo","source","hls","token"]
+                  for word in patterns:
+                      matches=list(re.finditer(re.escape(word),s,re.I))
+                      if matches:
+                          print("SCRIPT_HITS",word,len(matches),flush=True)
+                          for m in matches[:3]:
+                              print("SCRIPT_CONTEXT",word,repr(s[max(0,m.start()-140):m.end()+210])[:400],flush=True)
+                  urls=re.findall(r'https?://[A-Za-z0-9_.:/?&=%#@+-]+',s)
+                  print("SCRIPT_URLS",list(dict.fromkeys(urls))[:55],flush=True)
+              except Exception as exc:print("JS_FETCH_FAILED",type(exc).__name__,str(exc)[:180],flush=True)
           PY
+          timeout 85s npm install -g rea-agents@latest --no-fund --no-audit > /tmp/rea-install.log 2>&1 || true
+          if ! command -v rea >/dev/null; then echo 'REA_MISSING'; exit 0; fi
+          CHROME=$(command -v google-chrome || command -v chromium)
+          python3 - "$CHROME" <<'PY'
+          import json,sys
+          urls={
+          "turtle":"https://turtle4up.top/#owmx8n",
+          "kr21":"https://kr21.click/e/azyg0cfvg24r/siping-2026-h"
+          }
+          for name,url in urls.items():
+              scenario={"browser":{"mode":"launch","executable_path":sys.argv[1]},"start_url":{"url":url},"actions":[{"step_id":"observe","action":"wait_for_timeout","duration_ms":5000}],"capture":{"events":["network"],"network":{"response_body":False},"at_end":["dom","url"]}}
+              open("/tmp/kura-"+name+".json","w").write(json.dumps(scenario))
+          PY
+          for name in turtle kr21; do
+            timeout 75s rea capture-browser-scenario "/tmp/kura-$name.json" --json >"/tmp/rea-$name.json" 2>"/tmp/rea-$name.err" || true
+            python3 - "$name" <<'PY'
+          import json,sys,urllib.parse
+          name=sys.argv[1]
+          try:
+              n=json.load(open("/tmp/rea-"+name+".json")).get("normalized_result",{})
+              print("REA_HOST",name,"STEPS",[(x.get("step_id"),x.get("status"),str(x.get("error"))[:150]) for x in n.get("steps",[])],flush=True)
+              ev=n.get("events",{})
+              items=ev.get("items",[]) if isinstance(ev,dict) else []
+              print("REA_EVENTS",name,len(items),"COMPLETENESS",n.get("completeness"),flush=True)
+              seen=set()
+              for e in items:
+                  url=e.get("url",{})
+                  if isinstance(url,dict):url=url.get("url","")
+                  if not isinstance(url,str) or not url.startswith("http"):continue
+                  host=urllib.parse.urlparse(url).hostname or ""
+                  if any(word in host for word in ["juicyads","jads.","chaseherbal","cloudflareinsights","googlesyndication","doubleclick","facebook","google-analytics","adservice","cdn-cgi","exoclick","a-ads","popcash"]):continue
+                  key=(e.get("method"),url,e.get("status"))
+                  if key in seen:continue
+                  seen.add(key)
+                  print("REA_REQUEST",name,"METHOD",e.get("method"),"HTTP",e.get("status"),"KIND",e.get("resource_type"),"URL",url[:450],flush=True)
+                  if len(seen)>130:break
+          except Exception as e:print("REA_HOST_FAILED",name,repr(e)[:300],flush=True)
+          PY
+          done
