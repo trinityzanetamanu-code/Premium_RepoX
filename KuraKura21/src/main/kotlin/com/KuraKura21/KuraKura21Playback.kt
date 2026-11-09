@@ -139,7 +139,7 @@ internal class KuraKura21Playback(
         )
     }
 
-    private fun emitMedia(
+    private suspend fun emitMedia(
         label: String,
         url: String,
         referer: String,
