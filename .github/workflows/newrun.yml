@@ -165,99 +165,60 @@ jobs:
     if: contains(github.event.head_commit.message, '[probe-only]')
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect Muvipro AJAX for exact supplied film
+      - name: Inspect F4Stream iframe markup and JS playback config
         shell: bash
         run: |
           python3 - <<'PY'
-          import urllib.request,urllib.parse,re,html,sys
-          page="https://kurakura21.com/ibu-kos-galak-kena-entot/"
-          ua="Mozilla/5.0 (Linux; Android 17; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Mobile Safari/537.36"
-          def fetch(url, data=None, ref=page):
-            headers={"User-Agent":ua,"Accept":"*/*","Referer":ref}
-            if data is not None:
-              headers["Content-Type"]="application/x-www-form-urlencoded; charset=UTF-8"
-              headers["X-Requested-With"]="XMLHttpRequest"
-            req=urllib.request.Request(url,data=urllib.parse.urlencode(data).encode() if data else None,headers=headers)
-            with urllib.request.urlopen(req,timeout=20) as r:return r.status,r.read(1500000).decode("utf-8","replace"),r.url
-          try:
-            status,markup,final=fetch(page)
-            ids=re.findall(r'id=["\x27]muvipro_player_content_id["\x27][^>]*data-id=["\x27]([0-9]+)',markup)
-            print("SAMPLE_HTTP",status,"LENGTH",len(markup),"POST_ID",ids,"FINAL",final,flush=True)
-            tabmatches=re.findall(r'<a\s+[^>]*href=["\x27]#(p[0-9]+)["\x27][^>]*>([^<]+)',markup,re.I)
-            print("TABS",tabmatches,flush=True)
-            for tab,label in tabmatches[:6]:
-              try:
-                status,body,_=fetch("https://kurakura21.com/wp-admin/admin-ajax.php",{"action":"muvipro_player_content","post_id":ids[0],"tab":tab})
-                frames=re.findall(r'<iframe[^>]*src=["\x27]([^"\x27]+)',body,re.I)
-                print("TAB_RESULT",tab,label,"HTTP",status,"HTML_LENGTH",len(body),"IFRAMES",frames,flush=True)
-                for frame in frames[:2]:
-                  try:
-                    st,fb,_=fetch(frame,ref=page)
-                    print("IFRAME",tab,"HTTP",st,"LENGTH",len(fb),"TITLE",(re.search(r"<title[^>]*>(.*?)</title>",fb,re.I|re.S).group(1) if re.search(r"<title[^>]*>(.*?)</title>",fb,re.I|re.S) else ""),"SCRIPTS",re.findall(r'<script[^>]+src=["\x27]([^"\x27]+)',fb,re.I)[-8:],flush=True)
-                  except Exception as e:print("IFRAME_ERR",tab,type(e).__name__,str(e)[:220],flush=True)
-              except Exception as e:print("TAB_ERR",tab,repr(e)[:220],flush=True)
-          except Exception as e:print("SAMPLE_ERR",type(e).__name__,str(e)[:260],flush=True)
+          import urllib.request,urllib.parse,re,html,collections,json
+          targets=[
+            ("F4_EMBED","https://k21cdn.click/e/ii111gel","https://kurakura21.com/ibu-kos-galak-kena-entot/"),
+            ("F4_PLAYER_JS","https://f4stream.com/assets/client/js/player.js?v=1793204874","https://k21cdn.click/e/ii111gel"),
+            ("TURTLE_API","https://turtle4up.top/api/stream?s=dvrj","https://turtle4up.top/dvrj"),
+            ("BYSE_DETAILS","https://kr21.click/api/videos/a4g5v3xj6ltr/embed/details","https://kr21.click/e/a4g5v3xj6ltr/ibu-kos-kurakura21"),
+            ("BYSE_SETTINGS","https://kr21.click/api/videos/a4g5v3xj6ltr/embed/settings","https://kr21.click/e/a4g5v3xj6ltr/ibu-kos-kurakura21"),
+          ]
+          for label,u,ref in targets:
+            h={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36","Accept":"*/*","Referer":ref}
+            try:
+              with urllib.request.urlopen(urllib.request.Request(u,headers=h),timeout=22) as rr:body=rr.read(1200000).decode("utf-8","replace");st=rr.status;ct=rr.headers.get("Content-Type")
+              print("TARGET",label,"HTTP",st,"CT",ct,"LEN",len(body),flush=True)
+              if label=="F4_EMBED":
+                print("MARKUP_BEGIN",body[:5900],flush=True)
+              elif label=="F4_PLAYER_JS":
+                patterns=["sources","source","file:","url:","api","getPlayer","xhr","play","mp4","m3u8","atob","fetch(","ajax","token"]
+                for p in patterns:
+                  hits=list(re.finditer(re.escape(p),body,re.I))
+                  if hits:
+                    print("JS_HITS",p,len(hits),flush=True)
+                    for m in hits[:2]:print("JS_CONTEXT",p,repr(body[max(0,m.start()-130):m.end()+280])[:550],flush=True)
+                print("JS_URLS",list(dict.fromkeys(re.findall(r'https?://[a-zA-Z0-9.:-]+(?:/[^\s"\x27<>]*)?',body)))[:35],flush=True)
+              else:
+                try:
+                  obj=json.loads(body)
+                  def shape(obj):
+                    if isinstance(obj,dict):return {k:shape(v) for k,v in obj.items()}
+                    if isinstance(obj,list):return [shape(v) for v in obj[:3]]
+                    if isinstance(obj,str):
+                      if obj.startswith("http"):return "URL HOST "+str(urllib.parse.urlsplit(obj).hostname)
+                      return obj[:140]
+                    return obj
+                  print("API_RESULT",label,str(shape(obj))[:2200],flush=True)
+                except Exception:print("API_RAW",label,body[:1500],flush=True)
+            except Exception as e:print("ERROR",label,type(e).__name__,str(e)[:200],flush=True)
           PY
-      - name: Install Playwright without bundling browser
+      - name: Inspect F4Stream browser DOM and media requests
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/kura-browser"
-          cd "$RUNNER_TEMP/kura-browser"
-          npm install playwright --no-audit --no-fund --no-save >/dev/null
           CHROME=$(command -v google-chrome || command -v chromium || true)
-          printf 'CHROME=%s\n' "$CHROME"
-      - name: Observe user-visible Play interactions for each real server
-        shell: bash
-        run: |
-          cd "$RUNNER_TEMP/kura-browser"
-          cat > sample.cjs <<'JS'
-          const { chromium } = require('playwright');
-          const urls=[
-            "https://kurakura21.com/ibu-kos-galak-kena-entot/",
-          ];
-          (async()=>{
-          const executablePath=process.env.CHROME||"/usr/bin/google-chrome";
-          const browser=await chromium.launch({headless:true,executablePath,args:['--no-sandbox','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']});
-          const context=await browser.newContext({userAgent:'Mozilla/5.0 (Linux; Android 17; Mobile) AppleWebKit/537.36 Chrome/135.0.0.0 Mobile Safari/537.36',viewport:{width:1080,height:780}});
-          const doc=await context.newPage();
-          await doc.goto(urls[0],{waitUntil:'domcontentloaded',timeout:25000}).catch(()=>{});
-          await doc.waitForTimeout(1300);
-          const tabs=await doc.locator('#gmr-tab a[href^="#p"]').evaluateAll(els=>els.map(e=>({tab:e.getAttribute('href'),label:e.textContent.trim()})));
-          const targets=[];
-          for(const {tab,label} of tabs){
-            await doc.locator('#gmr-tab a[href="'+tab+'"]').click({timeout:7000}).catch(e=>console.log('TAB_CLICK_ERROR',tab,String(e).slice(0,150)));
-            await doc.waitForTimeout(1300);
-            const src=await doc.locator(tab+' iframe').first().getAttribute('src').catch(()=>"");
-            targets.push({label,url:src});
-          }
-          console.log('BROWSER_TABS',JSON.stringify(targets));
-          for(const target of targets){
-            if(!target.url)continue;
-            const page=await context.newPage();
-            let requestCount=0, mediaRequests=[];
-            page.on('response',response=>{
-              const url=response.url();
-              if(/\.(m3u8|mp4|mpd|m4s|ts)(?:[?#]|$)|\/api\/videos\/stream\/|\/api\/stream\?/.test(url)){
-                const u=new URL(url);mediaRequests.push({host:u.hostname,path:u.pathname,status:response.status(),type:response.headers()['content-type']||''});
-              }
-              if(++requestCount>600)return;
-            });
-            console.log('TEST_PLAYER',target.label,new URL(target.url).hostname);
-            await page.goto(target.url,{waitUntil:'domcontentloaded',timeout:25000,referer:urls[0]}).catch(e=>console.log('GOTO_ERROR',String(e).slice(0,160)));
-            await page.waitForTimeout(4500);
-            const before=await page.evaluate(()=>({title:document.title,buttons:[...document.querySelectorAll('button,[role="button"],[id*="play"],[class*="play"]')].slice(0,15).map(x=>({tag:x.tagName,id:x.id,cl:String(x.className).slice(0,60),label:(x.getAttribute('aria-label')||x.textContent||'').trim().slice(0,60)})),frames:[...document.querySelectorAll('iframe')].map(x=>x.src)})).catch(()=>({}));
-            console.log('PLAYER_BEFORE',target.label,JSON.stringify(before).slice(0,1400));
-            if(target.url.includes('turtle4up')){
-              for(const sel of ['#player-button-container','.tvp-preplay','[aria-label="Video player"]','[class*="preplay"]']){
-                try{const count=await page.locator(sel).count();if(count){await page.locator(sel).first().click({timeout:3000,force:true});console.log('CLICKED',target.label,sel);break;}}catch(e){console.log('CLICK_FAIL',target.label,sel,String(e).slice(0,100))}
-              }
-            }
-            await page.waitForTimeout(4000);
-            console.log('PLAYER_MEDIA',target.label,JSON.stringify(mediaRequests.slice(0,35)));
-            await page.close();
-          }
-          await context.close();await browser.close();
-          })().catch(e=>{console.log('BROWSER_ERROR',String(e).slice(0,600));process.exitCode=1});
-          JS
-          CHROME=$(command -v google-chrome || command -v chromium || true)
-          timeout 120s env CHROME="$CHROME" node sample.cjs
+          if [ -z "$CHROME" ]; then echo NO_CHROME; exit 0; fi
+          timeout 28s "$CHROME" --no-sandbox --headless --disable-gpu --disable-dev-shm-usage --virtual-time-budget=9000 --dump-dom "https://k21cdn.click/e/ii111gel" > /tmp/f4-dom.html 2>/tmp/f4err || true
+          python3 - <<'PY'
+          import re
+          s=open("/tmp/f4-dom.html").read()
+          print("DOM_SIZE",len(s),flush=True)
+          for w in ['<video','<source','src="','m3u8','mp4','iframe','jwplayer','plyr','hls','play','captcha','token']:
+            ms=list(re.finditer(re.escape(w),s,re.I))
+            if ms:
+              print("DOM_MATCH",w,len(ms),flush=True)
+              for m in ms[:3]:print("DOM_CONTEXT",w,repr(s[max(0,m.start()-130):m.end()+350])[:550],flush=True)
+          PY
