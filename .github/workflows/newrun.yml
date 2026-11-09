@@ -22,7 +22,6 @@ env:
 
 jobs:
   build:
-    if: ${{ !contains(github.event.head_commit.message, '[probe-only]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -160,56 +159,3 @@ jobs:
           fi
           git commit -m "Build $GITHUB_SHA"
           git push origin HEAD:refs/heads/builds
-
-  probe:
-    if: contains(github.event.head_commit.message, '[probe-only]')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Setup Node for REA
-        uses: actions/setup-node@v4
-        with:
-          node-version: '26'
-      - name: REA click through Turtle4Up player overlay
-        shell: bash
-        run: |
-          timeout 100s npm install -g rea-agents@latest --no-fund --no-audit > /tmp/rea-install.log 2>&1 || true
-          CHROME=$(command -v google-chrome || command -v chromium || true)
-          if [ ! -x "$(command -v rea)" ] || [ -z "$CHROME" ]; then echo REA_NOT_AVAILABLE; exit 0; fi
-          python3 - "$CHROME" <<'PY'
-          import json,sys
-          scenarios=[
-            ("click",[
-              {"step_id":"warm","action":"wait_for_timeout","duration_ms":1400},
-              {"step_id":"click_play","action":"click","locator":{"kind":"css","selector":"#player-button-container"},"timeout_ms":11000},
-              {"step_id":"observe","action":"wait_for_timeout","duration_ms":3500}
-            ]),
-            ("baseline",[{"step_id":"observe","action":"wait_for_timeout","duration_ms":4500}])
-          ]
-          for name,acts in scenarios:
-            s={"browser":{"mode":"launch","executable_path":sys.argv[1]},"start_url":{"url":"https://turtle4up.top/bsvh"},"actions":acts,"capture":{"events":["network"],"network":{"request_body":False,"response_body":False},"at_end":["dom","url"]}}
-            open("/tmp/kura-"+name+".json","w").write(json.dumps(s))
-          PY
-          for name in click baseline; do
-            timeout 70s rea capture-browser-scenario "/tmp/kura-$name.json" --json >/tmp/rea-$name.json 2>/tmp/rea-$name.log || true
-            python3 - "$name" <<'PY'
-          import json,sys,urllib.parse
-          name=sys.argv[1]
-          try:
-            n=json.load(open("/tmp/rea-"+name+".json")).get("normalized_result",{})
-            print("SCENARIO",name,"STEPS",[(x.get("step_id"),x.get("status"),str(x.get("error"))[:100]) for x in n.get("steps",[])],flush=True)
-            seen=set()
-            ev=n.get("events") or {}
-            for e in ev.get("items",[])[:650]:
-              raw=e.get("url") or {}
-              u=raw.get("url","") if isinstance(raw,dict) else raw
-              if not isinstance(u,str) or not u.startswith("http"):continue
-              host=urllib.parse.urlsplit(u).hostname or ""
-              if host.endswith(("doubleclick.net","googlesyndication.com","cloudflareinsights.com","jads.co","imasdk.googleapis.com","google.com")):continue
-              key=(e.get("method"),u,e.get("status"))
-              if key in seen:continue
-              seen.add(key)
-              print("NETWORK",name,e.get("method"),e.get("status"),e.get("resource_type"),u[:500],flush=True)
-          except Exception as ex:print("SCENARIO_ERROR",name,repr(ex)[:180],flush=True)
-          PY
-            tail -c 450 /tmp/rea-$name.log
-          done
