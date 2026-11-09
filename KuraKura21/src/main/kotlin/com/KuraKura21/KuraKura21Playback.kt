@@ -9,6 +9,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
+import android.util.Log
 import org.jsoup.Jsoup
 import java.net.URI
 import java.util.Collections
@@ -96,16 +97,23 @@ internal class KuraKura21Playback(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        if (isDirectMedia(server.url)) {
+        // Advertising clips often have ordinary MP4 URLs. Do not emit them.
+        if (isDirectMedia(server.url) && isApprovedMediaHost(server.url)) {
             emitMedia(server.name, server.url, pageUrl, emptyMap(), callback)
             return
         }
+        val extractedLinks = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         try {
-            if (loadExtractor(server.url, pageUrl, subtitleCallback, callback)) return
+            loadExtractor(server.url, pageUrl, subtitleCallback) { link ->
+                extractedLinks.add(link)
+            }
+            val accepted = extractedLinks.toList().filter { isApprovedMediaHost(it.url) }
+            accepted.forEach(callback)
+            if (accepted.isNotEmpty()) return
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            // A host without a registered extractor may still load media in a WebView.
+            // Try first-party iframe playback when no verified extractor exists.
         }
 
         // JS-driven hosts require browser requests to reveal the actual media URL.
@@ -142,26 +150,47 @@ internal class KuraKura21Playback(
             })();
         """.trimIndent() else null
 
-        val media = withTimeoutOrNull(37_000L) {
+
+        // Ad MP4s are commonly just 22-30 seconds long. Only verified media
+        // origins may stop the WebView early. Other HLS is collected for review.
+        val trustedStreamPattern = Regex(
+            """^https?://(?:[a-z0-9-]+\.)*owphbf24\.com/[^?#]+\.(?:m3u8|mp4)(?:[?#]|$)|^https?://n1mwq\.org/api/videos/stream(?:/|\?|$)""",
+            RegexOption.IGNORE_CASE
+        )
+        val hlsPattern = Regex(
+            """^https?://[^?#]+\.m3u8(?:[?#]|$)""",
+            RegexOption.IGNORE_CASE
+        )
+        val requests = withTimeoutOrNull(38_000L) {
             try {
-                WebViewResolver(
-                    Regex(
-                        """^https?://(?![^/]*(?:mmcdn\.com|jads\.co|juicyads|chaseherbalpasty|fozekikikiminu))[^?#]+(?:\.(?:m3u8|mp4|m4v|webm)(?:[?#]|$)|/api/videos/stream/)""",
-                        RegexOption.IGNORE_CASE
-                    ),
-                    // Let the WebView send original JSON POST bodies for Byse attestation/playback.
-                    // The default OkHttp interception cannot replay those bodies faithfully.
+                val (primary, secondary) = WebViewResolver(
+                    trustedStreamPattern,
+                    additionalUrls = listOf(hlsPattern),
                     userAgent = null,
                     useOkhttp = false,
                     script = pageScript,
                     timeout = 35_000L
-                ).resolveUsingWebView(browserUrl, referer = browserReferer).first
+                ).resolveUsingWebView(browserUrl, referer = browserReferer)
+                listOfNotNull(primary) + secondary
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                null
+                emptyList()
             }
-        } ?: return
+        } ?: emptyList()
+
+        val media = requests.distinctBy { it.url.toString() }.firstOrNull { request ->
+            val candidate = request.url.toString()
+            when {
+                isAdMedia(candidate) -> false
+                isApprovedMediaHost(candidate) -> true
+                isHls(candidate) -> isLongHls(candidate, request.header("Referer") ?: server.url)
+                else -> false
+            }
+        } ?: run {
+            Log.i("KuraKura21", "No verified movie stream for " + server.name)
+            return
+        }
 
         val url = media.url.toString()
         if (!isDirectMedia(url) && !url.contains("/api/videos/stream/")) return
@@ -178,6 +207,65 @@ internal class KuraKura21Playback(
             if (byseCdn) put("Origin", "https://n1mwq.org")
         }
         emitMedia(server.name, url, mediaReferer, mediaHeaders, callback)
+    }
+
+    private fun isAdMedia(url: String): Boolean = try {
+        val uri = URI(url)
+        val host = uri.host.orEmpty().lowercase()
+        val path = uri.path.orEmpty().lowercase()
+        val adHosts = listOf(
+            "mmcdn.com", "jads.co", "stripchat.com", "juicyads.com",
+            "exoclick.com", "exosrv.com", "trafficjunky.net",
+            "doubleclick.net", "googlesyndication.com"
+        )
+        adHosts.any { host == it || host.endsWith(".$it") } ||
+            Regex("""(?:^|/)(?:ads?|preroll|vast|vpaid|promo|sponsor)(?:/|[-_.])""")
+                .containsMatchIn(path)
+    } catch (_: Exception) { true }
+
+    private fun isApprovedMediaHost(url: String): Boolean = try {
+        if (isAdMedia(url)) {
+            false
+        } else {
+            val uri = URI(url)
+            val host = uri.host.orEmpty().lowercase()
+            val knownCdn = host == "owphbf24.com" || host.endsWith(".owphbf24.com")
+            (knownCdn && isDirectMedia(url)) ||
+                (host == "n1mwq.org" && uri.path.orEmpty().startsWith("/api/videos/stream/"))
+        }
+    } catch (_: Exception) { false }
+
+    private fun isHls(url: String): Boolean = try {
+        URI(url).path.orEmpty().lowercase().endsWith(".m3u8")
+    } catch (_: Exception) { false }
+
+    // Check media playlist duration; reject short ads and unknown playlists.
+    private suspend fun isLongHls(url: String, referer: String, depth: Int = 0): Boolean {
+        if (isAdMedia(url) || depth > 1) return false
+        return try {
+            val manifest = app.get(
+                url,
+                headers = headers + mapOf("Referer" to referer)
+            ).text.take(1_000_000)
+            if (!manifest.trimStart().startsWith("#EXTM3U")) return false
+            val seconds = Regex("""(?m)^#EXTINF:([0-9]+(?:\.[0-9]+)?)""")
+                .findAll(manifest)
+                .sumOf { it.groupValues[1].toDoubleOrNull() ?: 0.0 }
+            if (seconds >= 120.0) return true
+            if (depth == 1 || !manifest.contains("#EXT-X-STREAM-INF")) return false
+            val lines = manifest.lines().map { it.trim() }
+            val index = lines.indexOfFirst { it.startsWith("#EXT-X-STREAM-INF") }
+            if (index < 0) return false
+            val variant = lines.drop(index + 1).firstOrNull {
+                it.isNotEmpty() && !it.startsWith("#")
+            } ?: return false
+            val resolved = URI(url).resolve(variant).toString()
+            isLongHls(resolved, url, depth + 1)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private suspend fun emitMedia(
