@@ -22,7 +22,7 @@ internal class KuraKura21Playback(
     private val mainUrl: String,
     private val headers: Map<String, String>
 ) {
-    private data class Server(val name: String, val url: String)
+    private data class Server(val name: String, val url: String, val tab: String)
 
     suspend fun load(
         detailUrl: String,
@@ -76,7 +76,7 @@ internal class KuraKura21Playback(
                                 .mapNotNull { node -> absoluteUrl(node.attr("src"), detailUrl) }
                                 .distinct()
                             for (url in urls.take(5)) {
-                                resolve(Server(name, url), detailUrl, subtitleCallback, emit)
+                                resolve(Server(name, url, tab), detailUrl, subtitleCallback, emit)
                             }
                         } catch (cancelled: CancellationException) {
                             throw cancelled
@@ -112,6 +112,36 @@ internal class KuraKura21Playback(
         val hostname = runCatching { URI(server.url).host.orEmpty() }.getOrDefault("")
         if (hostname !in setOf("turtle4up.top", "kr21.click", "n1mwq.org", "k21cdn.click")) return
 
+
+        // kr21 needs the movie-page iframe context; opening it as a top-level
+        // browser page does not reproduce the user's successful Chrome flow.
+        val embeddedKr21 = hostname == "kr21.click"
+        val browserUrl = if (embeddedKr21) pageUrl else server.url
+        val browserReferer = if (embeddedKr21) "$mainUrl/" else pageUrl
+        val pageScript = if (embeddedKr21) """
+            (function () {
+              if (window.__kura21Started) return;
+              window.__kura21Started = true;
+              var tries = 0;
+              var selected = false;
+              var timer = setInterval(function () {
+                if (++tries > 45) { clearInterval(timer); return; }
+                if (!selected) {
+                  var tab = document.querySelector('a[href="#${server.tab}"]');
+                  if (tab) {
+                    tab.click();
+                    selected = true;
+                  }
+                }
+                // The original page's countdown exposes its own Play Now button.
+                var play = document.getElementById('timeloading');
+                if (play && play.tagName === 'BUTTON' && play.offsetParent !== null) {
+                  play.click();
+                }
+              }, 500);
+            })();
+        """.trimIndent() else null
+
         val media = withTimeoutOrNull(37_000L) {
             try {
                 WebViewResolver(
@@ -123,8 +153,9 @@ internal class KuraKura21Playback(
                     // The default OkHttp interception cannot replay those bodies faithfully.
                     userAgent = null,
                     useOkhttp = false,
+                    script = pageScript,
                     timeout = 35_000L
-                ).resolveUsingWebView(server.url, referer = pageUrl).first
+                ).resolveUsingWebView(browserUrl, referer = browserReferer).first
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
