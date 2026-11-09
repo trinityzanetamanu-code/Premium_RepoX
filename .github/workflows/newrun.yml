@@ -165,34 +165,28 @@ jobs:
     if: contains(github.event.head_commit.message, '[probe-only]')
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect API payload metadata and public player source
-        shell: bash
+      - name: Test documented player endpoint using normal browser headers
         run: |
           python3 - <<'PY'
-          import urllib.request,re,json
-          urls=[
-            ("kr21_details","https://kr21.click/api/videos/azyg0cfvg24r/embed/details"),
-            ("kr21_settings","https://n1mwq.org/api/videos/azyg0cfvg24r/embed/settings"),
-            ("kr21_bundle","https://kr21.click/assets/videoPagesBundle-Bgi0QmPo.js"),
-            ("turtle_stream_script","https://turtle4up.top/assets/index-B_XTu8nA.js"),
-            ("turtle_path","https://turtle4up.top/owmx8n"),
-            ("turtle_stream","https://turtle4up.top/api/stream?s=owmx8n"),
+          import urllib.request,urllib.error,http.cookiejar
+          code="azyg0cfvg24r"
+          cases=[
+          ("kr21-view","https://kr21.click/e/"+code+"/siping-2026-h","https://kurakura21.com/sub-indo-siping-2026/"),
+          ("n1mwq-view","https://n1mwq.org/gch4/"+code,"https://kr21.click/e/"+code+"/siping-2026-h"),
+          ("n1mwq-settings","https://n1mwq.org/api/videos/"+code+"/embed/settings","https://n1mwq.org/gch4/"+code),
+          ("n1mwq-details","https://n1mwq.org/api/videos/"+code+"/embed/details","https://n1mwq.org/gch4/"+code),
+          ("kr21-settings","https://kr21.click/api/videos/"+code+"/embed/settings","https://kr21.click/e/"+code+"/siping-2026-h"),
           ]
-          for name,url in urls:
-              print("REQUEST",name,url,flush=True)
+          jar=http.cookiejar.CookieJar()
+          opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+          for label,url,referer in cases:
+              h={"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/135.0.0.0 Safari/537.36","Accept":"application/json, text/plain, */*","Referer":referer,"Origin":url.split('/')[0]+"//"+url.split('/')[2],"Sec-Fetch-Site":"same-origin","Sec-Fetch-Mode":"cors"}
               try:
-                  req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 Chrome/135.0.0.0 Safari/537.36","Referer":"https://kr21.click/e/azyg0cfvg24r/siping-2026-h","Accept":"application/json,text/html,*/*"})
-                  with urllib.request.urlopen(req,timeout=20) as r:
-                      typ=r.headers.get("Content-Type")
-                      body=r.read(1700000).decode("utf-8","replace")
-                      print("RESULT",name,r.status,typ,"SIZE",len(body),flush=True)
-                      if ("javascript" not in (typ or "") and not name.endswith("_script") and name!="kr21_bundle"):
-                          print("BODY",name,repr(body[:4500]),flush=True)
-                      else:
-                          for pat in ["/api/videos/","/api/stream?s=","/api/view","stream","playlist","qualities","file:","jwplayer","/gch4","embed/details","embed/settings","Hls","sources"]:
-                              mm=list(re.finditer(re.escape(pat),body,re.I))
-                              if mm:
-                                  print("SCRIPT_MATCH",name,pat,len(mm),flush=True)
-                                  for m in mm[:2]: print("SCRIPT_CONTEXT",name,repr(body[max(0,m.start()-150):m.end()+230])[:440],flush=True)
-              except Exception as e:print("ERROR",name,type(e).__name__,str(e)[:300],flush=True)
+                  r=opener.open(urllib.request.Request(url,headers=h),timeout=14)
+                  data=r.read(140000).decode("utf-8","replace")
+                  print("CASE",label,"HTTP",r.status,"CTYPE",r.headers.get("Content-Type"),"COOKIE_COUNT",len(jar),"BODY",repr(data[:5000]),flush=True)
+              except Exception as e:
+                  if isinstance(e,urllib.error.HTTPError):
+                      print("CASE",label,"HTTP",e.code,"BODY",repr(e.read(600).decode("utf-8","replace")),flush=True)
+                  else:print("CASE",label,"ERROR",repr(e),flush=True)
           PY
