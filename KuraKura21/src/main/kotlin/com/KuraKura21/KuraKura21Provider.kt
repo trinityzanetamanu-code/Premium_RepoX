@@ -2,12 +2,10 @@ package com.kurakura21
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.CancellationException
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Isolated CloudStream provider for KURAKURA21.
@@ -94,41 +92,7 @@ class KuraKura21Provider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val detailUrl = pageUrl(data) ?: return false
-        val doc = getPage(detailUrl)
-        val emitted = AtomicBoolean(false)
-        val seen = linkedSetOf<String>()
-
-        val candidates = findPlayerCandidates(doc)
-        for ((label, raw) in candidates) {
-            val url = resolveUrl(raw, doc.baseUri()) ?: continue
-            if (!seen.add(url) || isAdOrUnsupportedUrl(url)) continue
-
-            try {
-                if (isDirectVideo(url)) {
-                    val type = if (URI(url).path.endsWith(".m3u8", ignoreCase = true)) {
-                        ExtractorLinkType.M3U8
-                    } else ExtractorLinkType.VIDEO
-                    callback(newExtractorLink(name, "$name - $label", url, type = type) {
-                        this.referer = detailUrl
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf("User-Agent" to userAgent, "Referer" to detailUrl)
-                    })
-                    emitted.set(true)
-                } else {
-                    // Resolve only real iframe/server URLs exposed in the HTML.
-                    // Unsupported hosts simply provide zero links; do not fake MP4/HLS URLs.
-                    loadExtractor(url, detailUrl, subtitleCallback) { link ->
-                        emitted.set(true)
-                        callback(link)
-                    }
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                // One broken host must not stop other available servers.
-            }
-        }
-        return emitted.get()
+        return KuraKura21Playback(mainUrl, headers).load(detailUrl, subtitleCallback, callback)
     }
 
     private suspend fun getPage(url: String): Document {
@@ -206,49 +170,4 @@ class KuraKura21Provider : MainAPI() {
         } catch (_: Exception) { null }
     }
 
-    private fun findPlayerCandidates(doc: Document): List<Pair<String, String>> {
-        val found = mutableListOf<Pair<String, String>>()
-        fun add(label: String, raw: String?) {
-            if (!raw.isNullOrBlank()) found += label to raw
-        }
-
-        // Server tabs and the video player shown on the film-detail page.
-        val playerScope = doc.select(
-            "#player, #video, #playcontainer, #playeroptions, #playeroptionsul, " +
-            ".player, .video-player, .video-content, .movieplay, .playbox, .dooplay_player"
-        )
-        for (scope in playerScope) {
-            for (iframe in scope.select("iframe[src], iframe[data-src], iframe[data-lazy-src]")) {
-                add("Iframe", iframe.attr("src").ifBlank { iframe.attr("data-src") }.ifBlank { iframe.attr("data-lazy-src") })
-            }
-            for (source in scope.select("video[src], source[src]")) add("Video", source.attr("src"))
-            for (option in scope.select("a[href], [data-url], [data-embed], [data-video], [data-src]")) {
-                val label = option.text().trim().takeIf { it.isNotBlank() } ?: "Server"
-                for (attr in listOf("data-url", "data-embed", "data-video", "data-src", "href")) {
-                    add(label, option.attr(attr))
-                }
-            }
-        }
-        // Some themes put iframe tags outside the formal player wrapper.
-        for (iframe in doc.select("iframe[src], iframe[data-src]")) {
-            add("Iframe", iframe.attr("src").ifBlank { iframe.attr("data-src") })
-        }
-        for (media in doc.select("video[src], video source[src]")) add("Video", media.attr("src"))
-        return found.distinctBy { it.second }
-    }
-
-    private fun isDirectVideo(url: String): Boolean = try {
-        val p = URI(url).path.orEmpty().lowercase()
-        listOf(".m3u8", ".mp4", ".webm", ".m4v").any(p::endsWith)
-    } catch (_: Exception) { false }
-
-    private fun isAdOrUnsupportedUrl(url: String): Boolean = try {
-        val uri = URI(url)
-        val host = uri.host.orEmpty().lowercase()
-        val path = uri.path.orEmpty().lowercase()
-        host.contains("doubleclick.net") || host.contains("googlesyndication.com") ||
-            host.contains("google-analytics.com") || host.contains("adservice.") ||
-            path.endsWith(".jpg") || path.endsWith(".png") || path.endsWith(".gif") ||
-            path.endsWith(".css") || path.endsWith(".js")
-    } catch (_: Exception) { true }
 }
