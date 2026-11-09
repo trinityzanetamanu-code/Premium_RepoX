@@ -22,7 +22,6 @@ env:
 
 jobs:
   build:
-    if: ${{ !contains(github.event.head_commit.message, '[probe-only]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -160,33 +159,3 @@ jobs:
           fi
           git commit -m "Build $GITHUB_SHA"
           git push origin HEAD:refs/heads/builds
-
-  probe:
-    if: contains(github.event.head_commit.message, '[probe-only]')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Test documented player endpoint using normal browser headers
-        run: |
-          python3 - <<'PY'
-          import urllib.request,urllib.error,http.cookiejar
-          code="azyg0cfvg24r"
-          cases=[
-          ("kr21-view","https://kr21.click/e/"+code+"/siping-2026-h","https://kurakura21.com/sub-indo-siping-2026/"),
-          ("n1mwq-view","https://n1mwq.org/gch4/"+code,"https://kr21.click/e/"+code+"/siping-2026-h"),
-          ("n1mwq-settings","https://n1mwq.org/api/videos/"+code+"/embed/settings","https://n1mwq.org/gch4/"+code),
-          ("n1mwq-details","https://n1mwq.org/api/videos/"+code+"/embed/details","https://n1mwq.org/gch4/"+code),
-          ("kr21-settings","https://kr21.click/api/videos/"+code+"/embed/settings","https://kr21.click/e/"+code+"/siping-2026-h"),
-          ]
-          jar=http.cookiejar.CookieJar()
-          opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-          for label,url,referer in cases:
-              h={"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/135.0.0.0 Safari/537.36","Accept":"application/json, text/plain, */*","Referer":referer,"Origin":url.split('/')[0]+"//"+url.split('/')[2],"Sec-Fetch-Site":"same-origin","Sec-Fetch-Mode":"cors"}
-              try:
-                  r=opener.open(urllib.request.Request(url,headers=h),timeout=14)
-                  data=r.read(140000).decode("utf-8","replace")
-                  print("CASE",label,"HTTP",r.status,"CTYPE",r.headers.get("Content-Type"),"COOKIE_COUNT",len(jar),"BODY",repr(data[:5000]),flush=True)
-              except Exception as e:
-                  if isinstance(e,urllib.error.HTTPError):
-                      print("CASE",label,"HTTP",e.code,"BODY",repr(e.read(600).decode("utf-8","replace")),flush=True)
-                  else:print("CASE",label,"ERROR",repr(e),flush=True)
-          PY

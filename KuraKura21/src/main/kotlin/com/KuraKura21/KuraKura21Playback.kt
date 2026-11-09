@@ -1,7 +1,7 @@
 package com.kurakura21
 
-import android.util.Base64
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -9,87 +9,80 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
-import org.json.JSONObject
 import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
 import java.net.URI
-import java.net.URLDecoder
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Playback only. Existing catalog, search and detail parsing remain unchanged.
- * The site may expose sources in HTML, server tab attributes or DooPlay AJAX.
+ * Resolves the actual Muvipro tab AJAX protocol used by kurakura21.com.
+ * The AJAX response contains an iframe, not a directly playable video.
  */
 internal class KuraKura21Playback(
     private val mainUrl: String,
     private val headers: Map<String, String>
 ) {
-    private data class Player(val url: String, val label: String, val referer: String)
+    private data class Server(val name: String, val url: String)
 
     suspend fun load(
         detailUrl: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val response = app.get(detailUrl, headers = headers)
-        val doc = response.document.apply { setBaseUri(response.url) }
-        val found = linkedMapOf<String, Player>()
-        fun add(raw: String?, label: String, referer: String) {
-            parsePlayerValue(raw, referer).forEach { url ->
-                if (url != detailUrl) found.putIfAbsent(url, Player(url, label, referer))
-            }
-        }
+        val page = app.get(detailUrl, headers = headers).document
+        val player = page.selectFirst("#muvipro_player_content_id") ?: return false
+        val postId = player.attr("data-id").takeIf {
+            it.isNotBlank() && it.all(Char::isDigit)
+        } ?: return false
 
-        collect(doc, detailUrl, ::add)
-
-        // DooPlay-style server buttons do not contain an iframe URL until clicked.
-        val options = doc.select(
-            ".dooplay_player_option[data-post][data-nume], " +
-                "#playeroptionsul [data-post][data-nume], " +
-                "[data-post][data-nume][data-type]"
-        ).distinctBy { listOf(it.attr("data-post"), it.attr("data-nume"), it.attr("data-type")) }
-        for (option in options.take(12)) {
-            val post = option.attr("data-post").trim()
-            val nume = option.attr("data-nume").trim()
-            if (post.isBlank() || nume.isBlank()) continue
-            val type = option.attr("data-type").ifBlank { "movie" }
-            val label = option.text().trim().ifBlank { "Server " + nume }
-            try {
-                val ajax = app.post(
-                    mainUrl.trimEnd('/') + "/wp-admin/admin-ajax.php",
-                    data = mapOf(
-                        "action" to "doo_player_ajax",
-                        "post" to post,
-                        "nume" to nume,
-                        "type" to type
-                    ),
-                    headers = headers + mapOf(
-                        "X-Requested-With" to "XMLHttpRequest",
-                        "Referer" to detailUrl
-                    )
-                ).text
-                collectEmbedResponse(ajax, detailUrl, label, ::add)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                // An unavailable server must not hide the other servers.
-            }
-        }
+        val tabs = player.select("ul.muvipro-player-tabs a[href^='#p']")
+            .mapNotNull { anchor ->
+                val tab = anchor.attr("href").removePrefix("#")
+                if (!tab.matches(Regex("""p\d+"""))) null
+                else tab to anchor.text().trim().ifBlank { "Server $tab" }
+            }.distinctBy { it.first }.take(12)
+        if (tabs.isEmpty()) return false
 
         val emitted = AtomicBoolean(false)
-        val emittedUrls = Collections.synchronizedSet(mutableSetOf<String>())
-        val emit: (ExtractorLink) -> Unit = { link ->
-            if (emittedUrls.add(link.url)) {
-                callback(link)
+        val links = Collections.synchronizedSet(mutableSetOf<String>())
+        val emit: (ExtractorLink) -> Unit = { stream ->
+            if (links.add(stream.url)) {
                 emitted.set(true)
+                callback(stream)
             }
         }
+
         coroutineScope {
-            found.values.take(16).map { player ->
+            tabs.map { (tab, name) ->
                 async(Dispatchers.IO) {
-                    withTimeoutOrNull(15_000L) {
-                        visit(player, 0, mutableSetOf(), subtitleCallback, emit)
+                    withTimeoutOrNull(20_000L) {
+                        try {
+                            val response = app.post(
+                                "$mainUrl/wp-admin/admin-ajax.php",
+                                data = mapOf(
+                                    "action" to "muvipro_player_content",
+                                    "tab" to tab,
+                                    "post_id" to postId
+                                ),
+                                headers = headers + mapOf(
+                                    "Referer" to detailUrl,
+                                    "X-Requested-With" to "XMLHttpRequest",
+                                    "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
+                                )
+                            )
+                            if (response.code !in 200..299) return@withTimeoutOrNull
+                            val fragment = Jsoup.parseBodyFragment(response.text, detailUrl)
+                            val urls = fragment.select("iframe[src], video[src], source[src]")
+                                .mapNotNull { node -> absoluteUrl(node.attr("src"), detailUrl) }
+                                .distinct()
+                            for (url in urls.take(5)) {
+                                resolve(Server(name, url), detailUrl, subtitleCallback, emit)
+                            }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            // Failure in one server does not prevent the others.
+                        }
                     }
                 }
             }.awaitAll()
@@ -97,194 +90,91 @@ internal class KuraKura21Playback(
         return emitted.get()
     }
 
-    private fun collect(
-        doc: Document,
+    private suspend fun resolve(
+        server: Server,
         pageUrl: String,
-        add: (String?, String, String) -> Unit
-    ) {
-        doc.select("iframe[src], iframe[data-src], iframe[data-lazy-src], video[src], video source[src]")
-            .forEach { element ->
-                add(
-                    element.attr("src")
-                        .ifBlank { element.attr("data-src") }
-                        .ifBlank { element.attr("data-lazy-src") },
-                    "Player",
-                    pageUrl
-                )
-            }
-
-        doc.select(
-            "#playeroptionsul li, .dooplay_player_option, .server-item, " +
-                ".player-option, .player-options li, .server a, " +
-                "#player [data-embed], #player [data-url], " +
-                ".video-player [data-url], .video-player [data-embed]"
-        ).forEach { option ->
-            val label = option.text().trim().take(50).ifBlank { "Server" }
-            for (attribute in listOf(
-                "data-url", "data-embed", "data-player", "data-video",
-                "data-file", "data-iframe", "data-src", "href"
-            )) {
-                add(option.attr(attribute), label, pageUrl)
-            }
-        }
-
-        // Inline player configuration: JWPlayer, video.js, HTML5 media sources.
-        val scripts = doc.select("script:not([src])").joinToString("\n") { it.data() }
-        val mediaPattern = Regex(
-            """(?i)(?:["']?(?:file|src|source|url)["']?\s*[:=]\s*["'])([^"']{1,2048})["']"""
-        )
-        mediaPattern.findAll(scripts).take(40).forEach { match ->
-            val url = match.groupValues[1]
-            if (isMediaText(url)) add(url, "Video", pageUrl)
-        }
-        Regex("""(?i)atob\(["']([A-Za-z0-9+/=]{24,})["']\)""")
-            .findAll(scripts).take(12).forEach { match ->
-                decodeBase64(match.groupValues[1])?.let { text ->
-                    parsePlayerValue(text, pageUrl).forEach { add(it, "Player", pageUrl) }
-                }
-            }
-    }
-
-    private fun collectEmbedResponse(
-        response: String,
-        base: String,
-        label: String,
-        add: (String?, String, String) -> Unit
-    ) {
-        val decoded = response.trim()
-        if (decoded.startsWith("{")) {
-            val json = try { JSONObject(decoded) } catch (_: Exception) { null }
-            if (json != null) {
-                for (key in listOf("embed_url", "iframe", "url", "embed", "html", "player", "link")) {
-                    val raw = json.optString(key)
-                    if (raw.isNotBlank()) collectEmbedResponse(raw, base, label, add)
-                }
-                return
-            }
-        }
-        val frame = Jsoup.parseBodyFragment(decoded, base)
-        frame.select("iframe[src], iframe[data-src], video[src], source[src]").forEach {
-            add(it.attr("src").ifBlank { it.attr("data-src") }, label, base)
-        }
-        if (!decoded.contains("<")) add(decoded, label, base)
-    }
-
-    private fun parsePlayerValue(raw: String?, base: String): List<String> {
-        val value = raw?.trim()?.takeIf { it.isNotBlank() && it != "#" }
-            ?: return emptyList()
-        var input = value
-            .replace("\\/", "/")
-            .replace("\\u0026", "&")
-            .replace("&amp;", "&")
-        if (input.startsWith("base64:", true)) {
-            input = decodeBase64(input.substringAfter(':')) ?: return emptyList()
-        } else if (input.length in 24..12000 &&
-            input.matches(Regex("""[A-Za-z0-9+/=]+"""))
-        ) {
-            val decoded = decodeBase64(input)
-            if (decoded != null && (decoded.contains("http") || decoded.contains("<iframe"))) {
-                input = decoded
-            }
-        }
-        if (input.startsWith("%68", true) || input.startsWith("https%3A", true)) {
-            input = try { URLDecoder.decode(input, "UTF-8") } catch (_: Exception) { input }
-        }
-        if (input.startsWith("{")) {
-            val json = try { JSONObject(input) } catch (_: Exception) { null }
-            if (json != null) {
-                return listOf("url", "file", "src", "embed", "embed_url", "link")
-                    .flatMap { parsePlayerValue(json.optString(it), base) }
-                    .distinct()
-            }
-        }
-        if (input.contains("<iframe") || input.contains("<video") || input.contains("<source")) {
-            val doc = Jsoup.parseBodyFragment(input, base)
-            return doc.select("iframe[src], video[src], source[src]")
-                .flatMap { parsePlayerValue(it.attr("src"), base) }
-                .distinct()
-        }
-        val url = try {
-            val uri = URI(base).resolve(input)
-            if (uri.scheme?.lowercase() !in setOf("http", "https")) return emptyList()
-            val host = uri.host?.lowercase() ?: return emptyList()
-            if (host == "localhost" || host.startsWith("127.") ||
-                host.startsWith("192.168.") || host.startsWith("10.") ||
-                host.contains("doubleclick.net") ||
-                host.contains("googlesyndication.com") ||
-                host.contains("google-analytics.com")
-            ) return emptyList()
-            val path = uri.path.orEmpty().lowercase()
-            if (listOf(".jpg", ".jpeg", ".webp", ".png", ".gif", ".css", ".js", ".svg", ".vtt")
-                    .any(path::endsWith)
-            ) return emptyList()
-            uri.toString()
-        } catch (_: Exception) {
-            return emptyList()
-        }
-        return listOf(url)
-    }
-
-    private suspend fun visit(
-        player: Player,
-        depth: Int,
-        seen: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        if (depth > 2 || !seen.add(player.url)) return
-        if (isMediaText(player.url)) {
-            val isHls = URI(player.url).path.endsWith(".m3u8", ignoreCase = true)
-            callback(newExtractorLink(
-                source = "KURAKURA21",
-                name = "KURAKURA21 - " + player.label,
-                url = player.url,
-                type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            ) {
-                this.referer = player.referer
-                this.quality = Qualities.Unknown.value
-                this.headers = mapOf(
-                    "Referer" to player.referer,
-                    "User-Agent" to headers["User-Agent"].orEmpty()
-                )
-            })
+        if (isDirectMedia(server.url)) {
+            emitMedia(server.name, server.url, pageUrl, emptyMap(), callback)
             return
         }
         try {
-            loadExtractor(player.url, player.referer, subtitleCallback, callback)
+            if (loadExtractor(server.url, pageUrl, subtitleCallback, callback)) return
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            // Unrecognized host: inspect its public embed page below.
+            // A host without a registered extractor may still load media in a WebView.
         }
-        if (depth >= 2) return
-        val response = try {
-            app.get(player.url, headers = headers + ("Referer" to player.referer))
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            return
-        }
-        if (response.code !in 200..299) return
-        val doc = response.document.apply { setBaseUri(response.url) }
-        val next = linkedMapOf<String, Player>()
-        collect(doc, response.url) { raw, label, referer ->
-            parsePlayerValue(raw, referer).forEach { url ->
-                if (url != response.url) next.putIfAbsent(url, Player(url, label, referer))
+
+        // JS-driven hosts require browser requests to reveal the actual media URL.
+        val hostname = runCatching { URI(server.url).host.orEmpty() }.getOrDefault("")
+        if (hostname !in setOf("turtle4up.top", "kr21.click")) return
+
+        val media = withTimeoutOrNull(11_000L) {
+            try {
+                WebViewResolver(
+                    Regex(
+                        """^https?://(?![^/]*(?:mmcdn\.com|jads\.co|juicyads|chaseherbalpasty|fozekikikiminu))[^?#]+(?:\.(?:m3u8|mp4|m4v|webm)(?:[?#]|$)|/api/videos/stream/)""",
+                        RegexOption.IGNORE_CASE
+                    ),
+                    timeout = 10_000L
+                ).resolveUsingWebView(server.url, referer = pageUrl).first
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
             }
-        }
-        for (nested in next.values.take(8)) {
-            visit(nested, depth + 1, seen, subtitleCallback, callback)
-        }
+        } ?: return
+
+        val url = media.url.toString()
+        if (!isDirectMedia(url) && !url.contains("/api/videos/stream/")) return
+        emitMedia(
+            server.name,
+            url,
+            media.header("Referer") ?: server.url,
+            media.headers.toMultimap().mapValues { it.value.joinToString(",") },
+            callback
+        )
     }
 
-    private fun isMediaText(url: String): Boolean {
-        val path = try { URI(url).path.orEmpty().lowercase() } catch (_: Exception) { "" }
-        return listOf(".m3u8", ".mp4", ".m4v", ".webm").any(path::endsWith)
+    private fun emitMedia(
+        label: String,
+        url: String,
+        referer: String,
+        requestHeaders: Map<String, String>,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val hls = URI(url).path.orEmpty().endsWith(".m3u8", ignoreCase = true)
+        callback(newExtractorLink(
+            source = "KURAKURA21",
+            name = "KURAKURA21 - $label",
+            url = url,
+            type = if (hls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+        ) {
+            this.referer = referer
+            this.quality = Qualities.Unknown.value
+            this.headers = requestHeaders + mapOf(
+                "Referer" to referer,
+                "User-Agent" to (requestHeaders["User-Agent"] ?: headers["User-Agent"].orEmpty())
+            )
+        })
     }
 
-    private fun decodeBase64(encoded: String): String? = try {
-        String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8).take(16000)
+    private fun absoluteUrl(raw: String, base: String): String? = try {
+        val url = URI(base).resolve(raw.trim().replace("&amp;", "&"))
+        if (url.scheme?.lowercase() in setOf("http", "https") && !url.host.isNullOrBlank()) {
+            url.toString()
+        } else null
     } catch (_: Exception) {
         null
+    }
+
+    private fun isDirectMedia(url: String): Boolean = try {
+        val path = URI(url).path.orEmpty().lowercase()
+        listOf(".m3u8", ".mp4", ".webm", ".m4v").any(path::endsWith)
+    } catch (_: Exception) {
+        false
     }
 }
