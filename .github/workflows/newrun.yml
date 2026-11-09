@@ -165,74 +165,34 @@ jobs:
     if: contains(github.event.head_commit.message, '[probe-only]')
     runs-on: ubuntu-latest
     steps:
-      - name: Node 26 for REA
-        uses: actions/setup-node@v4
-        with:
-          node-version: '26'
-      - name: Inspect turtle4up and kr21 sources and runtime requests
+      - name: Inspect API payload metadata and public player source
         shell: bash
         run: |
           python3 - <<'PY'
-          import urllib.request,re,urllib.parse
-          pages=[
-            ("turtle4up","https://turtle4up.top/#owmx8n","https://turtle4up.top/assets/index-B_XTu8nA.js"),
-            ("kr21","https://kr21.click/e/azyg0cfvg24r/siping-2026-h","https://kr21.click/assets/index-DocunfmE.js")
+          import urllib.request,re,json
+          urls=[
+            ("kr21_details","https://kr21.click/api/videos/azyg0cfvg24r/embed/details"),
+            ("kr21_settings","https://n1mwq.org/api/videos/azyg0cfvg24r/embed/settings"),
+            ("kr21_bundle","https://kr21.click/assets/videoPagesBundle-Bgi0QmPo.js"),
+            ("turtle_stream_script","https://turtle4up.top/assets/index-B_XTu8nA.js"),
+            ("turtle_path","https://turtle4up.top/owmx8n"),
+            ("turtle_stream","https://turtle4up.top/api/stream?s=owmx8n"),
           ]
-          def fetch(url,referer):
-              req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 Chrome/134.0.0.0 Safari/537.36","Referer":referer})
-              with urllib.request.urlopen(req,timeout=20) as res:return res.status,res.read(6000000).decode("utf-8","replace")
-          for name,page,js in pages:
-              print("HOST",name,"PAGE",page,flush=True)
+          for name,url in urls:
+              print("REQUEST",name,url,flush=True)
               try:
-                  status,s=fetch(js,page)
-                  print("SCRIPT_HTTP",status,"SCRIPT_LEN",len(s),flush=True)
-                  patterns=[".m3u8",".mp4","/api/","axios","fetch(","location.hash","window.location.hash","/e/","/embed/","videoUrl","streamUrl","getVideo","source","hls","token"]
-                  for word in patterns:
-                      matches=list(re.finditer(re.escape(word),s,re.I))
-                      if matches:
-                          print("SCRIPT_HITS",word,len(matches),flush=True)
-                          for m in matches[:3]:
-                              print("SCRIPT_CONTEXT",word,repr(s[max(0,m.start()-140):m.end()+210])[:400],flush=True)
-                  urls=re.findall(r'https?://[A-Za-z0-9_.:/?&=%#@+-]+',s)
-                  print("SCRIPT_URLS",list(dict.fromkeys(urls))[:55],flush=True)
-              except Exception as exc:print("JS_FETCH_FAILED",type(exc).__name__,str(exc)[:180],flush=True)
+                  req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 Chrome/135.0.0.0 Safari/537.36","Referer":"https://kr21.click/e/azyg0cfvg24r/siping-2026-h","Accept":"application/json,text/html,*/*"})
+                  with urllib.request.urlopen(req,timeout=20) as r:
+                      typ=r.headers.get("Content-Type")
+                      body=r.read(1700000).decode("utf-8","replace")
+                      print("RESULT",name,r.status,typ,"SIZE",len(body),flush=True)
+                      if ("javascript" not in (typ or "") and not name.endswith("_script") and name!="kr21_bundle"):
+                          print("BODY",name,repr(body[:4500]),flush=True)
+                      else:
+                          for pat in ["/api/videos/","/api/stream?s=","/api/view","stream","playlist","qualities","file:","jwplayer","/gch4","embed/details","embed/settings","Hls","sources"]:
+                              mm=list(re.finditer(re.escape(pat),body,re.I))
+                              if mm:
+                                  print("SCRIPT_MATCH",name,pat,len(mm),flush=True)
+                                  for m in mm[:2]: print("SCRIPT_CONTEXT",name,repr(body[max(0,m.start()-150):m.end()+230])[:440],flush=True)
+              except Exception as e:print("ERROR",name,type(e).__name__,str(e)[:300],flush=True)
           PY
-          timeout 85s npm install -g rea-agents@latest --no-fund --no-audit > /tmp/rea-install.log 2>&1 || true
-          if ! command -v rea >/dev/null; then echo 'REA_MISSING'; exit 0; fi
-          CHROME=$(command -v google-chrome || command -v chromium)
-          python3 - "$CHROME" <<'PY'
-          import json,sys
-          urls={
-          "turtle":"https://turtle4up.top/#owmx8n",
-          "kr21":"https://kr21.click/e/azyg0cfvg24r/siping-2026-h"
-          }
-          for name,url in urls.items():
-              scenario={"browser":{"mode":"launch","executable_path":sys.argv[1]},"start_url":{"url":url},"actions":[{"step_id":"observe","action":"wait_for_timeout","duration_ms":5000}],"capture":{"events":["network"],"network":{"response_body":False},"at_end":["dom","url"]}}
-              open("/tmp/kura-"+name+".json","w").write(json.dumps(scenario))
-          PY
-          for name in turtle kr21; do
-            timeout 75s rea capture-browser-scenario "/tmp/kura-$name.json" --json >"/tmp/rea-$name.json" 2>"/tmp/rea-$name.err" || true
-            python3 - "$name" <<'PY'
-          import json,sys,urllib.parse
-          name=sys.argv[1]
-          try:
-              n=json.load(open("/tmp/rea-"+name+".json")).get("normalized_result",{})
-              print("REA_HOST",name,"STEPS",[(x.get("step_id"),x.get("status"),str(x.get("error"))[:150]) for x in n.get("steps",[])],flush=True)
-              ev=n.get("events",{})
-              items=ev.get("items",[]) if isinstance(ev,dict) else []
-              print("REA_EVENTS",name,len(items),"COMPLETENESS",n.get("completeness"),flush=True)
-              seen=set()
-              for e in items:
-                  url=e.get("url",{})
-                  if isinstance(url,dict):url=url.get("url","")
-                  if not isinstance(url,str) or not url.startswith("http"):continue
-                  host=urllib.parse.urlparse(url).hostname or ""
-                  if any(word in host for word in ["juicyads","jads.","chaseherbal","cloudflareinsights","googlesyndication","doubleclick","facebook","google-analytics","adservice","cdn-cgi","exoclick","a-ads","popcash"]):continue
-                  key=(e.get("method"),url,e.get("status"))
-                  if key in seen:continue
-                  seen.add(key)
-                  print("REA_REQUEST",name,"METHOD",e.get("method"),"HTTP",e.get("status"),"KIND",e.get("resource_type"),"URL",url[:450],flush=True)
-                  if len(seen)>130:break
-          except Exception as e:print("REA_HOST_FAILED",name,repr(e)[:300],flush=True)
-          PY
-          done
