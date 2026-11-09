@@ -359,6 +359,25 @@
         "fileHash": "sha256-ae48e97eddc343df81fa56b1fd848d51f1c7c2369999550b94376eeabcace91c"
     },
     {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/KuraKura21.cs3",
+        "status": 3,
+        "version": 1,
+        "name": "KuraKura21",
+        "internalName": "KuraKura21",
+        "authors": [
+            "trinityzanetamanu"
+        ],
+        "description": "KURAKURA21 - provider katalog dewasa (21+).",
+        "fileSize": 19034,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "NSFW"
+        ],
+        "apiVersion": 1,
+        "fileHash": "sha256-5fb9d4a63bf3037943433d2817b9e1026008644f42c43d3da398940491f45b8c"
+    },
+    {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/LayarKacaProvider.cs3",
         "status": 1,
         "version": 15,
