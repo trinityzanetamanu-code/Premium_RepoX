@@ -165,49 +165,38 @@ jobs:
     if: contains(github.event.head_commit.message, '[probe-only]')
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect video APIs without changing plugin
+      - name: Inspect actual player after rendering and API source fields
         shell: bash
         run: |
           python3 - <<'PY'
-          import urllib.request,urllib.error,json,re,urllib.parse
-          tests=[
-            ("turtle_bsvh","https://turtle4up.top/api/stream?s=bsvh","https://turtle4up.top/#bsvh"),
-            ("turtle_owmx","https://turtle4up.top/api/stream?s=owmx8n","https://turtle4up.top/#owmx8n"),
-            ("kr21_details","https://kr21.click/api/videos/5yv3qi26pz3u/embed/details","https://kr21.click/e/5yv3qi26pz3u/watch-3011-melly-1"),
-            ("kr21_settings","https://kr21.click/api/videos/5yv3qi26pz3u/embed/settings","https://kr21.click/e/5yv3qi26pz3u/watch-3011-melly-1"),
-            ("kr21_sukdulan","https://kr21.click/api/videos/bv5xc0betyls/embed/settings","https://kr21.click/e/bv5xc0betyls/sukdulan"),
-          ]
-          for name,url,ref in tests:
-            h={"User-Agent":"Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36","Referer":ref,"Origin":ref.split('/')[0]+"//"+ref.split('/')[2],"Accept":"application/json, text/plain, */*"}
+          import urllib.request,json,urllib.parse,re
+          for code in ["bsvh","owmx8n"]:
+            url="https://turtle4up.top/api/stream?s="+code
+            req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0","Referer":"https://turtle4up.top/"+code,"Accept":"application/json"})
             try:
-              with urllib.request.urlopen(urllib.request.Request(url,headers=h),timeout=15) as r:
-                body=r.read(120000).decode("utf-8","replace")
-                print("TEST",name,"STATUS",r.status,"CTYPE",r.headers.get("Content-Type"),"LENGTH",len(body),flush=True)
-                try:
-                  j=json.loads(body)
-                  def shape(v,depth=0):
-                    if depth>3:return type(v).__name__
-                    if isinstance(v,dict):return {k:shape(val,depth+1) for k,val in v.items()}
-                    if isinstance(v,list):return [shape(x,depth+1) for x in v[:2]]
-                    if isinstance(v,str):return v[:70] if not v.startswith("http") else "(URL) "+str(urllib.parse.urlsplit(v).hostname)
-                    return v
-                  print("JSON",name,str(shape(j))[:3300],flush=True)
-                except Exception:print("RAW",name,repr(body[:450]),flush=True)
-            except urllib.error.HTTPError as e:print("HTTP_ERROR",name,e.code,repr(e.read(300).decode("utf-8","replace")),flush=True)
-            except Exception as e:print("ERROR",name,repr(e)[:350],flush=True)
-          for host,url in [
-            ("kr21","https://kr21.click/assets/videoPagesBundle-Bgi0QmPo.js"),
-            ("turtle","https://turtle4up.top/assets/index-B_XTu8nA.js")
-          ]:
-            try:
-              with urllib.request.urlopen(url,timeout=15) as r:s=r.read(600000).decode("utf-8","replace")
-              print("JS",host,"SIZE",len(s),flush=True)
-              pattern=r'/(?:api|embed|player|stream|videos)/[a-zA-Z0-9_$?={}.+/\-]*'
-              paths=list(dict.fromkeys(re.findall(pattern,s)))
-              print("PATHS",host,paths[:40],flush=True)
-              for word in ["embed/details","embed/settings","stream_url","sources","captcha_required","/api/stream?s=","/api/videos/stream/"]:
-                p=0
-                for m in list(re.finditer(re.escape(word),s,re.I))[:2]:
-                  print("CONTEXT",host,word,repr(s[max(0,m.start()-200):m.end()+310])[:620],flush=True)
-            except Exception as e:print("JS_ERROR",host,repr(e)[:250],flush=True)
+              with urllib.request.urlopen(req,timeout=14) as f:o=json.loads(f.read())
+              print("TURTLE",code,"STATUS",o.get("message","ok"),flush=True)
+              if "data" in o:
+                d=o["data"]
+                print("TURTLE_KEYS",list(d.keys()),flush=True)
+                for k in ("slide","sources","stream","files","file","url","data"):
+                  if k in d:
+                    v=d[k]
+                    print("TURTLE_FIELD",k,str(v)[:850],flush=True)
+            except Exception as e:print("TURTLE_ERROR",code,repr(e)[:200],flush=True)
           PY
+          CHROME=$(command -v google-chrome || command -v chromium || true)
+          if [ -n "$CHROME" ]; then
+            for u in https://turtle4up.top/bsvh https://kr21.click/e/5yv3qi26pz3u/watch-3011-melly-1; do
+              echo "DOM_START_URL=$u"
+              timeout 28s "$CHROME" --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=11000 --dump-dom "$u" >/tmp/host-dom.html 2>/dev/null || true
+              python3 - <<'PY'
+          import re
+          s=open("/tmp/host-dom.html").read()
+          print("DOM_LEN",len(s),flush=True)
+          for pattern in ['jwplayer','captcha','play','video','m3u8','iframe','source','button','turnstile','not found','allow_adblock']:
+            ms=list(re.finditer(pattern,s,re.I))
+            if ms: print("DOM_HIT",pattern,len(ms),repr(s[max(0,ms[0].start()-130):ms[0].end()+270])[:440],flush=True)
+          PY
+            done
+          fi
