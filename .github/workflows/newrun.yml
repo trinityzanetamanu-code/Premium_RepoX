@@ -22,6 +22,7 @@ env:
 
 jobs:
   build:
+    if: ${{ !contains(github.event.head_commit.message, '[probe-only]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -159,3 +160,104 @@ jobs:
           fi
           git commit -m "Build $GITHUB_SHA"
           git push origin HEAD:refs/heads/builds
+
+  probe:
+    if: contains(github.event.head_commit.message, '[probe-only]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect Muvipro AJAX for exact supplied film
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request,urllib.parse,re,html,sys
+          page="https://kurakura21.com/ibu-kos-galak-kena-entot/"
+          ua="Mozilla/5.0 (Linux; Android 17; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Mobile Safari/537.36"
+          def fetch(url, data=None, ref=page):
+            headers={"User-Agent":ua,"Accept":"*/*","Referer":ref}
+            if data is not None:
+              headers["Content-Type"]="application/x-www-form-urlencoded; charset=UTF-8"
+              headers["X-Requested-With"]="XMLHttpRequest"
+            req=urllib.request.Request(url,data=urllib.parse.urlencode(data).encode() if data else None,headers=headers)
+            with urllib.request.urlopen(req,timeout=20) as r:return r.status,r.read(1500000).decode("utf-8","replace"),r.url
+          try:
+            status,markup,final=fetch(page)
+            ids=re.findall(r'id=["\x27]muvipro_player_content_id["\x27][^>]*data-id=["\x27]([0-9]+)',markup)
+            print("SAMPLE_HTTP",status,"LENGTH",len(markup),"POST_ID",ids,"FINAL",final,flush=True)
+            tabmatches=re.findall(r'<a\s+[^>]*href=["\x27]#(p[0-9]+)["\x27][^>]*>([^<]+)',markup,re.I)
+            print("TABS",tabmatches,flush=True)
+            for tab,label in tabmatches[:6]:
+              try:
+                status,body,_=fetch("https://kurakura21.com/wp-admin/admin-ajax.php",{"action":"muvipro_player_content","post_id":ids[0],"tab":tab})
+                frames=re.findall(r'<iframe[^>]*src=["\x27]([^"\x27]+)',body,re.I)
+                print("TAB_RESULT",tab,label,"HTTP",status,"HTML_LENGTH",len(body),"IFRAMES",frames,flush=True)
+                for frame in frames[:2]:
+                  try:
+                    st,fb,_=fetch(frame,ref=page)
+                    print("IFRAME",tab,"HTTP",st,"LENGTH",len(fb),"TITLE",(re.search(r"<title[^>]*>(.*?)</title>",fb,re.I|re.S).group(1) if re.search(r"<title[^>]*>(.*?)</title>",fb,re.I|re.S) else ""),"SCRIPTS",re.findall(r'<script[^>]+src=["\x27]([^"\x27]+)',fb,re.I)[-8:],flush=True)
+                  except Exception as e:print("IFRAME_ERR",tab,type(e).__name__,str(e)[:220],flush=True)
+              except Exception as e:print("TAB_ERR",tab,repr(e)[:220],flush=True)
+          except Exception as e:print("SAMPLE_ERR",type(e).__name__,str(e)[:260],flush=True)
+          PY
+      - name: Install Playwright without bundling browser
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/kura-browser"
+          cd "$RUNNER_TEMP/kura-browser"
+          npm install playwright --no-audit --no-fund --no-save >/dev/null
+          CHROME=$(command -v google-chrome || command -v chromium || true)
+          printf 'CHROME=%s\n' "$CHROME"
+      - name: Observe user-visible Play interactions for each real server
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/kura-browser"
+          cat > sample.cjs <<'JS'
+          const { chromium } = require('playwright');
+          const urls=[
+            "https://kurakura21.com/ibu-kos-galak-kena-entot/",
+          ];
+          (async()=>{
+          const executablePath=process.env.CHROME||"/usr/bin/google-chrome";
+          const browser=await chromium.launch({headless:true,executablePath,args:['--no-sandbox','--disable-dev-shm-usage','--autoplay-policy=no-user-gesture-required']});
+          const context=await browser.newContext({userAgent:'Mozilla/5.0 (Linux; Android 17; Mobile) AppleWebKit/537.36 Chrome/135.0.0.0 Mobile Safari/537.36',viewport:{width:1080,height:780}});
+          const doc=await context.newPage();
+          await doc.goto(urls[0],{waitUntil:'domcontentloaded',timeout:25000}).catch(()=>{});
+          await doc.waitForTimeout(1300);
+          const tabs=await doc.locator('#gmr-tab a[href^="#p"]').evaluateAll(els=>els.map(e=>({tab:e.getAttribute('href'),label:e.textContent.trim()})));
+          const targets=[];
+          for(const {tab,label} of tabs){
+            await doc.locator('#gmr-tab a[href="'+tab+'"]').click({timeout:7000}).catch(e=>console.log('TAB_CLICK_ERROR',tab,String(e).slice(0,150)));
+            await doc.waitForTimeout(1300);
+            const src=await doc.locator(tab+' iframe').first().getAttribute('src').catch(()=>"");
+            targets.push({label,url:src});
+          }
+          console.log('BROWSER_TABS',JSON.stringify(targets));
+          for(const target of targets){
+            if(!target.url)continue;
+            const page=await context.newPage();
+            let requestCount=0, mediaRequests=[];
+            page.on('response',response=>{
+              const url=response.url();
+              if(/\.(m3u8|mp4|mpd|m4s|ts)(?:[?#]|$)|\/api\/videos\/stream\/|\/api\/stream\?/.test(url)){
+                const u=new URL(url);mediaRequests.push({host:u.hostname,path:u.pathname,status:response.status(),type:response.headers()['content-type']||''});
+              }
+              if(++requestCount>600)return;
+            });
+            console.log('TEST_PLAYER',target.label,new URL(target.url).hostname);
+            await page.goto(target.url,{waitUntil:'domcontentloaded',timeout:25000,referer:urls[0]}).catch(e=>console.log('GOTO_ERROR',String(e).slice(0,160)));
+            await page.waitForTimeout(4500);
+            const before=await page.evaluate(()=>({title:document.title,buttons:[...document.querySelectorAll('button,[role="button"],[id*="play"],[class*="play"]')].slice(0,15).map(x=>({tag:x.tagName,id:x.id,cl:String(x.className).slice(0,60),label:(x.getAttribute('aria-label')||x.textContent||'').trim().slice(0,60)})),frames:[...document.querySelectorAll('iframe')].map(x=>x.src)})).catch(()=>({}));
+            console.log('PLAYER_BEFORE',target.label,JSON.stringify(before).slice(0,1400));
+            if(target.url.includes('turtle4up')){
+              for(const sel of ['#player-button-container','.tvp-preplay','[aria-label="Video player"]','[class*="preplay"]']){
+                try{const count=await page.locator(sel).count();if(count){await page.locator(sel).first().click({timeout:3000,force:true});console.log('CLICKED',target.label,sel);break;}}catch(e){console.log('CLICK_FAIL',target.label,sel,String(e).slice(0,100))}
+              }
+            }
+            await page.waitForTimeout(4000);
+            console.log('PLAYER_MEDIA',target.label,JSON.stringify(mediaRequests.slice(0,35)));
+            await page.close();
+          }
+          await context.close();await browser.close();
+          })().catch(e=>{console.log('BROWSER_ERROR',String(e).slice(0,600));process.exitCode=1});
+          JS
+          CHROME=$(command -v google-chrome || command -v chromium || true)
+          timeout 120s env CHROME="$CHROME" node sample.cjs
