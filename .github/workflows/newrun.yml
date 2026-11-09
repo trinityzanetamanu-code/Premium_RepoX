@@ -22,6 +22,7 @@ env:
 
 jobs:
   build:
+    if: ${{ !contains(github.event.head_commit.message, '[probe-only]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -159,3 +160,67 @@ jobs:
           fi
           git commit -m "Build $GITHUB_SHA"
           git push origin HEAD:refs/heads/builds
+
+  probe:
+    if: contains(github.event.head_commit.message, '[probe-only]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node 26 for REA
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: Inspect real player HTML, Chromium DOM, and REA
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re, urllib.request
+          from html.parser import HTMLParser
+          targets=["https://kurakura21.com/sub-indo-siping-2026/","https://kurakura21.com/sub-indo-jur-770-nanami-mihi/"]
+          class P(HTMLParser):
+              def __init__(self):super().__init__();self.tags=[]
+              def handle_starttag(self,tag,attrs):
+                  d=dict(attrs)
+                  if tag in ["iframe","video","source"] or any(x in str(d).lower() for x in ["player","server","dooplay","option"]):
+                      useful={k:v for k,v in attrs if k in ["src","data-src","data-url","data-embed","data-post","data-nume","data-type","data-player","href","id","class","onclick"]}
+                      if useful and len(self.tags)<40:self.tags.append((tag,useful))
+          for url in targets:
+              print("TEST URL",url,flush=True)
+              try:
+                  req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36"})
+                  with urllib.request.urlopen(req,timeout=18) as f:
+                      txt=f.read(1500000).decode("utf-8","replace")
+                      print("HTTP",f.status,"FINAL",f.url,"LEN",len(txt),flush=True)
+                      p=P();p.feed(txt)
+                      for tag in p.tags:print("TAG",str(tag)[:520],flush=True)
+                      for word in ["SERVER 1","dooplay_player","doo_player_ajax","playeroptions","wp-json","iframe","player","server","data-post","data-nume"]:
+                          print("MATCH",word,len(re.findall(re.escape(word),txt,re.I)),flush=True)
+                          m=re.search(re.escape(word),txt,re.I)
+                          if m:print("CONTEXT",repr(txt[max(0,m.start()-130):m.end()+290])[:470],flush=True)
+                      print("JS",re.findall(r'<script[^>]*src=["\']([^"\']+)',txt,re.I)[-12:],flush=True)
+              except Exception as exc: print("FAIL",type(exc).__name__,str(exc)[:180],flush=True)
+          PY
+          CHROME=$(command -v google-chrome || command -v chromium || true)
+          echo "CHROME=$CHROME"
+          if [ -n "$CHROME" ]; then
+            timeout 35s "$CHROME" --no-sandbox --headless --disable-gpu --disable-dev-shm-usage --virtual-time-budget=8500 --dump-dom "https://kurakura21.com/sub-indo-siping-2026/" > /tmp/kurakura_dom.html 2>/tmp/kurakura_chrome.log || true
+            echo "BROWSER_DOM_BYTES=$(wc -c < /tmp/kurakura_dom.html)"
+            grep -Eoi '.{0,130}(iframe|playeroptions|data-nume|data-post|SERVER 1|dooplay).{0,200}' /tmp/kurakura_dom.html | head -40 || true
+          fi
+          if timeout 95s npm install -g rea-agents@latest --no-fund --no-audit >/tmp/rea-install.log 2>&1; then
+            echo "REA_INSTALLED=$(command -v rea || true)"
+            if command -v rea >/dev/null 2>&1 && [ -n "$CHROME" ]; then
+              python3 - "$CHROME" <<'PY'
+          import json,sys
+          scenario={"browser":{"mode":"launch","executable_path":sys.argv[1]},"start_url":{"url":"https://kurakura21.com/sub-indo-siping-2026/"},"actions":[{"step_id":"dom_ready","action":"wait_for_timeout","duration_ms":1200}],"capture":{"events":["network"],"network":{"response_body":False},"at_end":["dom","url"]}}
+          open("/tmp/kura_rea_scenario.json","w").write(json.dumps(scenario))
+          PY
+              timeout 80s rea capture-browser-scenario /tmp/kura_rea_scenario.json --json >/tmp/kura_rea.json 2>/tmp/kura_rea.err || true
+              echo "REA_RESULT_BYTES=$(wc -c < /tmp/kura_rea.json)"
+              head -c 3000 /tmp/kura_rea.json
+              echo
+              tail -c 900 /tmp/kura_rea.err
+            fi
+          else
+            echo "REA_INSTALL_FAILED"
+            tail -c 1000 /tmp/rea-install.log
+          fi
