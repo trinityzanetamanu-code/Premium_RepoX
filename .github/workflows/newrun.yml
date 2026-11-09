@@ -22,7 +22,6 @@ env:
 
 jobs:
   build:
-    if: ${{ !contains(github.event.head_commit.message, '[probe-only]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -160,65 +159,3 @@ jobs:
           fi
           git commit -m "Build $GITHUB_SHA"
           git push origin HEAD:refs/heads/builds
-
-  probe:
-    if: contains(github.event.head_commit.message, '[probe-only]')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Inspect F4Stream iframe markup and JS playback config
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import urllib.request,urllib.parse,re,html,collections,json
-          targets=[
-            ("F4_EMBED","https://k21cdn.click/e/ii111gel","https://kurakura21.com/ibu-kos-galak-kena-entot/"),
-            ("F4_PLAYER_JS","https://f4stream.com/assets/client/js/player.js?v=1793204874","https://k21cdn.click/e/ii111gel"),
-            ("TURTLE_API","https://turtle4up.top/api/stream?s=dvrj","https://turtle4up.top/dvrj"),
-            ("BYSE_DETAILS","https://kr21.click/api/videos/a4g5v3xj6ltr/embed/details","https://kr21.click/e/a4g5v3xj6ltr/ibu-kos-kurakura21"),
-            ("BYSE_SETTINGS","https://kr21.click/api/videos/a4g5v3xj6ltr/embed/settings","https://kr21.click/e/a4g5v3xj6ltr/ibu-kos-kurakura21"),
-          ]
-          for label,u,ref in targets:
-            h={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36","Accept":"*/*","Referer":ref}
-            try:
-              with urllib.request.urlopen(urllib.request.Request(u,headers=h),timeout=22) as rr:body=rr.read(1200000).decode("utf-8","replace");st=rr.status;ct=rr.headers.get("Content-Type")
-              print("TARGET",label,"HTTP",st,"CT",ct,"LEN",len(body),flush=True)
-              if label=="F4_EMBED":
-                print("MARKUP_BEGIN",body[:5900],flush=True)
-              elif label=="F4_PLAYER_JS":
-                patterns=["sources","source","file:","url:","api","getPlayer","xhr","play","mp4","m3u8","atob","fetch(","ajax","token"]
-                for p in patterns:
-                  hits=list(re.finditer(re.escape(p),body,re.I))
-                  if hits:
-                    print("JS_HITS",p,len(hits),flush=True)
-                    for m in hits[:2]:print("JS_CONTEXT",p,repr(body[max(0,m.start()-130):m.end()+280])[:550],flush=True)
-                print("JS_URLS",list(dict.fromkeys(re.findall(r'https?://[a-zA-Z0-9.:-]+(?:/[^\s"\x27<>]*)?',body)))[:35],flush=True)
-              else:
-                try:
-                  obj=json.loads(body)
-                  def shape(obj):
-                    if isinstance(obj,dict):return {k:shape(v) for k,v in obj.items()}
-                    if isinstance(obj,list):return [shape(v) for v in obj[:3]]
-                    if isinstance(obj,str):
-                      if obj.startswith("http"):return "URL HOST "+str(urllib.parse.urlsplit(obj).hostname)
-                      return obj[:140]
-                    return obj
-                  print("API_RESULT",label,str(shape(obj))[:2200],flush=True)
-                except Exception:print("API_RAW",label,body[:1500],flush=True)
-            except Exception as e:print("ERROR",label,type(e).__name__,str(e)[:200],flush=True)
-          PY
-      - name: Inspect F4Stream browser DOM and media requests
-        shell: bash
-        run: |
-          CHROME=$(command -v google-chrome || command -v chromium || true)
-          if [ -z "$CHROME" ]; then echo NO_CHROME; exit 0; fi
-          timeout 28s "$CHROME" --no-sandbox --headless --disable-gpu --disable-dev-shm-usage --virtual-time-budget=9000 --dump-dom "https://k21cdn.click/e/ii111gel" > /tmp/f4-dom.html 2>/tmp/f4err || true
-          python3 - <<'PY'
-          import re
-          s=open("/tmp/f4-dom.html").read()
-          print("DOM_SIZE",len(s),flush=True)
-          for w in ['<video','<source','src="','m3u8','mp4','iframe','jwplayer','plyr','hls','play','captcha','token']:
-            ms=list(re.finditer(re.escape(w),s,re.I))
-            if ms:
-              print("DOM_MATCH",w,len(ms),flush=True)
-              for m in ms[:3]:print("DOM_CONTEXT",w,repr(s[max(0,m.start()-130):m.end()+350])[:550],flush=True)
-          PY
