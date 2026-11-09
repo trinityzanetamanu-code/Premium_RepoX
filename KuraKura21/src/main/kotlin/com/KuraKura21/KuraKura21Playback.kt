@@ -55,7 +55,7 @@ internal class KuraKura21Playback(
         coroutineScope {
             tabs.map { (tab, name) ->
                 async(Dispatchers.IO) {
-                    withTimeoutOrNull(20_000L) {
+                    withTimeoutOrNull(42_000L) {
                         try {
                             val response = app.post(
                                 "$mainUrl/wp-admin/admin-ajax.php",
@@ -110,16 +110,20 @@ internal class KuraKura21Playback(
 
         // JS-driven hosts require browser requests to reveal the actual media URL.
         val hostname = runCatching { URI(server.url).host.orEmpty() }.getOrDefault("")
-        if (hostname !in setOf("turtle4up.top", "kr21.click")) return
+        if (hostname !in setOf("turtle4up.top", "kr21.click", "n1mwq.org", "k21cdn.click")) return
 
-        val media = withTimeoutOrNull(11_000L) {
+        val media = withTimeoutOrNull(37_000L) {
             try {
                 WebViewResolver(
                     Regex(
                         """^https?://(?![^/]*(?:mmcdn\.com|jads\.co|juicyads|chaseherbalpasty|fozekikikiminu))[^?#]+(?:\.(?:m3u8|mp4|m4v|webm)(?:[?#]|$)|/api/videos/stream/)""",
                         RegexOption.IGNORE_CASE
                     ),
-                    timeout = 10_000L
+                    // Let the WebView send original JSON POST bodies for Byse attestation/playback.
+                    // The default OkHttp interception cannot replay those bodies faithfully.
+                    userAgent = null,
+                    useOkhttp = false,
+                    timeout = 35_000L
                 ).resolveUsingWebView(server.url, referer = pageUrl).first
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -130,13 +134,19 @@ internal class KuraKura21Playback(
 
         val url = media.url.toString()
         if (!isDirectMedia(url) && !url.contains("/api/videos/stream/")) return
-        emitMedia(
-            server.name,
-            url,
-            media.header("Referer") ?: server.url,
-            media.headers.toMultimap().mapValues { it.value.joinToString(",") },
-            callback
-        )
+        // The CDN HLS requests in the browser originate from the nested Byse player.
+        // Never reuse a captured signed playlist URL or copy cookies/session tokens.
+        val byseCdn = runCatching {
+            URI(url).host?.endsWith(".owphbf24.com", ignoreCase = true) == true
+        }.getOrDefault(false)
+        val mediaReferer = if (byseCdn) "https://n1mwq.org/"
+            else media.header("Referer") ?: server.url
+        val mediaHeaders = buildMap {
+            media.header("User-Agent")?.let { put("User-Agent", it) }
+            media.header("Origin")?.let { put("Origin", it) }
+            if (byseCdn) put("Origin", "https://n1mwq.org")
+        }
+        emitMedia(server.name, url, mediaReferer, mediaHeaders, callback)
     }
 
     private suspend fun emitMedia(
