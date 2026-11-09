@@ -224,3 +224,62 @@ jobs:
             echo "REA_INSTALL_FAILED"
             tail -c 1000 /tmp/rea-install.log
           fi
+
+      - name: Analyze Muvipro AJAX JavaScript and observed player click
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request,re,html
+          url="https://kurakura21.com/sub-indo-siping-2026/"
+          jsurl="https://kurakura21.com/wp-content/themes/muvipro/js/ajax-player.js?ver=d14993361e73"
+          for label,u in [("MUVIPRO_SCRIPT",jsurl),("PAGE",url)]:
+              try:
+                  req=urllib.request.Request(u,headers={"User-Agent":"Mozilla/5.0 Chrome/134.0.0.0"})
+                  with urllib.request.urlopen(req,timeout=15) as r:
+                      s=r.read(250000).decode("utf-8","replace")
+                  print("SOURCE",label,"SIZE",len(s),flush=True)
+                  if label=="MUVIPRO_SCRIPT":print("JS_CODE",s[:15000],flush=True)
+                  else:
+                      for term in ['id="p1"','id="p2"','id="gmr-tab"','class="gmr-server-wrap','muvipro-ajax-player','data-muvi','action','wp-admin/admin-ajax']:
+                          m=re.search(re.escape(term),s,re.I)
+                          if m: print("HTML",term,repr(html.unescape(s[max(0,m.start()-320):m.end()+1850]))[:2200],flush=True)
+              except Exception as e:print("FETCH_FAILED",label,repr(e)[:250],flush=True)
+          PY
+          CHROME=$(command -v google-chrome || command -v chromium)
+          python3 - "$CHROME" <<'PY'
+          import json,sys
+          for label,actions in [
+              ("server1",[{"step_id":"ready","action":"wait_for_timeout","duration_ms":1100}]),
+              ("server2",[{"step_id":"ready","action":"wait_for_timeout","duration_ms":1100},{"step_id":"second_server","action":"click","locator":{"kind":"css","selector":"#player2"},"timeout_ms":12000},{"step_id":"load_second","action":"wait_for_timeout","duration_ms":900}])
+          ]:
+              obj={"browser":{"mode":"launch","executable_path":sys.argv[1]},"start_url":{"url":"https://kurakura21.com/sub-indo-siping-2026/"},"actions":actions,"capture":{"events":["network"],"network":{"response_body":False},"at_end":["dom","url"]}}
+              open("/tmp/kura_"+label+".json","w").write(json.dumps(obj))
+          PY
+          for name in server1 server2; do
+            timeout 75s rea capture-browser-scenario "/tmp/kura_$name.json" --json >"/tmp/kura_result_$name.json" 2>"/tmp/kura_error_$name.log" || true
+            python3 - "$name" <<'PY'
+          import json,sys,re
+          name=sys.argv[1]
+          try:
+              o=json.load(open("/tmp/kura_result_"+name+".json"))
+              n=o.get("normalized_result",{})
+              print("REA",name,"STATUS",n.get("completeness"),"STEP_STATUS",[(x.get("step_id"),x.get("status"),x.get("error")) for x in n.get("steps",[])],flush=True)
+              print("REA_TOP_LEVEL",list(n.keys()),flush=True)
+              def walk(node,path="",depth=0):
+                  if depth>18:return
+                  if isinstance(node,dict):
+                      if "url" in node and ("method" in node or "request_method" in node or "status" in node):
+                          print("NETWORK_EVENT",path,json.dumps({k:v for k,v in node.items() if k in ("url","method","status","status_code","request_method","resource_type","request_url")},ensure_ascii=False)[:600],flush=True)
+                      for k,v in node.items():
+                          if (k in ["dom","html","outer_html","markup","text"] and isinstance(v,str) and ("gmr-tab" in v or 'id="p2"' in v)):
+                              for patt in ["turtle4up","iframe","tab-content-ajax","player2","gmr-embed"]:
+                                  m=re.search(re.escape(patt),v,re.I)
+                                  if m:print("DOM",k,patt,repr(v[max(0,m.start()-130):m.end()+260])[:430],flush=True)
+                          walk(v,path+"."+str(k),depth+1)
+                  elif isinstance(node,list):
+                      for i,v in enumerate(node[:500]):walk(v,path+"["+str(i)+"]",depth+1)
+              walk(n)
+          except Exception as exc:print("REA_PARSE_FAILED",name,repr(exc),flush=True)
+          PY
+            tail -c 900 "/tmp/kura_error_$name.log" || true
+          done
