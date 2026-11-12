@@ -408,9 +408,9 @@ class IdlixProvider : MainAPI() {
             return Majorplay().resolveClaim(claimParsed, refererUrl, subtitleCallback, { link ->
                 callback(link)
                 mediaCallbacks++
-                IdlixPlayback.trace("callback.media", "count=$mediaCallbacks type=${link.type}")
+                IdlixPlayback.trace("callback.media", "count=$mediaCallbacks source=${link.source} type=${link.type}")
             },
-                sessionCookies + claimHttp.cookies)
+                sessionCookies + claimHttp.cookies, providerName = name)
         } catch (e: CancellationException) {
             IdlixPlayback.trace("loadLinks.cancelled", "stage=$stage callbacks=$mediaCallbacks")
             throw e
@@ -423,8 +423,10 @@ class IdlixProvider : MainAPI() {
         }
     }
 
-    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor =
-        IdlixPlayback.interceptor(extractorLink.url)
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
+        IdlixPlayback.trace("player.route", "source=${extractorLink.source} provider=$name type=${extractorLink.type}")
+        return IdlixPlayback.interceptor(extractorLink.url)
+    }
 }
 
 // ============================================================================

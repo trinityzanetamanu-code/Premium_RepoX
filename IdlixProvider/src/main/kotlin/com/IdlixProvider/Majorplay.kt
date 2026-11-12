@@ -41,7 +41,8 @@ class Majorplay : ExtractorApi() {
         effectiveReferer: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-        sessionCookies: Map<String, String> = emptyMap()
+        sessionCookies: Map<String, String> = emptyMap(),
+        providerName: String = "Idlix"
     ): Boolean {
         val claimToken = session.claim?.takeIf { it.isNotBlank() } ?: return IdlixPlayback.reject("redeem", "missing_claim")
         val page = effectiveReferer.toHttpUrlOrNull() ?: return IdlixPlayback.reject("redeem", "invalid_referer")
@@ -89,12 +90,14 @@ class Majorplay : ExtractorApi() {
             }?.newBuilder()?.host(master.host)?.build()?.toString() ?: return@forEach
             subtitleCallback.invoke(newSubtitleFile(sub.label ?: sub.lang ?: "Indo", subUrl))
         }
-        callback.invoke(newExtractorLink(name, "Majorplay Auto Quality", masterConfigUrl, ExtractorLinkType.M3U8) {
+        // CS3IPlayer resolves getVideoInterceptor via APIHolder.getApiFromNameNull(link.source).
+        // source must identify the MainAPI, not this extractor's display name.
+        callback.invoke(newExtractorLink(providerName, "Majorplay Auto Quality", masterConfigUrl, ExtractorLinkType.M3U8) {
             this.headers = safeHeaders
             this.referer = effectiveReferer
             this.quality = Qualities.Unknown.value
         })
-        IdlixPlayback.trace("extractor.complete", "videoId=$videoId callbacks=1 type=M3U8")
+        IdlixPlayback.trace("extractor.complete", "source=$providerName videoId=$videoId callbacks=1 type=M3U8")
         return true
     }
 }
@@ -120,11 +123,11 @@ data class NewMajorSubtitle(
 
 /** Idlix's served browser player rewrites t/pm on every request for the selected video. */
 internal object IdlixPlayback {
-    const val BUILD_MARKER = "IDLIX_PLAYBACK_V2_PATH_LAYOUT"
+    const val BUILD_MARKER = "IDLIX_PLAYBACK_V3_PROVIDER_ROUTE"
     const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
 
     // Callers supply IDs, statuses and fixed reason codes, never credentials/full URLs.
-    fun trace(stage: String, detail: String) = Log.i("IdlixProvider", "[IDLIX-V2] $stage $detail")
+    fun trace(stage: String, detail: String) = Log.i("IdlixProvider", "[IDLIX-V3] $stage $detail")
 
     fun reject(stage: String, reason: String): Boolean {
         trace("$stage.reject", "reason=$reason callbacks=0")
@@ -213,7 +216,16 @@ internal object IdlixPlayback {
             val logRequest = messages.getAndIncrement() < 8
             try {
                 val response = chain.proceed(request.newBuilder().url(authorized).build())
-                if (logRequest) trace("media.request", "host=${request.url.host} scoped=${master != null && videoId(request.url) == videoId(master)} rewritten=${authorized != request.url} http=${response.code}")
+                if (logRequest || response.code >= 400) {
+                    val contentType = response.header("Content-Type").orEmpty()
+                    val kind = when {
+                        master?.host == request.url.host && master.encodedPath == request.url.encodedPath -> "master"
+                        contentType.contains("mpegurl", true) -> "playlist"
+                        contentType.contains("vtt", true) -> "subtitle"
+                        else -> "media_or_child"
+                    }
+                    trace("media.request", "kind=$kind host=${request.url.host} path=${request.url.encodedPath} scoped=${master != null && videoId(request.url) == videoId(master)} rewritten=${authorized != request.url} http=${response.code}")
+                }
                 response
             } catch (e: java.io.IOException) {
                 trace("media.error", "host=${request.url.host} exception=${e.javaClass.simpleName}")
