@@ -368,14 +368,14 @@
             "trinityzanetamanu"
         ],
         "description": "KURAKURA21 - provider katalog dewasa (21+).",
-        "fileSize": 40196,
+        "fileSize": 44761,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
             "NSFW"
         ],
         "apiVersion": 1,
-        "fileHash": "sha256-d4a2246749fa316f139ae95d1cbb5a364ebe74bb5dc0bb6efe14fa7ae952c7d3"
+        "fileHash": "sha256-28d949ccd9d1d7829aea337bde7adb2ca2848994379725fff5e811621ae37963"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/LayarKacaProvider.cs3",
