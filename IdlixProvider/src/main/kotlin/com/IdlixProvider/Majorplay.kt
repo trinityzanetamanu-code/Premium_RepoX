@@ -2,7 +2,7 @@ package com.IdlixProvider
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
-import com.lagradost.api.Log
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
@@ -10,10 +10,13 @@ import com.lagradost.nicehttp.RequestBodyTypes
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
+import com.lagradost.api.Log
 import okhttp3.HttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class Majorplay : ExtractorApi() {
     override var name = "Majorplay"
@@ -40,10 +43,11 @@ class Majorplay : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         sessionCookies: Map<String, String> = emptyMap()
     ): Boolean {
-        val claimToken = session.claim?.takeIf { it.isNotBlank() } ?: return false
-        val page = effectiveReferer.toHttpUrlOrNull() ?: return false
+        val claimToken = session.claim?.takeIf { it.isNotBlank() } ?: return IdlixPlayback.reject("redeem", "missing_claim")
+        val page = effectiveReferer.toHttpUrlOrNull() ?: return IdlixPlayback.reject("redeem", "invalid_referer")
         val effectiveOrigin = "${page.scheme}://${page.host}"
-        val target = IdlixPlayback.redeemUrl(session.redeemUrl, effectiveOrigin) ?: return false
+        val target = IdlixPlayback.redeemUrl(session.redeemUrl, effectiveOrigin) ?: return IdlixPlayback.reject("redeem", "invalid_endpoint")
+        IdlixPlayback.trace("redeem.start", "videoId=${session.videoId} host=${target.toHttpUrlOrNull()?.host}")
         val safeHeaders = mapOf(
             "Origin" to effectiveOrigin,
             "Referer" to effectiveReferer,
@@ -54,29 +58,30 @@ class Majorplay : ExtractorApi() {
         val redeemCookies = if (target.toHttpUrlOrNull()?.host == page.host) sessionCookies else emptyMap()
         val redeem = app.post(target, headers = safeHeaders, cookies = redeemCookies, requestBody = requestBodyData,
             allowRedirects = false, timeout = 15)
-        if (redeem.code != 200) {
-            Log.d("IdlixProvider", "Playback redeem HTTP=${redeem.code}")
-            return false
-        }
+        IdlixPlayback.trace("redeem.response", "http=${redeem.code}")
+        if (redeem.code != 200) return IdlixPlayback.reject("redeem", "http_${redeem.code}")
         val response = AppUtils.parseJson<NewMajorplayResponse>(redeem.text)
-        if (response.code != "ok" || response.mode != "browser") return false
-        val master = response.url?.toHttpUrlOrNull() ?: return false
-        val videoId = IdlixPlayback.videoId(master) ?: return false
-        if (session.videoId != null && session.videoId != videoId) return false
-        if (response.videoId != null && response.videoId != videoId) return false
-        if (master.queryParameter("t").isNullOrBlank()) return false
-        val expiresAt = response.expiresAt ?: return false
+        if (response.code != "ok" || response.mode != "browser") return IdlixPlayback.reject("redeem", "invalid_response_contract")
+        val master = response.url?.toHttpUrlOrNull() ?: return IdlixPlayback.reject("master", "invalid_url")
+        val videoId = IdlixPlayback.videoId(master) ?: return IdlixPlayback.reject("master", "invalid_host_or_path_layout")
+        if (session.videoId != null && session.videoId != videoId) return IdlixPlayback.reject("master", "claim_video_mismatch")
+        if (response.videoId != null && response.videoId != videoId) return IdlixPlayback.reject("master", "redeem_video_mismatch")
+        if (master.queryParameter("t").isNullOrBlank()) return IdlixPlayback.reject("master", "missing_media_session")
+        val expiresAt = response.expiresAt ?: return IdlixPlayback.reject("master", "missing_expiry")
         val serverTime = redeem.headers["Date"]?.let {
             runCatching { java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", java.util.Locale.US).parse(it)?.time }.getOrNull()
         } ?: System.currentTimeMillis()
-        if (expiresAt <= serverTime / 1000L + 30L || expiresAt > serverTime / 1000L + 86_400L) return false
+        if (expiresAt <= serverTime / 1000L + 30L || expiresAt > serverTime / 1000L + 86_400L) return IdlixPlayback.reject("master", "expiry_outside_window")
+        IdlixPlayback.trace("master.identity", "videoId=$videoId layout=${if (master.pathSegments[1] == videoId) "legacy" else "sharded"} durationSec=${session.durationSec}")
 
         val masterConfigUrl = IdlixPlayback.authorize(master, master).toString()
         val manifest = app.get(masterConfigUrl, headers = safeHeaders, allowRedirects = false, timeout = 15)
-        if (manifest.code != 200) return false
+        IdlixPlayback.trace("master.response", "http=${manifest.code}")
+        if (manifest.code != 200) return IdlixPlayback.reject("master", "http_${manifest.code}")
         val manifestText = manifest.text.trimStart('\uFEFF', ' ', '\r', '\n')
         if (manifestText.length > 262_144 || !manifestText.startsWith("#EXTM3U") ||
-            !(manifestText.contains("#EXT-X-STREAM-INF:") || manifestText.contains("#EXTINF:"))) return false
+            !(manifestText.contains("#EXT-X-STREAM-INF:") || manifestText.contains("#EXTINF:"))) return IdlixPlayback.reject("master", "not_hls")
+        IdlixPlayback.trace("master.valid", "videoId=$videoId hls=true bytes=${manifestText.length}")
 
         response.subtitles?.forEach { sub ->
             val subUrl = sub.path?.toHttpUrlOrNull()?.takeIf {
@@ -89,6 +94,7 @@ class Majorplay : ExtractorApi() {
             this.referer = effectiveReferer
             this.quality = Qualities.Unknown.value
         })
+        IdlixPlayback.trace("extractor.complete", "videoId=$videoId callbacks=1 type=M3U8")
         return true
     }
 }
@@ -114,7 +120,16 @@ data class NewMajorSubtitle(
 
 /** Idlix's served browser player rewrites t/pm on every request for the selected video. */
 internal object IdlixPlayback {
+    const val BUILD_MARKER = "IDLIX_PLAYBACK_V2_PATH_LAYOUT"
     const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
+
+    // Callers supply IDs, statuses and fixed reason codes, never credentials/full URLs.
+    fun trace(stage: String, detail: String) = Log.i("IdlixProvider", "[IDLIX-V2] $stage $detail")
+
+    fun reject(stage: String, reason: String): Boolean {
+        trace("$stage.reject", "reason=$reason callbacks=0")
+        return false
+    }
 
     // From the media-host contract in Idlix's served 2znv4-qfvxuz6.js (not ad hosts).
     private val cdnDomains = setOf(
@@ -147,9 +162,15 @@ internal object IdlixPlayback {
             prefix == if (domain in z4Domains) "z4" else "g4")
     }
 
-    fun videoId(url: HttpUrl): String? = url.pathSegments.takeIf {
-        secure(url) && mediaHost(url.host) && it.size >= 4 && it[0] == "v"
-    }?.getOrNull(2)?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,64}")) }
+    fun videoId(url: HttpUrl): String? {
+        val path = url.pathSegments
+        if (!secure(url) || !mediaHost(url.host) || path.size < 3 || path[0] != "v") return null
+        // Observed layouts: /v/<videoId>/... (legacy) and /v/z7/<videoId>/... .
+        // The old fixed index rejected valid legacy masters before emitting any link.
+        val index = if (path[1].matches(Regex("z[0-9]+"))) 2 else 1
+        if (index >= path.lastIndex || path.last().isEmpty()) return null
+        return path[index].takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,64}")) }
+    }
 
     fun authorize(url: HttpUrl, master: HttpUrl): HttpUrl {
         val id = videoId(master) ?: return url
@@ -183,11 +204,21 @@ internal object IdlixPlayback {
 
     fun interceptor(masterUrl: String): Interceptor {
         val master = masterUrl.toHttpUrlOrNull()
+        val messages = AtomicInteger()
+        trace("interceptor.attach", "videoId=${master?.let(::videoId)}")
         // An independent client keeps redirect handling inside the credential boundary.
         val scoped = client.newBuilder().addNetworkInterceptor { chain ->
             val request = chain.request()
             val authorized = master?.let { authorize(request.url, it) } ?: request.url
-            chain.proceed(request.newBuilder().url(authorized).build())
+            val logRequest = messages.getAndIncrement() < 8
+            try {
+                val response = chain.proceed(request.newBuilder().url(authorized).build())
+                if (logRequest) trace("media.request", "host=${request.url.host} scoped=${master != null && videoId(request.url) == videoId(master)} rewritten=${authorized != request.url} http=${response.code}")
+                response
+            } catch (e: java.io.IOException) {
+                trace("media.error", "host=${request.url.host} exception=${e.javaClass.simpleName}")
+                throw e
+            }
         }.build()
         return Interceptor { chain -> scoped.newCall(chain.request()).execute() }
     }

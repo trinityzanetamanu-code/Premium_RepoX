@@ -319,6 +319,9 @@ class IdlixProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        var stage = "input"
+        var mediaCallbacks = 0
+        IdlixPlayback.trace("loadLinks.enter", "build=${IdlixPlayback.BUILD_MARKER} casting=$isCasting")
         try {
             var contentType = "movie"
             var contentId = data
@@ -332,27 +335,31 @@ class IdlixProvider : MainAPI() {
                 refererUrl = parts.getOrNull(2) ?: "$mainUrl/"
             } else if (data.startsWith("http")) {
                 refererUrl = data
-                val path = data.toHttpUrlOrNull()?.pathSegments?.filter { it.isNotBlank() } ?: return false
+                val path = data.toHttpUrlOrNull()?.pathSegments?.filter { it.isNotBlank() }
+                    ?: return IdlixPlayback.reject(stage, "invalid_page_url")
                 if (path.size == 6 && path[0] == "series" && path[2] == "season" && path[4] == "episode") {
-                    val season = path[3].toIntOrNull()?.takeIf { it > 0 } ?: return false
-                    val episode = path[5].toIntOrNull()?.takeIf { it > 0 } ?: return false
+                    val season = path[3].toIntOrNull()?.takeIf { it > 0 } ?: return IdlixPlayback.reject(stage, "invalid_season")
+                    val episode = path[5].toIntOrNull()?.takeIf { it > 0 } ?: return IdlixPlayback.reject(stage, "invalid_episode")
+                    stage = "episode.lookup"
                     val seasonResponse = app.get("$mainUrl/api/series/${path[1]}/season/$season")
-                    if (seasonResponse.code != 200) return false
-                    val detail = AppUtils.parseJson<IdlixSeasonApiResponse>(seasonResponse.text).season ?: return false
-                    if (detail.seasonNumber != season) return false
-                    contentId = detail.episodes?.singleOrNull { it.episodeNumber == episode && it.hasVideo == true }?.id ?: return false
+                    if (seasonResponse.code != 200) return IdlixPlayback.reject(stage, "http_${seasonResponse.code}")
+                    val detail = AppUtils.parseJson<IdlixSeasonApiResponse>(seasonResponse.text).season ?: return IdlixPlayback.reject(stage, "missing_season")
+                    if (detail.seasonNumber != season) return IdlixPlayback.reject(stage, "season_mismatch")
+                    contentId = detail.episodes?.singleOrNull { it.episodeNumber == episode && it.hasVideo == true }?.id ?: return IdlixPlayback.reject(stage, "episode_unavailable")
                     contentType = "episode"
                 } else if (path.size == 2 && path[0] == "movie") {
+                    stage = "movie.lookup"
                     val response = app.get("$mainUrl/api/movies/${path[1]}")
-                    if (response.code != 200) return false
-                    contentId = AppUtils.parseJson<IdlixDetailResponse>(response.text).id ?: return false
-                } else return false // A series ID is never an episode ID.
+                    if (response.code != 200) return IdlixPlayback.reject(stage, "http_${response.code}")
+                    contentId = AppUtils.parseJson<IdlixDetailResponse>(response.text).id ?: return IdlixPlayback.reject(stage, "missing_movie_id")
+                } else return IdlixPlayback.reject(stage, "no_exact_episode_or_movie")
             }
-            if (contentType !in setOf("movie", "episode") || !contentId.matches(Regex("[A-Za-z0-9_-]+"))) return false
-            val page = refererUrl.toHttpUrlOrNull() ?: return false
-            val base = mainUrl.toHttpUrlOrNull() ?: return false
+            if (contentType !in setOf("movie", "episode") || !contentId.matches(Regex("[A-Za-z0-9_-]+"))) return IdlixPlayback.reject(stage, "invalid_type_or_id")
+            val page = refererUrl.toHttpUrlOrNull() ?: return IdlixPlayback.reject(stage, "invalid_referer")
+            val base = mainUrl.toHttpUrlOrNull() ?: return IdlixPlayback.reject(stage, "invalid_origin")
             if (page.scheme != base.scheme || page.host != base.host || page.port != base.port ||
-                page.username.isNotEmpty() || page.password.isNotEmpty()) return false
+                page.username.isNotEmpty() || page.password.isNotEmpty()) return IdlixPlayback.reject(stage, "referer_origin_mismatch")
+            IdlixPlayback.trace("loadLinks.selected", "type=$contentType id=$contentId")
             val headers = mapOf(
                 "Referer" to refererUrl,
                 "Origin" to mainUrl,
@@ -362,24 +369,28 @@ class IdlixProvider : MainAPI() {
 
             val targetPlayInfoUrl = "$mainUrl/api/watch/play-info/$contentType/$contentId"
 
+            stage = "play_info"
             val playInfoHttp = app.get(targetPlayInfoUrl, headers = headers, allowRedirects = false, timeout = 15)
+            IdlixPlayback.trace(stage, "http=${playInfoHttp.code}")
             if (playInfoHttp.code != 200) {
-                Log.d(TAG, "Playback play-info HTTP=${playInfoHttp.code}")
-                return false
+                return IdlixPlayback.reject(stage, "http_${playInfoHttp.code}")
             }
             val playInfoRes = AppUtils.parseJson<PlayInfoResponse>(playInfoHttp.text)
             // play-info sets the device/session cookie used to bind the gate and claim.
             // Carry the server-issued values locally, even if the app has no CookieJar.
             val sessionCookies = playInfoHttp.cookies
-            val gateToken = playInfoRes.gateToken?.takeIf { it.isNotBlank() } ?: return false
+            val gateToken = playInfoRes.gateToken?.takeIf { it.isNotBlank() } ?: return IdlixPlayback.reject(stage, "missing_gate")
             val finalWaitMs = IdlixPlayback.waitMillis(playInfoRes.serverNow, playInfoRes.unlockAt,
-                playInfoRes.preroll?.countdownSec) ?: return false
+                playInfoRes.preroll?.countdownSec) ?: return IdlixPlayback.reject(stage, "wait_outside_budget")
+            stage = "gate.wait"
+            IdlixPlayback.trace(stage, "waitMs=$finalWaitMs")
             delay(finalWaitMs)
 
             // 4. Klaim token streaming
             val jsonMediaType = RequestBodyTypes.JSON.toMediaTypeOrNull()
             val requestBodyData = mapOf("gateToken" to gateToken).toJson().toRequestBody(jsonMediaType)
 
+            stage = "claim"
             val claimHttp = app.post(
                 url = "$mainUrl/api/watch/session/claim",
                 headers = headers,
@@ -388,20 +399,27 @@ class IdlixProvider : MainAPI() {
                 allowRedirects = false,
                 timeout = 15
             )
-            if (claimHttp.code != 200) {
-                Log.d(TAG, "Playback claim HTTP=${claimHttp.code}")
-                return false
-            }
+            IdlixPlayback.trace(stage, "http=${claimHttp.code}")
+            if (claimHttp.code != 200) return IdlixPlayback.reject(stage, "http_${claimHttp.code}")
             val claimParsed = AppUtils.parseJson<SessionClaimResponse>(claimHttp.text)
-            if (claimParsed.videoId.isNullOrBlank()) return false
-            return Majorplay().resolveClaim(claimParsed, refererUrl, subtitleCallback, callback,
+            if (claimParsed.videoId.isNullOrBlank()) return IdlixPlayback.reject(stage, "missing_video_id")
+            IdlixPlayback.trace("claim.identity", "videoId=${claimParsed.videoId} durationSec=${claimParsed.durationSec}")
+            stage = "redeem_or_manifest"
+            return Majorplay().resolveClaim(claimParsed, refererUrl, subtitleCallback, { link ->
+                callback(link)
+                mediaCallbacks++
+                IdlixPlayback.trace("callback.media", "count=$mediaCallbacks type=${link.type}")
+            },
                 sessionCookies + claimHttp.cookies)
         } catch (e: CancellationException) {
+            IdlixPlayback.trace("loadLinks.cancelled", "stage=$stage callbacks=$mediaCallbacks")
             throw e
         } catch (e: Exception) {
             // Exceptions may contain signed URLs: log the class, never session values.
-            Log.e(TAG, "Error di loadLinks: ${e.javaClass.simpleName}")
+            IdlixPlayback.trace("loadLinks.exception", "stage=$stage exception=${e.javaClass.simpleName}")
             return false
+        } finally {
+            IdlixPlayback.trace("loadLinks.complete", "stage=$stage callbacks=$mediaCallbacks")
         }
     }
 
@@ -532,5 +550,6 @@ data class PrerollData(
 data class SessionClaimResponse(
     @JsonProperty("claim") val claim: String? = null,
     @JsonProperty("redeemUrl") val redeemUrl: String? = null,
-    @JsonProperty("videoId") val videoId: String? = null
+    @JsonProperty("videoId") val videoId: String? = null,
+    @JsonProperty("durationSec") val durationSec: Long? = null
 )
