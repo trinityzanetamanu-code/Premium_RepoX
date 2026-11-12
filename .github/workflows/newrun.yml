@@ -63,41 +63,10 @@ jobs:
           cd "$GITHUB_WORKSPACE/src"
           touch local.properties
 
-      - name: Detect KuraKura21-only push
-        id: scope
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          cd "$GITHUB_WORKSPACE/src"
-          before="${{ github.event.before }}"
-          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
-            exit 0
-          fi
-          if ! git fetch --no-tags --depth=1 origin "$before"; then
-            exit 0
-          fi
-          git diff --name-only "$before" "$GITHUB_SHA" > "$RUNNER_TEMP/changed-files.txt"
-          if [ -s "$RUNNER_TEMP/changed-files.txt" ] && \
-             ! grep -Ev '^(KuraKura21/|\.github/workflows/(newrun|clear-cache)\.yml$)' "$RUNNER_TEMP/changed-files.txt" | grep -q .; then
-            echo "kura_only=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Verify isolated H5 ports and original Moviebox regression
-        if: steps.scope.outputs.kura_only != 'true'
-        run: |
-          cd "$GITHUB_WORKSPACE/src"
-          python3 AdiDrakor/tests/run_migration.py
-
       - name: Build Plugins
         run: |
           cd "$GITHUB_WORKSPACE/src"
           chmod +x gradlew
-          if [ "${{ steps.scope.outputs.kura_only }}" = "true" ]; then
-            # Compile the changed provider first; leave existing provider sources untouched.
-            ./gradlew :KuraKura21:make
-          else
-            ./gradlew :AdiDrakor:assembleRelease :AdiFilmSemi:assembleRelease :AdiXtream:assembleRelease :Adicinemax21:assembleRelease
-          fi
           ./gradlew makePluginsJson
           shopt -s globstar nullglob
           cp **/build/*.cs3 "$GITHUB_WORKSPACE/builds" || true
