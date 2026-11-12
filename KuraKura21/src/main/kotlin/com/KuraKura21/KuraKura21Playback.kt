@@ -13,8 +13,11 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -35,6 +38,7 @@ internal class KuraKura21Playback(
     private val headers: Map<String, String>
 ) {
     private data class Media(val url: String, val headers: Map<String, String>)
+    private data class PlayerIdentity(val videoId: String, val frame: String, val parent: String)
 
     suspend fun load(
         detailUrl: String,
@@ -71,18 +75,23 @@ internal class KuraKura21Playback(
                         }
                         val frames = KuraKura21PlayerData.frames(ajax.text, detailUrl)
                         for (entry in frames.take(5)) {
-                            val identity = findIdentity(entry, detailUrl) ?: continue
-                            val policy = KuraKura21MediaPolicy(identity)
-                            discoverFrame(entry, detailUrl, policy)
-                            // Do not call an unscoped extractor or an access/playback API:
-                            // challenge, attestation and expiring tokens belong to the player.
-                            val captured = webViewLock.withLock {
-                                withTimeoutOrNull(35_000L) {
-                                    browserMedia(detailUrl, entry, tab, policy)
+                            try {
+                                val identity = findIdentity(entry, detailUrl) ?: continue
+                                val policy = KuraKura21MediaPolicy(identity.videoId)
+                                discoverFrame(identity.frame, identity.parent, policy)
+                                // Only the selected browser owns access/playback and attestation.
+                                // It stays alive until a candidate is actually validated.
+                                val captured = webViewLock.withLock {
+                                    withTimeoutOrNull(35_000L) {
+                                        browserMedia(detailUrl, entry, tab, policy)
+                                    }
                                 }
-                            } ?: continue
-                            if (validMedia(captured, policy)) return@withTimeoutOrNull captured
-                            diagnostic(tab, "media_validation_failed")
+                                if (captured != null) return@withTimeoutOrNull captured
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (error: Exception) {
+                                diagnostic(tab, "frame_error_${error.javaClass.simpleName}")
+                            }
                         }
                         null
                     } catch (cancelled: CancellationException) {
@@ -104,11 +113,12 @@ internal class KuraKura21Playback(
         emitted
     }
 
-    private suspend fun findIdentity(entry: String, parent: String, depth: Int = 0): String? {
-        KuraKura21MediaPolicy.identity(entry)?.let { return it }
+    private suspend fun findIdentity(entry: String, parent: String, depth: Int = 0): PlayerIdentity? {
+        KuraKura21MediaPolicy.identity(entry)?.let { return PlayerIdentity(it, entry, parent) }
         if (depth >= 2 || !KuraKura21MediaPolicy.isPlayerHost(entry)) return null
         val response = app.get(entry, headers = headers + ("Referer" to parent), timeout = 8)
         if (response.code !in 200..299 || !KuraKura21MediaPolicy.isPlayerHost(response.url)) return null
+        KuraKura21MediaPolicy.identity(response.url)?.let { return PlayerIdentity(it, response.url, parent) }
         for (child in KuraKura21PlayerData.frames(response.text, response.url).take(3)) {
             findIdentity(child, response.url, depth + 1)?.let { return it }
         }
@@ -147,6 +157,9 @@ internal class KuraKura21Playback(
         val finished = AtomicBoolean(false)
         val entrySeen = AtomicBoolean(false)
         val nestedSeen = AtomicBoolean(false)
+        val candidates = Channel<Media>(8)
+        val candidateUrls = Collections.synchronizedSet(mutableSetOf<String>())
+        var validator: Job? = null
         // Origins are admitted only after an actual matching player document request.
         val playerOrigins = Collections.synchronizedSet(mutableSetOf<String>())
         try {
@@ -161,6 +174,30 @@ internal class KuraKura21Playback(
                     // Keep this WebView's own normal browser cookies. No imported identity/token.
                     CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
                     val userAgent = view.settings.userAgentString
+                    // One bounded, sequential validator. Do not kill this session
+                    // merely because its first plausible media request was invalid.
+                    validator = launch(Dispatchers.IO) {
+                        for (candidate in candidates) {
+                            try {
+                                coroutineContext.ensureActive()
+                                val media = withContext(Dispatchers.Main.immediate) {
+                                    val cookie = CookieManager.getInstance().getCookie(candidate.url)
+                                    if (cookie.isNullOrBlank()) candidate
+                                    else candidate.copy(headers = candidate.headers + ("Cookie" to cookie))
+                                }
+                                if (validMedia(media, policy)) {
+                                    coroutineContext.ensureActive()
+                                    if (finished.compareAndSet(false, true)) continuation.resume(media)
+                                    break
+                                }
+                                diagnostic(tab, "media_validation_failed")
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (error: Exception) {
+                                diagnostic(tab, "candidate_error_${error.javaClass.simpleName}")
+                            }
+                        }
+                    }
                     view.webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                             val url = request.url.toString()
@@ -200,14 +237,16 @@ internal class KuraKura21Playback(
                                 it.key.equals(name, ignoreCase = true)
                             }?.value
                             val referer = header("Referer") ?: return null
-                            if (KuraKura21MediaPolicy.sameDocument(url, entry) &&
+                            val destination = header("Sec-Fetch-Dest")
+                            val isDocument = if (destination != null) destination in setOf("iframe", "document")
+                                else header("Accept")?.contains("text/html", true) == true
+                            if (isDocument && KuraKura21MediaPolicy.sameDocument(url, entry) &&
                                 KuraKura21MediaPolicy.origin(referer) == KuraKura21MediaPolicy.origin(detailUrl)) {
                                 entrySeen.set(true)
                                 KuraKura21MediaPolicy.origin(url)?.let(playerOrigins::add)
                             }
                             if (!entrySeen.get()) return null
-                            val isDocument = header("Sec-Fetch-Dest") in setOf("iframe", "document") ||
-                                header("Accept")?.contains("text/html", true) == true
+
                             if (isDocument && policy.playerDocument(url) &&
                                 KuraKura21MediaPolicy.origin(referer) in playerOrigins) {
                                 KuraKura21MediaPolicy.origin(url)?.let(playerOrigins::add)
@@ -217,13 +256,16 @@ internal class KuraKura21Playback(
                             val snapshot = synchronized(playerOrigins) { playerOrigins.toSet() }
                             // Path identity + observed frame + referrer; duration is never proof.
                             if (!policy.accepts(url, referer, origin, snapshot)) return null
-                            if (finished.compareAndSet(false, true)) {
+                            val enqueue = synchronized(candidateUrls) {
+                                candidateUrls.size < 8 && candidateUrls.add(url)
+                            }
+                            if (enqueue) {
                                 val playbackHeaders = buildMap {
                                     put("Referer", referer)
                                     put("User-Agent", header("User-Agent") ?: userAgent)
                                     origin?.let { put("Origin", it) }
                                 }
-                                continuation.resume(Media(url, playbackHeaders))
+                                candidates.trySend(Media(url, playbackHeaders))
                             }
                             return blocked()
                         }
@@ -231,14 +273,12 @@ internal class KuraKura21Playback(
                     continuation.invokeOnCancellation { finished.set(true) }
                     view.loadUrl(detailUrl, headers.filterKeys { !it.equals("User-Agent", true) })
                 }
-                captured?.let { media ->
-                    val cookie = CookieManager.getInstance().getCookie(media.url)
-                    if (cookie.isNullOrBlank()) media
-                    else media.copy(headers = media.headers + ("Cookie" to cookie))
-                }
+                captured
             }
         } finally {
             finished.set(true)
+            candidates.cancel()
+            validator?.cancel()
             // Unlike WebViewResolver's polling loop, cancellation always destroys our view.
             withContext(NonCancellable + Dispatchers.Main.immediate) {
                 browser?.let { view ->
@@ -268,10 +308,19 @@ internal class KuraKura21Playback(
             return child.code in 200..299 && policy.validPlaylist(child.text, child.url) &&
                 child.text.contains("#EXTINF:")
         }
-        // MP4 must satisfy the same identity/context checks, then identify as video.
-        val response = app.head(media.url, headers = media.headers, timeout = 8)
-        return response.code in setOf(200, 206) && policy.mediaPath(response.url) &&
-            response.headers["Content-Type"]?.startsWith("video/", true) == true
+        // HEAD may be unsupported; MIME alone can also mislabel an error body.
+        // Read only a container prefix, even when the server ignores Range.
+        val response = app.get(media.url, headers = media.headers + ("Range" to "bytes=0-31"), timeout = 8)
+        return response.okhttpResponse.use {
+            val mime = response.headers["Content-Type"]?.substringBefore(';')?.trim()?.lowercase()
+            if (response.code !in setOf(200, 206) || !policy.mediaPath(response.url) ||
+                mime !in setOf("video/mp4", "application/mp4")) return@use false
+            if (response.code == 206 && !response.headers["Content-Range"].orEmpty().startsWith("bytes 0-")) return@use false
+            val source = response.body.source()
+            val valid = source.request(16) && KuraKura21MediaPolicy.mp4Header(source.readByteArray(16))
+            coroutineContext.ensureActive()
+            valid
+        }
     }
 
     private suspend fun emit(label: String, media: Media, callback: (ExtractorLink) -> Unit) {
@@ -361,15 +410,46 @@ internal class KuraKura21MediaPolicy(val videoId: String) {
     }
 
     fun validPlaylist(text: String, url: String): Boolean {
-        if (text.length > 1_000_000 || !text.trimStart().startsWith("#EXTM3U") || !mediaPath(url)) return false
+        if (text.length > 1_000_000 || !mediaPath(url)) return false
         val lines = text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
-        val uris = lines.filterNot { it.startsWith('#') }
-        if (uris.isEmpty()) return false
-        if (uris.any { line ->
-            val resolved = absolute(line, url)
-            resolved == null || isAd(resolved) || !sameVideoPath(resolved)
-        }) return false
-        return lines.any { it.startsWith("#EXT-X-STREAM-INF:") } || lines.any { it.startsWith("#EXTINF:") }
+        if (lines.firstOrNull() != "#EXTM3U") return false
+        var pendingUri = false
+        var master = false
+        var media = false
+        var count = 0
+        for (line in lines.drop(1)) {
+            if (!line.startsWith('#')) {
+                val resolved = absolute(line, url) ?: return false
+                if (!pendingUri || isAd(resolved) || !sameVideoPath(resolved)) return false
+                pendingUri = false
+                count++
+            } else if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                if (pendingUri || media) return false
+                master = true
+                pendingUri = true
+            } else if (line.startsWith("#EXTINF:")) {
+                val duration = line.substringAfter(':').substringBefore(',').toDoubleOrNull() ?: return false
+                if (pendingUri || master || !duration.isFinite() || duration <= 0) return false
+                media = true
+                pendingUri = true
+            }
+            // Attribute URIs include alternate audio and fMP4 initialization;
+            // they are media dependencies, not comments to ignore. Key URLs need
+            // not encode the movie ID, but must still be HTTPS and not ads.
+            if (line.startsWith("#EXT")) {
+                val attributes = line.substringAfter(':', "")
+                val uriAttribute = Regex("(?:^|,)\\s*URI=\"([^\"]*)\"").find(attributes)
+                if (attributes.contains(Regex("(?:^|,)\\s*URI=")) && uriAttribute == null) return false
+                val key = line.startsWith("#EXT-X-KEY:") || line.startsWith("#EXT-X-SESSION-KEY:")
+                if ((line.startsWith("#EXT-X-MAP:") || line.startsWith("#EXT-X-I-FRAME-STREAM-INF:") ||
+                        (key && !attributes.split(',').contains("METHOD=NONE"))) && uriAttribute == null) return false
+                if (uriAttribute != null) {
+                    val dependency = absolute(uriAttribute.groupValues[1], url) ?: return false
+                    if (isAd(dependency) || (!key && !sameVideoPath(dependency))) return false
+                }
+            }
+        }
+        return count > 0 && !pendingUri && (master || media)
     }
 
     fun firstVariant(text: String, url: String): String? {
@@ -382,8 +462,9 @@ internal class KuraKura21MediaPolicy(val videoId: String) {
 
     private fun sameVideoPath(url: String): Boolean {
         val path = safeUri(url)?.path ?: return false
-        return path.split('/').any { part ->
-            part == "$videoId.mp4" || part == "$videoId.m3u8" ||
+        val parts = path.split('/')
+        return parts.withIndex().any { (index, part) ->
+            (index == parts.lastIndex && (part == "$videoId.mp4" || part == "$videoId.m3u8")) ||
                 part.matches(videoComponent)
         }
     }
@@ -410,8 +491,14 @@ internal class KuraKura21MediaPolicy(val videoId: String) {
             val uri = safeUri(url) ?: return null
             if (uri.host.lowercase() !in setOf("kr21.click", "n1mwq.org")) return null
             val parts = uri.path.trim('/').split('/')
-            if (parts.size < 2 || !(parts[0] == "e" || parts[0].matches(Regex("pn[0-9]+")))) return null
+            if (!((parts[0] == "e" && parts.size in 2..3) ||
+                    (parts[0].matches(Regex("pn[0-9]+")) && parts.size == 2))) return null
             return parts[1].takeIf { it.matches(Regex("[a-zA-Z0-9]{6,64}")) }
+        }
+        fun mp4Header(bytes: ByteArray): Boolean {
+            if (bytes.size < 16) return false
+            val size = bytes.take(4).fold(0L) { value, byte -> (value shl 8) or (byte.toLong() and 255) }
+            return size >= 16 && bytes.copyOfRange(4, 8).contentEquals(byteArrayOf(102, 116, 121, 112))
         }
         fun isAd(url: String): Boolean {
             val uri = safeUri(url) ?: return true
