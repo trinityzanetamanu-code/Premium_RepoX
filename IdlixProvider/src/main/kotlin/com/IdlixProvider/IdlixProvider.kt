@@ -5,19 +5,18 @@ import com.lagradost.api.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
-import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.nicehttp.RequestBodyTypes
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Interceptor
 
 // FIX #9: Tag log diganti ke nama yang relevan
 private const val TAG = "IdlixProvider"
-
-// FIX #5: Batas maksimum delay agar user tidak nunggu selamanya
-private const val MAX_DELAY_MS = 30_000L
 
 class IdlixProvider : MainAPI() {
     override var mainUrl = "https://z2.idlixku.com"
@@ -326,121 +325,88 @@ class IdlixProvider : MainAPI() {
             var refererUrl = "$mainUrl/"
 
             if (data.contains("|")) {
-                val parts = data.split("|")
+                val parts = data.split("|", limit = 3)
                 val rawContentType = parts.getOrNull(0) ?: "movie"
                 contentType = rawContentType.substringAfterLast("/")
                 contentId = parts.getOrNull(1) ?: data
                 refererUrl = parts.getOrNull(2) ?: "$mainUrl/"
             } else if (data.startsWith("http")) {
                 refererUrl = data
-                val isSeriesUrl = data.contains("/series/")
-                val slug = data.split("/").last()
-                val apiUrl = "$mainUrl/api/${if (isSeriesUrl) "series" else "movies"}/$slug"
-
-                val responseText = app.get(apiUrl).text
-                val detail = AppUtils.parseJson<IdlixDetailResponse>(responseText)
-
-                contentId = detail.id ?: slug
-                contentType = if (isSeriesUrl) "episode" else "movie"
+                val path = data.toHttpUrlOrNull()?.pathSegments?.filter { it.isNotBlank() } ?: return false
+                if (path.size == 6 && path[0] == "series" && path[2] == "season" && path[4] == "episode") {
+                    val season = path[3].toIntOrNull()?.takeIf { it > 0 } ?: return false
+                    val episode = path[5].toIntOrNull()?.takeIf { it > 0 } ?: return false
+                    val seasonResponse = app.get("$mainUrl/api/series/${path[1]}/season/$season")
+                    if (seasonResponse.code != 200) return false
+                    val detail = AppUtils.parseJson<IdlixSeasonApiResponse>(seasonResponse.text).season ?: return false
+                    if (detail.seasonNumber != season) return false
+                    contentId = detail.episodes?.singleOrNull { it.episodeNumber == episode && it.hasVideo == true }?.id ?: return false
+                    contentType = "episode"
+                } else if (path.size == 2 && path[0] == "movie") {
+                    val response = app.get("$mainUrl/api/movies/${path[1]}")
+                    if (response.code != 200) return false
+                    contentId = AppUtils.parseJson<IdlixDetailResponse>(response.text).id ?: return false
+                } else return false // A series ID is never an episode ID.
             }
-
-            // Pancing CookieJar agar mengaktifkan Cloudflare Solver internal
-            app.get(mainUrl)
-
-            // Setup cookies
-            val randomDid = buildString {
-                repeat(32) { append((('a'..'f') + ('0'..'9')).random()) }
-            }
-            val customCookies = mapOf(
-                "did" to randomDid,
-                "NEXT_LOCALE" to "id"
-            )
-
+            if (contentType !in setOf("movie", "episode") || !contentId.matches(Regex("[A-Za-z0-9_-]+"))) return false
+            val page = refererUrl.toHttpUrlOrNull() ?: return false
+            val base = mainUrl.toHttpUrlOrNull() ?: return false
+            if (page.scheme != base.scheme || page.host != base.host || page.port != base.port ||
+                page.username.isNotEmpty() || page.password.isNotEmpty()) return false
             val headers = mapOf(
                 "Referer" to refererUrl,
                 "Origin" to mainUrl,
                 "Accept" to "application/json, text/plain, */*",
-                "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
+                "User-Agent" to IdlixPlayback.USER_AGENT
             )
 
             val targetPlayInfoUrl = "$mainUrl/api/watch/play-info/$contentType/$contentId"
 
-            // 1. Request API reguler
-            var playInfoResText = runCatching {
-                app.get(
-                    url = targetPlayInfoUrl,
-                    headers = headers,
-                    cookies = customCookies
-                ).text
-            }.getOrNull() ?: ""
-
-            var playInfoRes = runCatching {
-                AppUtils.parseJson<PlayInfoResponse>(playInfoResText)
-            }.getOrNull()
-
-            // 2. Fallback WebViewResolver jika diblokir Cloudflare
-            if (playInfoRes?.gateToken == null) {
-                Log.d(TAG, "Terkena blokir Cloudflare. Menjalankan Fallback WebViewResolver...")
-
-                val webViewResolver = WebViewResolver(
-                    interceptUrl = Regex(".*api/watch/play-info.*"),
-                    useOkhttp = false
-                )
-
-                webViewResolver.resolveUsingWebView(
-                    url = targetPlayInfoUrl,
-                    headers = headers
-                )
-
-                playInfoResText = app.get(
-                    url = targetPlayInfoUrl,
-                    headers = headers,
-                    cookies = customCookies
-                ).text
-
-                playInfoRes = AppUtils.parseJson<PlayInfoResponse>(playInfoResText)
+            val playInfoHttp = app.get(targetPlayInfoUrl, headers = headers, allowRedirects = false, timeout = 15)
+            if (playInfoHttp.code != 200) {
+                Log.d(TAG, "Playback play-info HTTP=${playInfoHttp.code}")
+                return false
             }
-
-            val gateToken = playInfoRes.gateToken ?: return false
-
-            // 3. Bypass time-lock dengan cap maksimum delay
-            val serverNow = playInfoRes.serverNow ?: 0L
-            val unlockAt = playInfoRes.unlockAt ?: 0L
-            val countdownSec = playInfoRes.preroll?.countdownSec ?: 7L
-
-            val diffTimeMs = unlockAt - serverNow
-            val baseWaitMs = countdownSec * 1000L
-
-            // FIX #5: Tambahkan coerceAtMost agar delay tidak melebihi 30 detik
-            val finalWaitMs = (maxOf(baseWaitMs, diffTimeMs) + 1000L).coerceAtMost(MAX_DELAY_MS)
+            val playInfoRes = AppUtils.parseJson<PlayInfoResponse>(playInfoHttp.text)
+            // play-info sets the device/session cookie used to bind the gate and claim.
+            // Carry the server-issued values locally, even if the app has no CookieJar.
+            val sessionCookies = playInfoHttp.cookies
+            val gateToken = playInfoRes.gateToken?.takeIf { it.isNotBlank() } ?: return false
+            val finalWaitMs = IdlixPlayback.waitMillis(playInfoRes.serverNow, playInfoRes.unlockAt,
+                playInfoRes.preroll?.countdownSec) ?: return false
             delay(finalWaitMs)
 
             // 4. Klaim token streaming
             val jsonMediaType = RequestBodyTypes.JSON.toMediaTypeOrNull()
             val requestBodyData = mapOf("gateToken" to gateToken).toJson().toRequestBody(jsonMediaType)
 
-            val claimResText = app.post(
+            val claimHttp = app.post(
                 url = "$mainUrl/api/watch/session/claim",
                 headers = headers,
-                cookies = customCookies,
-                requestBody = requestBodyData
-            ).text
-
-            val claimParsed = AppUtils.parseJson<SessionClaimResponse>(claimResText)
-            val claim = claimParsed.claim ?: return false
-
-            // 5. Bypass Majorplay
-            // FIX #4: Pakai mainUrl dari instance Majorplay, bukan hardcode
-            val majorplay = Majorplay()
-            val fakeUrl = "${majorplay.mainUrl}/play?claim=$claim"
-            majorplay.getUrl(fakeUrl, refererUrl, subtitleCallback, callback)
-
-            return true
+                cookies = sessionCookies,
+                requestBody = requestBodyData,
+                allowRedirects = false,
+                timeout = 15
+            )
+            if (claimHttp.code != 200) {
+                Log.d(TAG, "Playback claim HTTP=${claimHttp.code}")
+                return false
+            }
+            val claimParsed = AppUtils.parseJson<SessionClaimResponse>(claimHttp.text)
+            if (claimParsed.videoId.isNullOrBlank()) return false
+            return Majorplay().resolveClaim(claimParsed, refererUrl, subtitleCallback, callback,
+                sessionCookies + claimHttp.cookies)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Error di loadLinks: ${e.message}")
+            // Exceptions may contain signed URLs: log the class, never session values.
+            Log.e(TAG, "Error di loadLinks: ${e.javaClass.simpleName}")
             return false
         }
     }
+
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor =
+        IdlixPlayback.interceptor(extractorLink.url)
 }
 
 // ============================================================================
