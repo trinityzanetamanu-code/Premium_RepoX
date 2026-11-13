@@ -8,7 +8,6 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.util.Log
-import com.lagradost.api.getContext
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
@@ -35,7 +34,8 @@ import kotlin.coroutines.resume
 /** HTTP handles Muvipro; only the normal, session-owning player runs in a WebView. */
 internal class KuraKura21Playback(
     private val mainUrl: String,
-    private val headers: Map<String, String>
+    private val headers: Map<String, String>,
+    private val context: Context
 ) {
     private data class Media(val url: String, val headers: Map<String, String>)
     private data class PlayerIdentity(val videoId: String, val frame: String, val parent: String)
@@ -164,7 +164,6 @@ internal class KuraKura21Playback(
         val playerOrigins = Collections.synchronizedSet(mutableSetOf<String>())
         try {
             return withContext(Dispatchers.Main.immediate) {
-                val context = getContext() as? Context ?: return@withContext null
                 val captured = suspendCancellableCoroutine<Media?> { continuation ->
                     val view = WebView(context)
                     browser = view

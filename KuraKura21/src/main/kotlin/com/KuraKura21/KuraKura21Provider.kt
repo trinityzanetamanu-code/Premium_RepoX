@@ -1,5 +1,6 @@
 package com.kurakura21
 
+import android.content.Context
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
@@ -16,7 +17,7 @@ import java.net.URLEncoder
  * never fabricates video URLs, and returns false when there is no valid source.
  * This is a BETA provider, not a verified working video extractor.
  */
-class KuraKura21Provider : MainAPI() {
+class KuraKura21Provider(private val context: Context) : MainAPI() {
     override var name = "KURAKURA21"
     override var mainUrl = "https://kurakura21.com"
     override var lang = "id"
@@ -92,7 +93,7 @@ class KuraKura21Provider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val detailUrl = pageUrl(data) ?: return false
-        return KuraKura21Playback(mainUrl, headers).load(detailUrl, subtitleCallback, callback)
+        return KuraKura21Playback(mainUrl, headers, context).load(detailUrl, subtitleCallback, callback)
     }
 
     private suspend fun getPage(url: String): Document {
