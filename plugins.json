@@ -361,7 +361,7 @@
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/KuraKura21.cs3",
         "status": 3,
-        "version": 10,
+        "version": 11,
         "name": "KuraKura21",
         "internalName": "KuraKura21",
         "authors": [
@@ -375,7 +375,7 @@
             "NSFW"
         ],
         "apiVersion": 1,
-        "fileHash": "sha256-2fc36b1c24003efe778715654d98f7a0f6a9678aca93667fe98de62173f14d22"
+        "fileHash": "sha256-1c7313617a555c578a7bd76893bbc430b4667422e02d8df1c21646d1f7f41be0"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/LayarKacaProvider.cs3",
