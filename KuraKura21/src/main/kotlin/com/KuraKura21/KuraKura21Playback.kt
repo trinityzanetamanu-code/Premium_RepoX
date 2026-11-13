@@ -1,344 +1,97 @@
 package com.kurakura21
 
-import android.annotation.SuppressLint
-import android.content.Context
-import android.webkit.CookieManager
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.jsoup.Jsoup
-import java.io.ByteArrayInputStream
 import java.net.URI
 import java.util.Collections
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
-import kotlin.coroutines.resume
 
-/** HTTP handles Muvipro; only the normal, session-owning player runs in a WebView. */
-internal class KuraKura21Playback(
-    private val mainUrl: String,
-    private val headers: Map<String, String>,
-    private val context: Context
-) {
-    private data class Media(val url: String, val headers: Map<String, String>)
-    private data class PlayerIdentity(val videoId: String, val frame: String, val parent: String)
-
-    suspend fun load(
-        detailUrl: String,
-        @Suppress("UNUSED_PARAMETER") subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean = withContext(Dispatchers.IO) {
-        var emitted = false
-        val seen = mutableSetOf<String>()
-        // Sequential fallback avoids competing hidden players and bounds the whole operation.
-        withTimeoutOrNull(125_000L) {
-            val response = app.get(detailUrl, headers = headers, timeout = 12)
-            if (response.code !in 200..299) return@withTimeoutOrNull
-            val player = KuraKura21PlayerData.parse(response.text) ?: run {
-                diagnostic("detail", "player_missing")
-                return@withTimeoutOrNull
+/** Selected detail -> Muvipro AJAX -> bounded iframe chain -> verified public HTTP extractor. */
+internal class KuraKura21Playback(private val mainUrl: String, private val headers: Map<String, String>,
+    private val sourceName: String = "KURAKURA21", private val limits: KuraKura21HttpLimits = KuraKura21HttpLimits()) {
+    suspend fun load(detailUrl: String, subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit): Boolean = withContext(Dispatchers.IO) {
+        val trace = KuraKura21HttpTrace()
+        val session = KuraKura21HttpSession(headers, limits)
+        var delivered = false
+        withTimeoutOrNull(limits.totalMs) {
+            val response = try { session.request(detailUrl, "$mainUrl/") }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { trace.event("DETAIL_FETCH", "HTTP_ERROR"); return@withTimeoutOrNull }
+            trace.event("DETAIL_FETCH", "HTTP_STATUS", response.status)
+            if (response.status !in 200..299 || response.truncated || !response.mime.contains("html") ||
+                KuraKura21MediaPolicy.origin(response.url) != KuraKura21MediaPolicy.origin(mainUrl)) return@withTimeoutOrNull
+            val player = KuraKura21PlayerData.parse(response.text()) ?: run {
+                trace.event("PLAYER_PARSE", "PLAYER_MISSING"); return@withTimeoutOrNull
             }
+            val title = Jsoup.parse(response.text()).selectFirst("h1.entry-title, h1[itemprop=name], .sheader h1, h1")?.text()
+            trace.event("PLAYER_PARSE", "TABS_READY", player.tabs.size)
+            val visited = mutableSetOf<String>()
             for ((tab, label) in player.tabs) {
                 coroutineContext.ensureActive()
-                val media = withTimeoutOrNull(42_000L) {
+                val result = withTimeoutOrNull(limits.serverMs) server@ {
                     try {
-                        val ajax = app.post(
-                            "$mainUrl/wp-admin/admin-ajax.php",
-                            data = KuraKura21PlayerData.ajaxData(tab, player.postId),
-                            headers = headers + mapOf(
-                                "Referer" to detailUrl,
-                                "Origin" to mainUrl,
-                                "X-Requested-With" to "XMLHttpRequest",
-                                "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
-                            ), timeout = 12
-                        )
-                        if (ajax.code !in 200..299) {
-                            diagnostic(tab, "ajax_http_${ajax.code}")
-                            return@withTimeoutOrNull null
-                        }
-                        val frames = KuraKura21PlayerData.frames(ajax.text, detailUrl)
-                        for (entry in frames.take(5)) {
+                        val ajax = session.request("$mainUrl/wp-admin/admin-ajax.php", response.url,
+                            post = KuraKura21PlayerData.ajaxData(tab, player.postId), origin = mainUrl)
+                        trace.event("AJAX_FETCH", "HTTP_STATUS", ajax.status)
+                        if (ajax.status !in 200..299 || ajax.truncated ||
+                            !(ajax.mime.contains("html") || ajax.mime.contains("json"))) return@server null
+                        val frames = KuraKura21PlayerData.frames(ajax.text(), response.url)
+                        trace.event("IFRAME_PARSE", "FRAMES_READY", frames.size)
+                        for (frame in frames.take(5)) {
                             try {
-                                val identity = findIdentity(entry, detailUrl) ?: continue
-                                val policy = KuraKura21MediaPolicy(identity.videoId)
-                                discoverFrame(identity.frame, identity.parent, policy)
-                                // Only the selected browser owns access/playback and attestation.
-                                // It stays alive until a candidate is actually validated.
-                                val captured = webViewLock.withLock {
-                                    withTimeoutOrNull(35_000L) {
-                                        browserMedia(detailUrl, entry, tab, policy)
-                                    }
-                                }
-                                if (captured != null) return@withTimeoutOrNull captured
-                            } catch (cancelled: CancellationException) {
-                                throw cancelled
-                            } catch (error: Exception) {
-                                diagnostic(tab, "frame_error_${error.javaClass.simpleName}")
-                            }
+                                val found = resolve(frame, response.url, 0, session, visited, title, label, trace)
+                                if (found != null) return@server found
+                            } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { trace.event("EXTRACTOR_HTTP", "FRAME_FAILED") }
                         }
                         null
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (error: Exception) {
-                        // Never log exception messages: HTTP errors may include signed URLs.
-                        diagnostic(tab, "server_error_${error.javaClass.simpleName}")
-                        null
-                    }
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { trace.event("EXTRACTOR_HTTP", "SERVER_FAILED"); null }
                 }
-                if (media != null && seen.add(media.url)) {
-                    emit(label, media, callback)
-                    emitted = true
-                    break // A verified candidate is sufficient; alternatives are fallbacks.
+                if (result != null) {
+                    callback(result.first)
+                    result.second.forEach(subtitleCallback)
+                    delivered = true
+                    break
                 }
-                diagnostic(tab, "no_valid_media")
+                trace.event("EXTRACTOR_HTTP", "SERVER_NO_HTTP_MEDIA")
             }
         }
-        emitted
+        trace.event("CLEANUP", if (delivered) "HTTP_COMPLETE" else "NO_HTTP_MEDIA", session.requestCount)
+        delivered
     }
 
-    private suspend fun findIdentity(entry: String, parent: String, depth: Int = 0): PlayerIdentity? {
-        KuraKura21MediaPolicy.identity(entry)?.let { return PlayerIdentity(it, entry, parent) }
-        if (depth >= 2 || !KuraKura21MediaPolicy.isPlayerHost(entry)) return null
-        val response = app.get(entry, headers = headers + ("Referer" to parent), timeout = 8)
-        if (response.code !in 200..299 || !KuraKura21MediaPolicy.isPlayerHost(response.url)) return null
-        KuraKura21MediaPolicy.identity(response.url)?.let { return PlayerIdentity(it, response.url, parent) }
-        for (child in KuraKura21PlayerData.frames(response.text, response.url).take(3)) {
-            findIdentity(child, response.url, depth + 1)?.let { return it }
+    private suspend fun resolve(url: String, parent: String, depth: Int, session: KuraKura21HttpSession,
+        visited: MutableSet<String>, title: String?, label: String, trace: KuraKura21HttpTrace): Pair<ExtractorLink, List<SubtitleFile>>? {
+        coroutineContext.ensureActive()
+        if (depth > 2 || !KuraKura21MediaPolicy.isPlayerHost(url) || KuraKura21MediaPolicy.isAd(url) || !visited.add(url)) return null
+        if (KuraKura21MediaPolicy.host(url) == "turtle4up.top") {
+            var link: ExtractorLink? = null
+            val subtitles = mutableListOf<SubtitleFile>()
+            KuraKura21TurtleExtractor(session, headers, sourceName, label, title, trace)
+                .getUrl(url, parent, { subtitles.add(it) }, { if (link == null) link = it })
+            return link?.let { it to subtitles.toList() }
         }
+        if (depth == 2) return null
+        val page = session.request(url, parent)
+        if (page.status !in 200..299 || page.truncated || !page.mime.contains("html")) return null
+        for (child in KuraKura21PlayerData.frames(page.text(), page.url).take(3)) {
+            try {
+                resolve(child, page.url, depth + 1, session, visited, title, label, trace)?.let { return it }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { trace.event("EXTRACTOR_HTTP", "NESTED_FRAME_FAILED") }
+        }
+        // SPA/session-gated players have no verified direct contract. Never emulate their protection.
+        trace.event("EXTRACTOR_HTTP", "NO_VERIFIED_HTTP_CONTRACT")
         return null
-    }
-
-    private suspend fun discoverFrame(entry: String, parent: String, policy: KuraKura21MediaPolicy) {
-        if (KuraKura21MediaPolicy.identity(entry) != policy.videoId) return
-        try {
-            // Public embed metadata may describe a new player origin. Access/playback
-            // endpoints and attestation are deliberately left to the browser session.
-            val origin = KuraKura21MediaPolicy.origin(entry) ?: return
-            val response = app.get("$origin/api/videos/${policy.videoId}/embed/details",
-                headers = headers + mapOf("Referer" to entry, "x-embed-parent" to entry,
-                    "x-embed-origin" to URI(parent).host, "x-embed-referer" to "$mainUrl/"), timeout = 5)
-            if (response.code !in 200..299 || KuraKura21MediaPolicy.origin(response.url) != origin) return
-            val metadata = JSONObject(response.text)
-            if (metadata.optString("code") == policy.videoId) {
-                policy.authorizeFrame(metadata.optString("embed_frame_url"))
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            // Metadata can be session-gated. The real browser may still load it.
-        }
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun browserMedia(
-        detailUrl: String,
-        entry: String,
-        tab: String,
-        policy: KuraKura21MediaPolicy
-    ): Media? {
-        var browser: WebView? = null
-        val finished = AtomicBoolean(false)
-        val entrySeen = AtomicBoolean(false)
-        val nestedSeen = AtomicBoolean(false)
-        val candidates = Channel<Media>(8)
-        val candidateUrls = Collections.synchronizedSet(mutableSetOf<String>())
-        var validator: Job? = null
-        // Origins are admitted only after an actual matching player document request.
-        val playerOrigins = Collections.synchronizedSet(mutableSetOf<String>())
-        try {
-            return withContext(Dispatchers.Main.immediate) {
-                val captured = suspendCancellableCoroutine<Media?> { continuation ->
-                    val view = WebView(context)
-                    browser = view
-                    view.settings.javaScriptEnabled = true
-                    view.settings.domStorageEnabled = true
-                    view.settings.mediaPlaybackRequiresUserGesture = false
-                    // Keep this WebView's own normal browser cookies. No imported identity/token.
-                    CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
-                    val userAgent = view.settings.userAgentString
-                    // One bounded, sequential validator. Do not kill this session
-                    // merely because its first plausible media request was invalid.
-                    validator = launch(Dispatchers.IO) {
-                        for (candidate in candidates) {
-                            try {
-                                coroutineContext.ensureActive()
-                                val media = withContext(Dispatchers.Main.immediate) {
-                                    val cookie = CookieManager.getInstance().getCookie(candidate.url)
-                                    if (cookie.isNullOrBlank()) candidate
-                                    else candidate.copy(headers = candidate.headers + ("Cookie" to cookie))
-                                }
-                                if (validMedia(media, policy)) {
-                                    coroutineContext.ensureActive()
-                                    if (finished.compareAndSet(false, true)) continuation.resume(media)
-                                    break
-                                }
-                                diagnostic(tab, "media_validation_failed")
-                            } catch (cancelled: CancellationException) {
-                                throw cancelled
-                            } catch (error: Exception) {
-                                diagnostic(tab, "candidate_error_${error.javaClass.simpleName}")
-                            }
-                        }
-                    }
-                    view.webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                            val url = request.url.toString()
-                            if (KuraKura21MediaPolicy.isAd(url)) return true
-                            return request.isForMainFrame &&
-                                !KuraKura21MediaPolicy.sameDocument(url, detailUrl) && !policy.playerDocument(url)
-                        }
-
-                        override fun onPageFinished(view: WebView, url: String) {
-                            if (KuraKura21MediaPolicy.sameDocument(url, detailUrl) && !finished.get()) {
-                                // Preserve the real Muvipro document/referrer/countdown context.
-                                // Click only its selected server and its own Play Now button.
-                                view.evaluateJavascript("""
-                                    (function(){
-                                      if(window.__kura21Started)return;
-                                      window.__kura21Started=true;
-                                      var tries=0,selected=false;
-                                      var timer=setInterval(function(){
-                                        if(++tries>65){clearInterval(timer);return;}
-                                        if(!selected){
-                                          var tab=document.querySelector('a[href="#$tab"]');
-                                          if(tab){tab.click();selected=true;}
-                                        }
-                                        var play=document.getElementById('timeloading');
-                                        if(selected&&play&&play.tagName==='BUTTON'&&play.offsetParent!==null)play.click();
-                                      },500);
-                                    })();
-                                """.trimIndent(), null)
-                            }
-                        }
-
-                        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                            val url = request.url.toString()
-                            if (finished.get() || !continuation.isActive || KuraKura21MediaPolicy.isAd(url)) return blocked()
-                            val requestHeaders = request.requestHeaders
-                            fun header(name: String) = requestHeaders.entries.firstOrNull {
-                                it.key.equals(name, ignoreCase = true)
-                            }?.value
-                            val referer = header("Referer") ?: return null
-                            val destination = header("Sec-Fetch-Dest")
-                            val isDocument = if (destination != null) destination in setOf("iframe", "document")
-                                else header("Accept")?.contains("text/html", true) == true
-                            if (isDocument && KuraKura21MediaPolicy.sameDocument(url, entry) &&
-                                KuraKura21MediaPolicy.origin(referer) == KuraKura21MediaPolicy.origin(detailUrl)) {
-                                entrySeen.set(true)
-                                KuraKura21MediaPolicy.origin(url)?.let(playerOrigins::add)
-                            }
-                            if (!entrySeen.get()) return null
-
-                            if (isDocument && policy.playerDocument(url) &&
-                                KuraKura21MediaPolicy.origin(referer) in playerOrigins) {
-                                KuraKura21MediaPolicy.origin(url)?.let(playerOrigins::add)
-                                if (!KuraKura21MediaPolicy.sameDocument(url, entry)) nestedSeen.set(true)
-                            }
-                            val origin = header("Origin")
-                            val snapshot = synchronized(playerOrigins) { playerOrigins.toSet() }
-                            // Path identity + observed frame + referrer; duration is never proof.
-                            if (!policy.accepts(url, referer, origin, snapshot)) return null
-                            val enqueue = synchronized(candidateUrls) {
-                                candidateUrls.size < 8 && candidateUrls.add(url)
-                            }
-                            if (enqueue) {
-                                val playbackHeaders = buildMap {
-                                    put("Referer", referer)
-                                    put("User-Agent", header("User-Agent") ?: userAgent)
-                                    origin?.let { put("Origin", it) }
-                                }
-                                candidates.trySend(Media(url, playbackHeaders))
-                            }
-                            return blocked()
-                        }
-                    }
-                    continuation.invokeOnCancellation { finished.set(true) }
-                    view.loadUrl(detailUrl, headers.filterKeys { !it.equals("User-Agent", true) })
-                }
-                captured
-            }
-        } finally {
-            finished.set(true)
-            candidates.cancel()
-            validator?.cancel()
-            // Unlike WebViewResolver's polling loop, cancellation always destroys our view.
-            withContext(NonCancellable + Dispatchers.Main.immediate) {
-                browser?.let { view ->
-                    view.stopLoading()
-                    view.webViewClient = WebViewClient()
-                    view.webChromeClient = null
-                    view.removeAllViews()
-                    view.destroy()
-                }
-                browser = null
-            }
-            diagnostic(tab, when {
-                !entrySeen.get() -> "selected_iframe_not_observed"
-                !nestedSeen.get() -> "nested_player_not_observed"
-                else -> "player_session_finished"
-            })
-        }
-    }
-
-    private suspend fun validMedia(media: Media, policy: KuraKura21MediaPolicy): Boolean {
-        if (KuraKura21MediaPolicy.isHls(media.url)) {
-            val response = app.get(media.url, headers = media.headers, timeout = 8)
-            if (response.code !in 200..299 || !policy.validPlaylist(response.text, response.url)) return false
-            if (!response.text.contains("#EXT-X-STREAM-INF:")) return true
-            val variant = policy.firstVariant(response.text, response.url) ?: return false
-            val child = app.get(variant, headers = media.headers, timeout = 8)
-            return child.code in 200..299 && policy.validPlaylist(child.text, child.url) &&
-                child.text.contains("#EXTINF:")
-        }
-        // HEAD may be unsupported; MIME alone can also mislabel an error body.
-        // Read only a container prefix, even when the server ignores Range.
-        val response = app.get(media.url, headers = media.headers + ("Range" to "bytes=0-31"), timeout = 8)
-        return response.okhttpResponse.use {
-            val mime = response.headers["Content-Type"]?.substringBefore(';')?.trim()?.lowercase()
-            if (response.code !in setOf(200, 206) || !policy.mediaPath(response.url) ||
-                mime !in setOf("video/mp4", "application/mp4")) return@use false
-            if (response.code == 206 && !response.headers["Content-Range"].orEmpty().startsWith("bytes 0-")) return@use false
-            val source = response.body.source()
-            val valid = source.request(16) && KuraKura21MediaPolicy.mp4Header(source.readByteArray(16))
-            coroutineContext.ensureActive()
-            valid
-        }
-    }
-
-    private suspend fun emit(label: String, media: Media, callback: (ExtractorLink) -> Unit) {
-        callback(newExtractorLink(
-            source = "KURAKURA21", name = "KURAKURA21 - $label", url = media.url,
-            type = if (KuraKura21MediaPolicy.isHls(media.url)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-        ) {
-            referer = media.headers["Referer"].orEmpty()
-            headers = media.headers
-            quality = Qualities.Unknown.value
-        })
-    }
-
-    private fun blocked() = WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
-    private fun diagnostic(tab: String, reason: String) = Log.i("KuraKura21", "$tab: $reason")
-
-    private companion object {
-        // Shared across provider instances, so concurrent loadLinks calls cannot race players.
-        val webViewLock = Mutex()
     }
 }
 

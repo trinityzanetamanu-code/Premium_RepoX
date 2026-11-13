@@ -1,6 +1,5 @@
 package com.kurakura21
 
-import android.content.Context
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
@@ -12,12 +11,11 @@ import java.net.URLEncoder
  * Isolated CloudStream provider for KURAKURA21.
  *
  * Page routes and visible server labels were inspected on 2026-11-09.
- * Individual HTML attributes / media endpoints could not be verified in the
- * inspection environment; playback extraction below is intentionally generic,
- * never fabricates video URLs, and returns false when there is no valid source.
- * This is a BETA provider, not a verified working video extractor.
+ * Playback uses the verified public Turtle4Up HTTP contract; unsupported
+ * session-gated players return no source. The provider remains Beta until
+ * actual Android playback has been verified.
  */
-class KuraKura21Provider(private val context: Context) : MainAPI() {
+class KuraKura21Provider : MainAPI() {
     override var name = "KURAKURA21"
     override var mainUrl = "https://kurakura21.com"
     override var lang = "id"
@@ -93,7 +91,7 @@ class KuraKura21Provider(private val context: Context) : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val detailUrl = pageUrl(data) ?: return false
-        return KuraKura21Playback(mainUrl, headers, context).load(detailUrl, subtitleCallback, callback)
+        return KuraKura21Playback(mainUrl, headers, name).load(detailUrl, subtitleCallback, callback)
     }
 
     private suspend fun getPage(url: String): Document {
