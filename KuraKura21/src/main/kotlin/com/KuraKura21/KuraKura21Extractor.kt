@@ -127,12 +127,12 @@ internal class KuraKura21Resolver(private val mainUrl: String, private val heade
         if (page.status !in 200..299) { trace.event("IFRAME_FETCH", "HTTP_STATUS_REJECTED", page.status); return null }
         if (page.truncated || !page.mime.contains("html")) { trace.event("IFRAME_FETCH", "PLAYER_FORMAT_UNRECOGNIZED"); return null }
         val children = KuraKura21PlayerData.frames(page.text(), page.url).toMutableList()
-        if (children.isEmpty() && KuraKura21MediaPolicy.host(page.url) == "kurakura21.space") {
+        if (children.isEmpty() && KuraKura21MediaPolicy.host(page.url) in setOf("kurakura21.space", "kr21.click")) {
             // Observed public SPA contract: selected /e/{code}/... -> same-origin
             // embed/details -> explicit nested iframe. Never emulate its playback/auth checks.
             val code = KuraKura21PlayerData.publicEmbedCode(page.url)
             if (code != null) {
-                val endpoint = "https://kurakura21.space/api/videos/$code/embed/details"
+                val endpoint = "${KuraKura21MediaPolicy.origin(page.url) ?: return null}/api/videos/$code/embed/details"
                 val metadata = session.request(endpoint, page.url)
                 trace.event("EXTRACTOR_HTTP", "EMBED_METADATA_STATUS", metadata.status)
                 if (metadata.status in 200..299 && metadata.url == endpoint && !metadata.truncated && metadata.mime.contains("json")) {
@@ -173,7 +173,7 @@ internal object KuraKura21PlayerData {
 
     fun publicEmbedCode(url: String): String? {
         val uri = KuraKura21MediaPolicy.safeUri(url) ?: return null
-        if (uri.host.lowercase() != "kurakura21.space") return null
+        if (uri.host.lowercase() !in setOf("kurakura21.space", "kr21.click")) return null
         val parts = uri.path.trim('/').split('/')
         return parts.getOrNull(1)?.takeIf {
             parts.size in 2..3 && parts.first() == "e" && it.matches(Regex("[A-Za-z0-9_-]{4,64}"))
