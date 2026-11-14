@@ -38,7 +38,7 @@ internal class KuraKura21Resolver(private val mainUrl: String, private val heade
         withTimeoutOrNull(limits.totalMs) {
             val response = try { session.request(detailUrl, "$mainUrl/") }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { trace.event("DETAIL_FETCH", "HTTP_ERROR"); return@withTimeoutOrNull }
+            catch (error: Exception) { trace.failure("DETAIL_FETCH", error); trace.event("DETAIL_FETCH", "HTTP_ERROR"); return@withTimeoutOrNull }
             trace.event("DETAIL_FETCH", "HTTP_STATUS", response.status)
             if (response.status !in 200..299 || response.truncated || !response.mime.contains("html") ||
                 KuraKura21MediaPolicy.origin(response.url) != KuraKura21MediaPolicy.origin(mainUrl)) return@withTimeoutOrNull
@@ -68,11 +68,11 @@ internal class KuraKura21Resolver(private val mainUrl: String, private val heade
                                 val found = resolve(frame, response.url, 0, session, visited, title, label, trace)
                                 if (found != null) return@server found
                             } catch (cancelled: CancellationException) { throw cancelled }
-                            catch (_: Exception) { trace.event("EXTRACTOR_HTTP", "FRAME_FAILED") }
+                            catch (error: Exception) { trace.failure("EXTRACTOR_HTTP", error); trace.event("EXTRACTOR_HTTP", "FRAME_FAILED") }
                         }
                         null
                     } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (_: Exception) { trace.event("EXTRACTOR_HTTP", "SERVER_FAILED"); null }
+                    catch (error: Exception) { trace.failure("EXTRACTOR_HTTP", error); trace.event("EXTRACTOR_HTTP", "SERVER_FAILED"); null }
                 }
                 if (result != null) {
                     // Preserve the full query: different signed resources are not assumed identical.
@@ -99,8 +99,12 @@ internal class KuraKura21Resolver(private val mainUrl: String, private val heade
     private suspend fun resolve(url: String, parent: String, depth: Int, session: KuraKura21HttpSession,
         visited: MutableSet<String>, title: String?, label: String, trace: KuraKura21HttpTrace): Pair<ExtractorLink, List<SubtitleFile>>? {
         coroutineContext.ensureActive()
-        if (depth > 2 || !KuraKura21MediaPolicy.isPlayerHost(url) || KuraKura21MediaPolicy.isAd(url) || !visited.add(url)) return null
+        if (depth > 2) { trace.route(url, "ROUTE_REJECT", depth); trace.event("RESOLVER", "RECURSION_LIMIT_REACHED", depth); return null }
+        if (!KuraKura21MediaPolicy.isPlayerHost(url)) { trace.route(url, "ROUTE_REJECT", depth); trace.event("RESOLVER", "HOST_NOT_SUPPORTED"); return null }
+        if (KuraKura21MediaPolicy.isAd(url)) { trace.route(url, "ROUTE_REJECT", depth); trace.event("RESOLVER", "AD_FRAME_REJECTED"); return null }
+        if (!visited.add(url)) { trace.route(url, "ROUTE_REJECT", depth); trace.event("RESOLVER", "VISITED_FRAME_SKIPPED"); return null }
         if (KuraKura21MediaPolicy.host(url) == "turtle4up.top") {
+            trace.route(url, "ROUTE_TURTLE", depth)
             var link: ExtractorLink? = null
             val subtitles = mutableListOf<SubtitleFile>()
             KuraKura21TurtleExtractor(session, headers, sourceName, label, title, trace)
@@ -108,14 +112,20 @@ internal class KuraKura21Resolver(private val mainUrl: String, private val heade
             return link?.let { it to subtitles.toList() }
         }
         if (KuraKura21PublicPlayerData.supports(url)) {
+            trace.route(url, if (KuraKura21MediaPolicy.host(url) == "streamtape.xyz") "ROUTE_STREAMTAPE" else "ROUTE_DOOD", depth)
             var link: ExtractorLink? = null
             KuraKura21PublicPlayerExtractor(session, headers, sourceName, label, title, trace)
                 .getUrl(url, parent, {}, { if (link == null) link = it })
             return link?.let { it to emptyList() }
         }
-        if (depth == 2) return null
+        trace.route(url, "ROUTE_IFRAME_TRAVERSAL", depth)
+        // Informational: an allowlisted wrapper may still lead to a supported nested extractor.
+        trace.event("RESOLVER", "NO_DEDICATED_EXTRACTOR")
+        if (depth == 2) { trace.event("RESOLVER", "RECURSION_LIMIT_REACHED", depth); return null }
         val page = session.request(url, parent)
-        if (page.status !in 200..299 || page.truncated || !page.mime.contains("html")) return null
+        trace.event("IFRAME_FETCH", "HTTP_STATUS", page.status)
+        if (page.status !in 200..299) { trace.event("IFRAME_FETCH", "HTTP_STATUS_REJECTED", page.status); return null }
+        if (page.truncated || !page.mime.contains("html")) { trace.event("IFRAME_FETCH", "PLAYER_FORMAT_UNRECOGNIZED"); return null }
         val children = KuraKura21PlayerData.frames(page.text(), page.url).toMutableList()
         if (children.isEmpty() && KuraKura21MediaPolicy.host(page.url) == "kurakura21.space") {
             // Observed public SPA contract: selected /e/{code}/... -> same-origin
@@ -126,18 +136,19 @@ internal class KuraKura21Resolver(private val mainUrl: String, private val heade
                 val metadata = session.request(endpoint, page.url)
                 trace.event("EXTRACTOR_HTTP", "EMBED_METADATA_STATUS", metadata.status)
                 if (metadata.status in 200..299 && metadata.url == endpoint && !metadata.truncated && metadata.mime.contains("json")) {
-                    KuraKura21PlayerData.publicNestedFrame(metadata.text(), page.url, title)?.let(children::add)
-                }
-            }
+                    KuraKura21PlayerData.publicNestedFrame(metadata.text(), page.url, title, trace)?.let(children::add)
+                } else trace.event("EMBED_METADATA", "METADATA_INVALID")
+            } else trace.event("EMBED_METADATA", "PLAYER_FORMAT_UNRECOGNIZED")
         }
+        trace.event("IFRAME_TRAVERSAL", "NESTED_FRAMES_READY", children.size)
         for (child in children.take(3)) {
             try {
                 resolve(child, page.url, depth + 1, session, visited, title, label, trace)?.let { return it }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { trace.event("EXTRACTOR_HTTP", "NESTED_FRAME_FAILED") }
+            catch (error: Exception) { trace.failure("EXTRACTOR_HTTP", error); trace.event("EXTRACTOR_HTTP", "NESTED_FRAME_FAILED") }
         }
-        // SPA/session-gated players have no verified direct contract. Never emulate their protection.
-        trace.event("EXTRACTOR_HTTP", "NO_VERIFIED_HTTP_CONTRACT")
+        // Distinguish absent frame data from nested extractors that were tried and rejected.
+        trace.event("IFRAME_TRAVERSAL", if (children.isEmpty()) "NESTED_FRAME_NOT_FOUND" else "NESTED_EXTRACTORS_EXHAUSTED")
         return null
     }
 }
@@ -169,19 +180,27 @@ internal object KuraKura21PlayerData {
         }
     }
 
-    fun publicNestedFrame(raw: String, selectedPlayer: String, expectedTitle: String?): String? {
-        val code = publicEmbedCode(selectedPlayer) ?: return null
-        val metadata = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+    fun publicNestedFrame(raw: String, selectedPlayer: String, expectedTitle: String?): String? =
+        publicNestedFrame(raw, selectedPlayer, expectedTitle, null)
+
+    fun publicNestedFrame(raw: String, selectedPlayer: String, expectedTitle: String?, trace: KuraKura21HttpTrace?): String? {
+        val code = publicEmbedCode(selectedPlayer) ?: run { trace?.event("EMBED_METADATA", "PLAYER_FORMAT_UNRECOGNIZED"); return null }
+        val metadata = runCatching { JSONObject(raw) }.getOrNull() ?: run { trace?.event("EMBED_METADATA", "METADATA_INVALID"); return null }
         // Observed wrapper metadata splits the publisher label "Kelas Bintang",
         // while the selected WordPress title uses "Kelasbintang". Ignore that
         // publisher label only here, after exact selected-code binding; retain
         // movie words, years and explicit part-number conflict checks.
         fun movieTitle(value: String) = value.replace(Regex("\\bkelas\\s*bintang\\b", RegexOption.IGNORE_CASE), " ")
-        if (metadata.optString("code") != code || metadata.opt("owner_private") != false ||
-            !KuraKura21TurtleExtractor.matchesTitle(movieTitle(expectedTitle.orEmpty()), movieTitle(metadata.optString("title")))) return null
-        val nested = KuraKura21MediaPolicy.absolute(metadata.optString("embed_frame_url"), selectedPlayer) ?: return null
+        if (metadata.optString("code") != code) { trace?.event("EMBED_METADATA", "METADATA_IDENTITY_MISMATCH"); return null }
+        if (metadata.opt("owner_private") != false) { trace?.event("EMBED_METADATA", "METADATA_NOT_PUBLIC"); return null }
+        if (!KuraKura21TurtleExtractor.matchesTitle(movieTitle(expectedTitle.orEmpty()), movieTitle(metadata.optString("title")))) {
+            trace?.event("IDENTITY_CHECK", "TITLE_MISMATCH"); return null
+        }
+        val nested = KuraKura21MediaPolicy.absolute(metadata.optString("embed_frame_url"), selectedPlayer)
+            ?: run { trace?.event("EMBED_METADATA", "METADATA_FRAME_INVALID"); return null }
         // Only this delegated player family was actually declared by the observed API.
         return nested.takeIf { KuraKura21MediaPolicy.host(it) == "n1mwq.org" && !KuraKura21MediaPolicy.isAd(it) }
+            .also { if (it == null) trace?.event("EMBED_METADATA", "NESTED_FRAME_REJECTED") }
     }
 
     fun frames(raw: String, base: String): List<String> {
@@ -230,16 +249,49 @@ internal data class KuraKura21HttpLimits(val totalMs: Long = 55_000L,
     init { require(totalMs > 0 && serverMs > 0 && requests > 0) }
 }
 
-/** Locally generated diagnostics only; no URL, identity, token, cookie or exception message. */
+/** Stable reason only: never retain an HTTP target, response body or exception message. */
+internal class KuraKura21HttpFailure(val reason: String) : IOException(reason)
+
+/** Local diagnostics only. Static allowlist hostnames are safe labels; other hosts are hashed.
+ * No path/query, movie identity, token, cookie, body or exception message is logged. */
 internal class KuraKura21HttpTrace {
     private var events = 0
     private var server = "NONE"
     fun selectServer(tab: String) { server = tab.takeIf { it.matches(Regex("p[0-9]{1,3}")) } ?: "UNKNOWN" }
-    @Synchronized fun event(stage: String, reason: String, number: Int? = null) {
+    @Synchronized fun event(stage: String, reason: String, number: Int? = null) = record(stage, reason, number, "")
+    @Synchronized fun route(url: String, reason: String, depth: Int) {
+        if (events >= 64) return
+        val host = KuraKura21MediaPolicy.host(url)
+        val family = when (host) {
+            "turtle4up.top" -> "TURTLE"
+            "dooood.com", "playmogo.com" -> "DOOD"
+            "streamtape.xyz" -> "STREAMTAPE"
+            null -> "INVALID"
+            else -> if (KuraKura21MediaPolicy.isPlayerHost(url)) "WRAPPER" else "UNSUPPORTED"
+        }
+        val extractor = when (family) { "TURTLE" -> "TURTLE"; "DOOD", "STREAMTAPE" -> "PUBLIC"; else -> "NONE" }
+        val label = host?.takeIf { it in KuraKura21HttpSession.playerHosts } ?: if (host == null) "INVALID" else "OTHER"
+        val hostId = if (label != "OTHER") "KNOWN" else host?.let { value -> java.security.MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(StandardCharsets.UTF_8)).take(6)
+            .joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') } } ?: "NONE"
+        record("RESOLVER_ROUTE", reason, null,
+            " depth=$depth host=$label host_id=$hostId class=$family extractor=$extractor dedicated=${extractor != "NONE"}")
+    }
+    fun failure(stage: String, error: Exception) {
+        if (error is CancellationException) throw error
+        event(stage, when (error) {
+            is KuraKura21HttpFailure -> error.reason
+            is org.json.JSONException -> "METADATA_INVALID"
+            is IOException -> "HTTP_REQUEST_FAILED"
+            else -> "EXTRACTOR_FAILED"
+        })
+    }
+    private fun record(stage: String, reason: String, number: Int?, context: String) {
         if (events++ >= 64) return
         val s = stage.takeIf { it.matches(Regex("[A-Z_]{1,30}")) } ?: "UNKNOWN"
         val r = reason.takeIf { it.matches(Regex("[A-Z_]{1,40}")) } ?: "UNKNOWN"
-        Log.i("KuraKura21", "build=FINAL3_HTTP server=$server stage=$s reason=$r" + (number?.let { " count_or_status=$it" } ?: ""))
+        Log.i("KuraKura21", "build=FINAL3_HTTP diag=HTTP_DIAG_F6BB_20261114 server=$server stage=$s reason=$r" +
+            (number?.let { " count_or_status=$it" } ?: "") + context)
     }
 }
 
@@ -284,11 +336,11 @@ internal class KuraKura21HttpSession(private val defaults: Map<String, String>,
         var current = url
         var form = post
         repeat(3) {
-            if (count >= limits.requests) throw IOException("Request budget")
+            if (count >= limits.requests) throw KuraKura21HttpFailure("REQUEST_BUDGET_EXHAUSTED")
             count++
-            require(KuraKura21MediaPolicy.safeUri(current) != null && !KuraKura21MediaPolicy.isAd(current))
-            if (media != null) require(media.allows(current))
-            else require(KuraKura21MediaPolicy.host(current) in playerHosts)
+            if (KuraKura21MediaPolicy.safeUri(current) == null || KuraKura21MediaPolicy.isAd(current)) throw KuraKura21HttpFailure("HTTP_TARGET_REJECTED")
+            if (media != null) { if (!media.allows(current)) throw KuraKura21HttpFailure("MEDIA_VALIDATION_FAILED") }
+            else if (KuraKura21MediaPolicy.host(current) !in playerHosts) throw KuraKura21HttpFailure("HOST_NOT_SUPPORTED")
             val builder = Request.Builder().url(current)
             for ((name, value) in defaults) if (name.equals("User-Agent", true) || name.equals("Accept-Language", true))
                 builder.header(name, value)
@@ -301,17 +353,17 @@ internal class KuraKura21HttpSession(private val defaults: Map<String, String>,
             if (probe && (media?.directProbe == true || URI(current).path.endsWith(".mp4", true))) builder.header("Range", "bytes=0-31")
             val result = exchange(builder.build(), probe)
             if (result.status !in setOf(301, 302, 303, 307, 308)) return result
-            if (URI(url).path.startsWith("/api/")) throw IOException("API redirect unsupported")
+            if (URI(url).path.startsWith("/api/")) throw KuraKura21HttpFailure("REDIRECT_REJECTED")
             val next = KuraKura21MediaPolicy.absolute(result.headers["Location"].orEmpty(), current)
-                ?: throw IOException("Redirect target")
+                ?: throw KuraKura21HttpFailure("REDIRECT_REJECTED")
             // Public player redirects stay within known hosts. Media redirects never leave this exact scope.
-            if (media != null) require(media.authorizeRedirect(current, next))
-            else require(KuraKura21MediaPolicy.host(next) in playerHosts)
-            if (form != null) require(KuraKura21MediaPolicy.origin(next) == KuraKura21MediaPolicy.origin(url))
+            if (media != null) { if (!media.authorizeRedirect(current, next)) throw KuraKura21HttpFailure("REDIRECT_REJECTED") }
+            else if (KuraKura21MediaPolicy.host(next) !in playerHosts) throw KuraKura21HttpFailure("REDIRECT_REJECTED")
+            if (form != null && KuraKura21MediaPolicy.origin(next) != KuraKura21MediaPolicy.origin(url)) throw KuraKura21HttpFailure("REDIRECT_REJECTED")
             current = next
             if (result.status == 303 || (result.status in setOf(301, 302) && form != null)) form = null
         }
-        throw IOException("Redirect budget")
+        throw KuraKura21HttpFailure("REDIRECT_REJECTED")
     }
 
     private suspend fun exchange(request: Request, probe: Boolean): KuraKura21HttpData = suspendCancellableCoroutine { continuation ->
@@ -563,23 +615,26 @@ internal class KuraKura21TurtleExtractor(private val session: KuraKura21HttpSess
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit) {
-        val uri = KuraKura21MediaPolicy.safeUri(url) ?: return
-        if (uri.host.lowercase() != "turtle4up.top") return
+        val uri = KuraKura21MediaPolicy.safeUri(url) ?: run { trace.event("EXTRACTOR_HTTP", "PLAYER_FORMAT_UNRECOGNIZED"); return }
+        if (uri.host.lowercase() != "turtle4up.top") { trace.event("EXTRACTOR_HTTP", "HOST_NOT_SUPPORTED"); return }
         val parts = uri.path.trim('/').split('/')
-        if (parts.size != 1 || !parts[0].matches(Regex("[A-Za-z0-9_-]{4,64}")) || uri.fragment != null) return
+        if (parts.size != 1 || !parts[0].matches(Regex("[A-Za-z0-9_-]{4,64}")) || uri.fragment != null) { trace.event("EXTRACTOR_HTTP", "PLAYER_FORMAT_UNRECOGNIZED"); return }
         val alias = parts[0]
         val parsed = HttpUrl.Builder().scheme("https").host(uri.host).addPathSegment("api").addPathSegment("stream")
         parsed.addQueryParameter("s", alias)
         val query = requestQuery(url)
-        if (query.keys.any { it != "pv" }) return
+        if (query.keys.any { it != "pv" }) { trace.event("EXTRACTOR_HTTP", "PLAYER_FORMAT_UNRECOGNIZED"); return }
         val pv = query["pv"]
-        if (pv != null && !pv.matches(Regex("[A-Za-z0-9._-]{1,64}"))) return
+        if (pv != null && !pv.matches(Regex("[A-Za-z0-9._-]{1,64}"))) { trace.event("EXTRACTOR_HTTP", "PLAYER_FORMAT_UNRECOGNIZED"); return }
         pv?.let { parsed.addQueryParameter("pv", it) }
         val metadata = session.request(parsed.build().toString(), url)
         trace.event("EXTRACTOR_HTTP", "METADATA_STATUS", metadata.status)
-        if (metadata.status !in 200..299 || metadata.truncated || !metadata.mime.contains("json")) return
-        val data = JSONObject(metadata.text()).optJSONObject("data") ?: return
-        val title = (data.opt("title") as? String)?.trim() ?: return
+        if (metadata.status !in 200..299) { trace.event("EXTRACTOR_HTTP", "HTTP_STATUS_REJECTED", metadata.status); return }
+        if (metadata.truncated || !metadata.mime.contains("json")) { trace.event("EXTRACTOR_HTTP", "METADATA_INVALID"); return }
+        val data = try { JSONObject(metadata.text()).optJSONObject("data") }
+        catch (error: org.json.JSONException) { trace.event("EXTRACTOR_HTTP", "METADATA_INVALID"); throw error }
+            ?: run { trace.event("EXTRACTOR_HTTP", "METADATA_INVALID"); return }
+        val title = (data.opt("title") as? String)?.trim() ?: run { trace.event("EXTRACTOR_HTTP", "METADATA_INVALID"); return }
         if (title.isEmpty() || !matchesTitle(titleHint, title)) {
             trace.event("IDENTITY_CHECK", "TITLE_MISMATCH"); return
         }
@@ -588,7 +643,8 @@ internal class KuraKura21TurtleExtractor(private val session: KuraKura21HttpSess
         pv?.let { api.addQueryParameter("pv", it) }
         val resource = session.request(api.build().toString(), url)
         trace.event("EXTRACTOR_HTTP", "RESOURCE_STATUS", resource.status)
-        if (resource.status !in 200..299 || resource.truncated) return
+        if (resource.status !in 200..299) { trace.event("EXTRACTOR_HTTP", "HTTP_STATUS_REJECTED", resource.status); return }
+        if (resource.truncated) { trace.event("EXTRACTOR_HTTP", "METADATA_INVALID"); return }
         val scopes = KuraKura21HttpScope.fromResource(resource, url, api.build().toString())
         if (scopes.isEmpty()) trace.event("MEDIA_REJECT", "PRIMARY_SOURCE_MISSING")
         for (scope in scopes) {
@@ -597,7 +653,8 @@ internal class KuraKura21TurtleExtractor(private val session: KuraKura21HttpSess
             val origin = KuraKura21MediaPolicy.origin(url) ?: return
             val type = try { validate(candidate, url, origin, scope) }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { trace.event("MEDIA_REJECT", "CANDIDATE_HTTP_ERROR"); null } ?: continue
+            catch (error: Exception) { trace.failure("MEDIA_REJECT", error); trace.event("MEDIA_REJECT", "CANDIDATE_HTTP_ERROR"); null }
+            if (type == null) { trace.event("MEDIA_REJECT", "MEDIA_VALIDATION_FAILED"); continue }
             val playbackHeaders = requestHeaders.filterKeys { it.equals("User-Agent", true) || it.equals("Accept-Language", true) } +
                 mapOf("Referer" to url, "Origin" to origin)
             callback(newExtractorLink(source = sourceName, name = "$sourceName - $label (HTTP)", url = candidate, type = type) {
@@ -620,8 +677,8 @@ internal class KuraKura21TurtleExtractor(private val session: KuraKura21HttpSess
         val response = session.request(url, referer, origin = origin, media = scope, probe = true)
         if (response.status !in 200..299 || response.truncated) { trace.event("MEDIA_REJECT", "MEDIA_HTTP", response.status); return null }
         if (KuraKura21MediaPolicy.mp4Header(response.body)) {
-            if (response.mime !in setOf("video/mp4", "application/mp4")) return null
-            if (!KuraKura21MediaPolicy.validMp4ProbeRange(response.status, response.headers["Content-Range"], response.body.size)) return null
+            if (response.mime !in setOf("video/mp4", "application/mp4")) { trace.event("MEDIA_REJECT", "MEDIA_MIME_REJECTED"); return null }
+            if (!KuraKura21MediaPolicy.validMp4ProbeRange(response.status, response.headers["Content-Range"], response.body.size)) { trace.event("MEDIA_REJECT", "MP4_RANGE_REJECTED"); return null }
             return ExtractorLinkType.VIDEO
         }
         if (response.mime in setOf("application/dash+xml", "application/xml", "text/xml") ||
@@ -748,10 +805,12 @@ internal class KuraKura21PublicPlayerExtractor(private val session: KuraKura21Ht
     override val mainUrl = "https://streamtape.xyz"
     override val requiresReferer = true
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        if (!KuraKura21PublicPlayerData.supports(url) || KuraKura21PublicPlayerData.embedId(url) == null) return
-        val page = session.request(url, referer ?: return)
+        if (!KuraKura21PublicPlayerData.supports(url)) { trace.event("EXTRACTOR_HTTP", "HOST_NOT_SUPPORTED"); return }
+        if (KuraKura21PublicPlayerData.embedId(url) == null) { trace.event("EXTRACTOR_HTTP", "PLAYER_FORMAT_UNRECOGNIZED"); return }
+        val page = session.request(url, referer ?: run { trace.event("EXTRACTOR_HTTP", "REFERER_MISSING"); return })
         trace.event("EXTRACTOR_HTTP", "PUBLIC_PLAYER_STATUS", page.status)
-        if (page.status !in 200..299 || page.truncated || !page.mime.contains("html") || !KuraKura21PublicPlayerData.supports(page.url)) return
+        if (page.status !in 200..299) { trace.event("EXTRACTOR_HTTP", "HTTP_STATUS_REJECTED", page.status); return }
+        if (page.truncated || !page.mime.contains("html") || !KuraKura21PublicPlayerData.supports(page.url)) { trace.event("EXTRACTOR_HTTP", "PLAYER_FORMAT_UNRECOGNIZED"); return }
         val document = Jsoup.parse(page.text())
         if (page.headers["cf-mitigated"].equals("challenge", true) || document.title().trim().lowercase() in setOf("just a moment...", "attention required! | cloudflare")) {
             trace.event("EXTRACTOR_HTTP", "CHALLENGE_NOT_COMPLETED"); return
@@ -765,28 +824,29 @@ internal class KuraKura21PublicPlayerExtractor(private val session: KuraKura21Ht
             val slug = URI(page.url).path.substringAfterLast('/')
             if (!KuraKura21PublicPlayerData.titleMatches(titleHint, slug)) { trace.event("IDENTITY_CHECK", "TITLE_MISMATCH"); return }
             candidate = KuraKura21PublicPlayerData.streamTape(page.text(), page.url) ?: run {
-                trace.event("EXTRACTOR_HTTP", "NO_VERIFIED_HTTP_CONTRACT"); return
+                trace.event("PUBLIC_PLAYER_PARSE", "STREAMTAPE_FORMAT_UNRECOGNIZED"); return
             }
         } else {
             family = "DoodStream"
             if (!KuraKura21PublicPlayerData.titleMatches(titleHint, document.title())) { trace.event("IDENTITY_CHECK", "TITLE_MISMATCH"); return }
             val contract = KuraKura21PublicPlayerData.dood(page.text(), page.url) ?: run {
-                trace.event("EXTRACTOR_HTTP", "NO_VERIFIED_HTTP_CONTRACT"); return
+                trace.event("PUBLIC_PLAYER_PARSE", "DOOD_FORMAT_UNRECOGNIZED"); return
             }
             val resource = session.request(contract.endpoint, page.url)
             trace.event("EXTRACTOR_HTTP", "PUBLIC_RESOURCE_STATUS", resource.status)
-            if (resource.status !in 200..299 || resource.truncated || resource.url != contract.endpoint) return
+            if (resource.status !in 200..299) { trace.event("EXTRACTOR_HTTP", "HTTP_STATUS_REJECTED", resource.status); return }
+            if (resource.truncated || resource.url != contract.endpoint) { trace.event("EXTRACTOR_HTTP", "METADATA_INVALID"); return }
             val base = resource.text().trim()
-            if (KuraKura21MediaPolicy.host(base)?.endsWith(".cloudatacdn.com") != true || KuraKura21MediaPolicy.isAd(base)) return
+            if (KuraKura21MediaPolicy.host(base)?.endsWith(".cloudatacdn.com") != true || KuraKura21MediaPolicy.isAd(base)) { trace.event("MEDIA_REJECT", "MEDIA_VALIDATION_FAILED"); return }
             candidate = base + session.publicDoodSuffix(contract.endpoint, contract.alphabet, contract.suffix)
         }
-        val scope = KuraKura21HttpScope.fromPublicPrimary(candidate, page.url) ?: return
+        val scope = KuraKura21HttpScope.fromPublicPrimary(candidate, page.url) ?: run { trace.event("MEDIA_REJECT", "MEDIA_VALIDATION_FAILED"); return }
         val origin = KuraKura21MediaPolicy.origin(page.url) ?: return
         val probe = session.request(candidate, page.url, origin = origin, media = scope, probe = true)
         trace.event("EXTRACTOR_HTTP", "PUBLIC_MEDIA_STATUS", probe.status)
         if (probe.status !in setOf(200, 206) || probe.truncated || probe.mime !in setOf("video/mp4", "application/mp4") ||
             !KuraKura21MediaPolicy.mp4Header(probe.body) || !scope.allows(probe.url) ||
-            !KuraKura21MediaPolicy.validMp4ProbeRange(probe.status, probe.headers["Content-Range"], probe.body.size)) return
+            !KuraKura21MediaPolicy.validMp4ProbeRange(probe.status, probe.headers["Content-Range"], probe.body.size)) { trace.event("MEDIA_REJECT", "MEDIA_VALIDATION_FAILED"); return }
         val playbackHeaders = requestHeaders.filterKeys { it.equals("User-Agent", true) || it.equals("Accept-Language", true) } +
             mapOf("Referer" to page.url, "Origin" to origin)
         callback(newExtractorLink(source = sourceName, name = "$sourceName - $label (HTTP $family)", url = candidate, type = ExtractorLinkType.VIDEO) {
