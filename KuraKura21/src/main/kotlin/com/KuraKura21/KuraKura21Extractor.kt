@@ -424,11 +424,64 @@ internal class KuraKura21HttpScope private constructor(val root: String, private
                 for (attributeIndex in 0 until item.attributes.length) {
                     if (item.attributes.item(attributeIndex).namespaceURI == "http://www.w3.org/1999/xlink") return false
                 }
-                if (item.localName in setOf("BaseURL", "Location", "PatchLocation")) {
+                if (item.localName in setOf("Location", "PatchLocation")) {
                     if (!allows(KuraKura21MediaPolicy.absolute(item.textContent.trim(), url) ?: return false)) return false
                 }
+            }
+            // Carry each element's inherited BaseURL alternatives, not the MPD URL.
+            // All alternatives stay in the existing same-video scope; none grants a host.
+            data class Pending(val item: org.w3c.dom.Element, val bases: List<String>, val depth: Int)
+            val queue = java.util.ArrayDeque<Pending>()
+            val effective = java.util.IdentityHashMap<org.w3c.dom.Element, List<String>>()
+            queue.add(Pending(root, listOf(url), 0))
+            var resolutions = 0
+            fun checked(raw: String, base: String): String? {
+                if (++resolutions > 64_000) return null
+                return KuraKura21MediaPolicy.absolute(raw, base)?.takeIf { allows(it) }
+            }
+            while (!queue.isEmpty()) {
+                val pending = queue.removeLast()
+                if (pending.depth > 64) return false
+                val item = pending.item
+                val children = (0 until item.childNodes.length).mapNotNull { item.childNodes.item(it) as? org.w3c.dom.Element }
+                val declared = children.filter { it.localName == "BaseURL" }
+                val bases = if (declared.isEmpty()) pending.bases else {
+                    val resolved = linkedSetOf<String>()
+                    for (parent in pending.bases) for (base in declared) {
+                        resolved.add(checked(base.textContent.trim(), parent) ?: return false)
+                        if (resolved.size > 16) return false
+                    }
+                    resolved.toList()
+                }
+                effective[item] = bases
+                for (child in children) queue.add(Pending(child,
+                    if (child.localName == "BaseURL") pending.bases else bases, pending.depth + 1))
+            }
+            for (index in 0 until all.length) {
+                val item = all.item(index) as org.w3c.dom.Element
+                val bases = effective[item] ?: return false
                 for (name in listOf("media", "initialization", "sourceURL", "href")) if (item.hasAttribute(name)) {
-                    if (!allows(KuraKura21MediaPolicy.absolute(item.getAttribute(name), url) ?: return false)) return false
+                    val raw = item.getAttribute(name)
+                    for (base in bases) checked(raw, base) ?: return false
+                    // An ancestor segment descriptor is also consumed under each
+                    // Representation's effective bases. Do not accept an escape
+                    // merely because the descriptor's declaring context was safe.
+                    var ancestor: org.w3c.dom.Element? = item
+                    var descriptor: org.w3c.dom.Element? = null
+                    var inRepresentation = false
+                    while (ancestor != null) {
+                        if (ancestor.localName == "Representation") { inRepresentation = true; break }
+                        if (descriptor == null && ancestor.localName in setOf("SegmentTemplate", "SegmentList", "SegmentBase")) descriptor = ancestor
+                        ancestor = ancestor.parentNode as? org.w3c.dom.Element
+                    }
+                    val container = descriptor?.parentNode as? org.w3c.dom.Element
+                    if (!inRepresentation && container != null) {
+                        val representations = container.getElementsByTagNameNS("*", "Representation")
+                        for (i in 0 until representations.length) {
+                            val representation = representations.item(i) as org.w3c.dom.Element
+                            for (base in effective[representation] ?: return false) checked(raw, base) ?: return false
+                        }
+                    }
                 }
             }
             true
@@ -568,7 +621,7 @@ internal class KuraKura21TurtleExtractor(private val session: KuraKura21HttpSess
         if (response.status !in 200..299 || response.truncated) { trace.event("MEDIA_REJECT", "MEDIA_HTTP", response.status); return null }
         if (KuraKura21MediaPolicy.mp4Header(response.body)) {
             if (response.mime !in setOf("video/mp4", "application/mp4")) return null
-            if (response.status == 206 && !response.headers["Content-Range"].orEmpty().startsWith("bytes 0-")) return null
+            if (!KuraKura21MediaPolicy.validMp4ProbeRange(response.status, response.headers["Content-Range"], response.body.size)) return null
             return ExtractorLinkType.VIDEO
         }
         if (response.mime in setOf("application/dash+xml", "application/xml", "text/xml") ||
@@ -733,7 +786,7 @@ internal class KuraKura21PublicPlayerExtractor(private val session: KuraKura21Ht
         trace.event("EXTRACTOR_HTTP", "PUBLIC_MEDIA_STATUS", probe.status)
         if (probe.status !in setOf(200, 206) || probe.truncated || probe.mime !in setOf("video/mp4", "application/mp4") ||
             !KuraKura21MediaPolicy.mp4Header(probe.body) || !scope.allows(probe.url) ||
-            probe.status == 206 && !probe.headers["Content-Range"].orEmpty().startsWith("bytes 0-")) return
+            !KuraKura21MediaPolicy.validMp4ProbeRange(probe.status, probe.headers["Content-Range"], probe.body.size)) return
         val playbackHeaders = requestHeaders.filterKeys { it.equals("User-Agent", true) || it.equals("Accept-Language", true) } +
             mapOf("Referer" to page.url, "Origin" to origin)
         callback(newExtractorLink(source = sourceName, name = "$sourceName - $label (HTTP $family)", url = candidate, type = ExtractorLinkType.VIDEO) {
@@ -762,6 +815,17 @@ internal object KuraKura21MediaPolicy {
         fun host(url: String): String? = safeUri(url)?.host?.lowercase()
         fun origin(url: String): String? = safeUri(url)?.let { "https://${it.host.lowercase()}" }
         fun isPlayerHost(url: String) = host(url) in playerHosts
+        fun validMp4ProbeRange(status: Int, contentRange: String?, prefixBytes: Int): Boolean {
+            if (status != 206) return status in 200..299
+            if (prefixBytes <= 0) return false
+            val match = Regex("""bytes ([0-9]+)-([0-9]+)/([0-9]+|\*)""")
+                .matchEntire(contentRange?.trim().orEmpty()) ?: return false
+            val start = match.groupValues[1].toLongOrNull() ?: return false
+            val end = match.groupValues[2].toLongOrNull() ?: return false
+            if (start != 0L || end < prefixBytes.toLong() - 1L) return false
+            val total = match.groupValues[3]
+            return total == "*" || (total.toLongOrNull()?.let { it > end } == true)
+        }
         fun mp4Header(bytes: ByteArray): Boolean {
             if (bytes.size < 16) return false
             val size = bytes.take(4).fold(0L) { value, byte -> (value shl 8) or (byte.toLong() and 255) }
