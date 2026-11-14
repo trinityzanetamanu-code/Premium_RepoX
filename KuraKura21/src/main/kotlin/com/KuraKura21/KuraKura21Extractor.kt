@@ -61,8 +61,9 @@ internal class KuraKura21Resolver(private val mainUrl: String, private val heade
                         trace.event("AJAX_FETCH", "HTTP_STATUS", ajax.status)
                         if (ajax.status !in 200..299 || ajax.truncated ||
                             !(ajax.mime.contains("html") || ajax.mime.contains("json"))) return@server null
-                        val frames = KuraKura21PlayerData.frames(ajax.text(), response.url)
-                        trace.event("IFRAME_PARSE", "FRAMES_READY", frames.size)
+                        val scan = KuraKura21PlayerData.scanFrames(ajax.text(), response.url)
+                        val frames = scan.frames
+                        trace.frames("IFRAME_PARSE", "FRAMES_READY", scan)
                         for (frame in frames.take(5)) {
                             try {
                                 val found = resolve(frame, response.url, 0, session, visited, title, label, trace)
@@ -126,7 +127,8 @@ internal class KuraKura21Resolver(private val mainUrl: String, private val heade
         trace.event("IFRAME_FETCH", "HTTP_STATUS", page.status)
         if (page.status !in 200..299) { trace.event("IFRAME_FETCH", "HTTP_STATUS_REJECTED", page.status); return null }
         if (page.truncated || !page.mime.contains("html")) { trace.event("IFRAME_FETCH", "PLAYER_FORMAT_UNRECOGNIZED"); return null }
-        val children = KuraKura21PlayerData.frames(page.text(), page.url).toMutableList()
+        val scan = KuraKura21PlayerData.scanFrames(page.text(), page.url)
+        val children = scan.frames.toMutableList()
         if (children.isEmpty() && KuraKura21MediaPolicy.host(page.url) in setOf("kurakura21.space", "kr21.click")) {
             // Observed public SPA contract: selected /e/{code}/... -> same-origin
             // embed/details -> explicit nested iframe. Never emulate its playback/auth checks.
@@ -140,7 +142,7 @@ internal class KuraKura21Resolver(private val mainUrl: String, private val heade
                 } else trace.event("EMBED_METADATA", "METADATA_INVALID")
             } else trace.event("EMBED_METADATA", "PLAYER_FORMAT_UNRECOGNIZED")
         }
-        trace.event("IFRAME_TRAVERSAL", "NESTED_FRAMES_READY", children.size)
+        trace.frames("IFRAME_TRAVERSAL", "NESTED_FRAMES_READY", scan, children.size)
         for (child in children.take(3)) {
             try {
                 resolve(child, page.url, depth + 1, session, visited, title, label, trace)?.let { return it }
@@ -156,6 +158,14 @@ internal class KuraKura21Resolver(private val mainUrl: String, private val heade
 /** Pure parsing/policy code is exercised by the module's offline regression harness. */
 internal object KuraKura21PlayerData {
     data class Player(val postId: String, val tabs: List<Pair<String, String>>)
+
+    /** Parser acceptance is not dispatch authorization. Unsupported hosts are still rejected by resolve().
+     * Only counts leave this result through diagnostics; never log candidate strings or document contents. */
+    data class FrameScan(val frames: List<String> = emptyList(), val rawCount: Int = 0,
+        val missingSrc: Int = 0, val blankSrc: Int = 0, val invalidUrl: Int = 0,
+        val adRejected: Int = 0, val duplicates: Int = 0, val unsupportedHosts: Int = 0,
+        val inputRejected: Boolean = false, val html5Videos: Int = 0,
+        val html5Sources: Int = 0, val deferredSources: Int = 0)
 
     fun parse(html: String): Player? {
         val player = Jsoup.parse(html).selectFirst("#muvipro_player_content_id") ?: return null
@@ -203,7 +213,9 @@ internal object KuraKura21PlayerData {
             .also { if (it == null) trace?.event("EMBED_METADATA", "NESTED_FRAME_REJECTED") }
     }
 
-    fun frames(raw: String, base: String): List<String> {
+    fun frames(raw: String, base: String): List<String> = scanFrames(raw, base).frames
+
+    fun scanFrames(raw: String, base: String): FrameScan {
         // Muvipro normally returns HTML. Also accept a JSON-encoded HTML string;
         // never scan unrelated script text or every URL in an AJAX response.
         val text = if (raw.trimStart().startsWith('"') || raw.trimStart().startsWith('{')) {
@@ -211,11 +223,28 @@ internal object KuraKura21PlayerData {
                 is String -> value
                 is JSONObject -> if (value.optBoolean("success")) value.opt("data") as? String else null
                 else -> null
-            } ?: return emptyList()
+            } ?: return FrameScan(inputRejected = true)
         } else raw
-        return Jsoup.parseBodyFragment(text, base).select("iframe[src]").mapNotNull {
-            KuraKura21MediaPolicy.absolute(it.attr("src"), base)
-        }.filterNot(KuraKura21MediaPolicy::isAd).distinct()
+        val document = Jsoup.parseBodyFragment(text, base)
+        val rawFrames = document.select("iframe")
+        val accepted = linkedSetOf<String>()
+        var missing = 0; var blank = 0; var invalid = 0; var ads = 0; var duplicates = 0
+        for (frame in rawFrames) {
+            if (!frame.hasAttr("src")) { missing++; continue }
+            val src = frame.attr("src")
+            // An empty src resolves against the base instead of declaring a player.
+            // Do not let it consume one of the existing bounded sibling traversal slots.
+            if (src.isBlank()) { blank++; continue }
+            val url = KuraKura21MediaPolicy.absolute(src, base)
+            if (url == null) { invalid++; continue }
+            if (KuraKura21MediaPolicy.isAd(url)) { ads++; continue }
+            if (!accepted.add(url)) duplicates++
+        }
+        return FrameScan(accepted.toList(), rawFrames.size, missing, blank, invalid, ads, duplicates,
+            accepted.count { !KuraKura21MediaPolicy.isPlayerHost(it) },
+            html5Videos = document.select("video").size,
+            html5Sources = document.select("video > source").size,
+            deferredSources = document.select("video[data-src], video > source[data-src]").size)
     }
 }
 
@@ -259,6 +288,16 @@ internal class KuraKura21HttpTrace {
     private var server = "NONE"
     fun selectServer(tab: String) { server = tab.takeIf { it.matches(Regex("p[0-9]{1,3}")) } ?: "UNKNOWN" }
     @Synchronized fun event(stage: String, reason: String, number: Int? = null) = record(stage, reason, number, "")
+    /** Extend the existing count event instead of spending another entry in the 64-event budget.
+     * accepted_iframes counts parser output; ready can additionally include verified metadata children. */
+    @Synchronized fun frames(stage: String, reason: String, scan: KuraKura21PlayerData.FrameScan,
+        ready: Int = scan.frames.size) = record(stage, reason, ready,
+            " raw_iframes=${scan.rawCount} accepted_iframes=${scan.frames.size}" +
+            " missing_src=${scan.missingSrc} blank_src=${scan.blankSrc} invalid_url=${scan.invalidUrl}" +
+            " ad_rejected=${scan.adRejected} duplicates=${scan.duplicates}" +
+            " unsupported_host_candidates=${scan.unsupportedHosts} input_rejected=${scan.inputRejected}" +
+            " metadata_frames=${ready - scan.frames.size} html5_videos=${scan.html5Videos}" +
+            " html5_sources=${scan.html5Sources} deferred_sources=${scan.deferredSources}")
     @Synchronized fun route(url: String, reason: String, depth: Int) {
         if (events >= 64) return
         val host = KuraKura21MediaPolicy.host(url)
