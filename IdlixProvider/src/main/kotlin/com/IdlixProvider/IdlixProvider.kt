@@ -355,22 +355,38 @@ class IdlixProvider : MainAPI() {
                 } else return IdlixPlayback.reject(stage, "no_exact_episode_or_movie")
             }
             if (contentType !in setOf("movie", "episode") || !contentId.matches(Regex("[A-Za-z0-9_-]+"))) return IdlixPlayback.reject(stage, "invalid_type_or_id")
-            val page = refererUrl.toHttpUrlOrNull() ?: return IdlixPlayback.reject(stage, "invalid_referer")
-            val base = mainUrl.toHttpUrlOrNull() ?: return IdlixPlayback.reject(stage, "invalid_origin")
+            var page = refererUrl.toHttpUrlOrNull() ?: return IdlixPlayback.reject(stage, "invalid_referer")
+            var base = mainUrl.toHttpUrlOrNull() ?: return IdlixPlayback.reject(stage, "invalid_origin")
             if (page.scheme != base.scheme || page.host != base.host || page.port != base.port ||
                 page.username.isNotEmpty() || page.password.isNotEmpty()) return IdlixPlayback.reject(stage, "referer_origin_mismatch")
             IdlixPlayback.trace("loadLinks.selected", "type=$contentType id=$contentId")
-            val headers = mapOf(
+            var headers = mapOf(
                 "Referer" to refererUrl,
                 "Origin" to mainUrl,
                 "Accept" to "application/json, text/plain, */*",
                 "User-Agent" to IdlixPlayback.USER_AGENT
             )
 
-            val targetPlayInfoUrl = "$mainUrl/api/watch/play-info/$contentType/$contentId"
+            var targetPlayInfoUrl = "$mainUrl/api/watch/play-info/$contentType/$contentId"
 
             stage = "play_info"
-            val playInfoHttp = app.get(targetPlayInfoUrl, headers = headers, allowRedirects = false, timeout = 15)
+            var playInfoHttp = app.get(targetPlayInfoUrl, headers = headers, allowRedirects = false, timeout = 15, cacheTime = 0)
+            // Discover a moved site using GET only. Never replay a claim or send a
+            // session cookie to a redirect target; tokens are acquired afterwards.
+            var redirects = 0
+            while (playInfoHttp.code in setOf(301, 302, 303, 307, 308)) {
+                if (++redirects > 3) return IdlixPlayback.reject(stage, "redirect_limit")
+                val current = targetPlayInfoUrl.toHttpUrlOrNull()
+                    ?: return IdlixPlayback.reject(stage, "invalid_endpoint")
+                val next = IdlixPlayback.siteRedirect(current, playInfoHttp.headers["Location"])
+                    ?: return IdlixPlayback.reject(stage, "unsafe_redirect")
+                base = next.newBuilder().encodedPath("/").query(null).build()
+                page = page.newBuilder().scheme(base.scheme).host(base.host).port(base.port).build()
+                refererUrl = page.toString()
+                headers = headers + mapOf("Origin" to base.toString().trimEnd('/'), "Referer" to refererUrl)
+                targetPlayInfoUrl = next.toString()
+                playInfoHttp = app.get(targetPlayInfoUrl, headers = headers, allowRedirects = false, timeout = 15, cacheTime = 0)
+            }
             IdlixPlayback.trace(stage, "http=${playInfoHttp.code}")
             if (playInfoHttp.code != 200) {
                 return IdlixPlayback.reject(stage, "http_${playInfoHttp.code}")
@@ -379,6 +395,22 @@ class IdlixProvider : MainAPI() {
             // play-info sets the device/session cookie used to bind the gate and claim.
             // Carry the server-issued values locally, even if the app has no CookieJar.
             val sessionCookies = playInfoHttp.cookies
+            // A valid existing session can return a claim immediately (kind=pentos).
+            // The served player only enters the countdown/claim flow for kind=gate.
+            if (playInfoRes.kind == "pentos") {
+                return Majorplay().resolveClaim(
+                    AppUtils.parseJson<SessionClaimResponse>(playInfoHttp.text), refererUrl,
+                    subtitleCallback, { link ->
+                        callback(link)
+                        mediaCallbacks++
+                    }, sessionCookies, providerName = name
+                )
+            }
+            if (playInfoRes.kind != null && playInfoRes.kind != "gate") return IdlixPlayback.reject(stage, "unsupported_play_info")
+            if (playInfoRes.verification != null) {
+                // Do not claim without the verification required by the server.
+                return IdlixPlayback.reject(stage, "interactive_verification_required")
+            }
             val gateToken = playInfoRes.gateToken?.takeIf { it.isNotBlank() } ?: return IdlixPlayback.reject(stage, "missing_gate")
             val finalWaitMs = IdlixPlayback.waitMillis(playInfoRes.serverNow, playInfoRes.unlockAt,
                 playInfoRes.preroll?.countdownSec) ?: return IdlixPlayback.reject(stage, "wait_outside_budget")
@@ -392,17 +424,18 @@ class IdlixProvider : MainAPI() {
 
             stage = "claim"
             val claimHttp = app.post(
-                url = "$mainUrl/api/watch/session/claim",
+                url = base.resolve("/api/watch/session/claim")!!.toString(),
                 headers = headers,
                 cookies = sessionCookies,
                 requestBody = requestBodyData,
                 allowRedirects = false,
-                timeout = 15
+                timeout = 15,
+                cacheTime = 0
             )
             IdlixPlayback.trace(stage, "http=${claimHttp.code}")
             if (claimHttp.code != 200) return IdlixPlayback.reject(stage, "http_${claimHttp.code}")
             val claimParsed = AppUtils.parseJson<SessionClaimResponse>(claimHttp.text)
-            if (claimParsed.videoId.isNullOrBlank()) return IdlixPlayback.reject(stage, "missing_video_id")
+            if (claimParsed.claim.isNullOrBlank()) return IdlixPlayback.reject(stage, "missing_claim")
             IdlixPlayback.trace("claim.identity", "videoId=${claimParsed.videoId} durationSec=${claimParsed.durationSec}")
             stage = "redeem_or_manifest"
             return Majorplay().resolveClaim(claimParsed, refererUrl, subtitleCallback, { link ->
@@ -542,7 +575,9 @@ data class PlayInfoResponse(
     @JsonProperty("gateToken") val gateToken: String? = null,
     @JsonProperty("serverNow") val serverNow: Long? = null,
     @JsonProperty("unlockAt") val unlockAt: Long? = null,
-    @JsonProperty("preroll") val preroll: PrerollData? = null
+    @JsonProperty("preroll") val preroll: PrerollData? = null,
+    @JsonProperty("kind") val kind: String? = null,
+    @JsonProperty("verification") val verification: Map<String, Any?>? = null
 )
 
 data class PrerollData(

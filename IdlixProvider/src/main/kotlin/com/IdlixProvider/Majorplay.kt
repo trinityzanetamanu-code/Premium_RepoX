@@ -46,7 +46,7 @@ class Majorplay : ExtractorApi() {
     ): Boolean {
         val claimToken = session.claim?.takeIf { it.isNotBlank() } ?: return IdlixPlayback.reject("redeem", "missing_claim")
         val page = effectiveReferer.toHttpUrlOrNull() ?: return IdlixPlayback.reject("redeem", "invalid_referer")
-        val effectiveOrigin = "${page.scheme}://${page.host}"
+        val effectiveOrigin = page.newBuilder().encodedPath("/").query(null).fragment(null).build().toString().trimEnd('/')
         val target = IdlixPlayback.redeemUrl(session.redeemUrl, effectiveOrigin) ?: return IdlixPlayback.reject("redeem", "invalid_endpoint")
         IdlixPlayback.trace("redeem.start", "videoId=${session.videoId} host=${target.toHttpUrlOrNull()?.host}")
         val safeHeaders = mapOf(
@@ -58,7 +58,7 @@ class Majorplay : ExtractorApi() {
         val requestBodyData = mapOf("claim" to claimToken, "mode" to "browser").toJson().toRequestBody(jsonMediaType)
         val redeemCookies = if (target.toHttpUrlOrNull()?.host == page.host) sessionCookies else emptyMap()
         val redeem = app.post(target, headers = safeHeaders, cookies = redeemCookies, requestBody = requestBodyData,
-            allowRedirects = false, timeout = 15)
+            allowRedirects = false, timeout = 15, cacheTime = 0)
         IdlixPlayback.trace("redeem.response", "http=${redeem.code}")
         if (redeem.code != 200) return IdlixPlayback.reject("redeem", "http_${redeem.code}")
         val response = AppUtils.parseJson<NewMajorplayResponse>(redeem.text)
@@ -76,7 +76,7 @@ class Majorplay : ExtractorApi() {
         IdlixPlayback.trace("master.identity", "videoId=$videoId layout=${if (master.pathSegments[1] == videoId) "legacy" else "sharded"} durationSec=${session.durationSec}")
 
         val masterConfigUrl = IdlixPlayback.authorize(master, master).toString()
-        val manifest = app.get(masterConfigUrl, headers = safeHeaders, allowRedirects = false, timeout = 15)
+        val manifest = app.get(masterConfigUrl, headers = safeHeaders, allowRedirects = false, timeout = 15, cacheTime = 0)
         IdlixPlayback.trace("master.response", "http=${manifest.code}")
         if (manifest.code != 200) return IdlixPlayback.reject("master", "http_${manifest.code}")
         val manifestText = manifest.text.trimStart('\uFEFF', ' ', '\r', '\n')
@@ -84,11 +84,16 @@ class Majorplay : ExtractorApi() {
             !(manifestText.contains("#EXT-X-STREAM-INF:") || manifestText.contains("#EXTINF:"))) return IdlixPlayback.reject("master", "not_hls")
         IdlixPlayback.trace("master.valid", "videoId=$videoId hls=true bytes=${manifestText.length}")
 
+        val seenSubtitles = hashSetOf<String>()
         response.subtitles?.forEach { sub ->
             val subUrl = sub.path?.toHttpUrlOrNull()?.takeIf {
                 it.isHttps && it.port == 443 && it.username.isEmpty() && it.password.isEmpty() && IdlixPlayback.mediaHost(it.host)
             }?.newBuilder()?.host(master.host)?.build()?.toString() ?: return@forEach
-            subtitleCallback.invoke(newSubtitleFile(sub.label ?: sub.lang ?: "Indo", subUrl))
+            if (seenSubtitles.add(subUrl)) {
+                subtitleCallback.invoke(newSubtitleFile(sub.label ?: sub.lang ?: "Indo", subUrl) {
+                    this.headers = safeHeaders
+                })
+            }
         }
         // CS3IPlayer resolves getVideoInterceptor via APIHolder.getApiFromNameNull(link.source).
         // source must identify the MainAPI, not this extractor's display name.
@@ -156,6 +161,15 @@ internal object IdlixPlayback {
 
     private fun secure(url: HttpUrl): Boolean = url.isHttps && url.port == 443 &&
         url.username.isEmpty() && url.password.isEmpty() && url.fragment == null
+
+    /** Only follow an origin migration within Idlix, retaining the exact API path. */
+    fun siteRedirect(current: HttpUrl, location: String?): HttpUrl? {
+        val next = location?.let(current::resolve) ?: return null
+        fun site(host: String) = host == "idlixku.com" || host.endsWith(".idlixku.com")
+        if (!secure(current) || !secure(next) || !site(current.host) || !site(next.host) ||
+            next.encodedPath != current.encodedPath || next.query != current.query) return null
+        return next
+    }
 
     fun mediaHost(host: String): Boolean {
         if (host == "e2e.majorplay.net") return true
