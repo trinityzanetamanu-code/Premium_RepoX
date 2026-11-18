@@ -321,7 +321,16 @@ class IdlixProvider : MainAPI() {
     ): Boolean {
         var stage = "input"
         var mediaCallbacks = 0
-        IdlixPlayback.trace("loadLinks.enter", "build=${IdlixPlayback.BUILD_MARKER} casting=$isCasting")
+        val started = System.nanoTime()
+        val emitted = hashSetOf<String>()
+        val emit: (ExtractorLink) -> Unit = { link ->
+            if (emitted.add(link.url)) {
+                callback(link)
+                mediaCallbacks++
+                IdlixPlayback.trace("callback.emit", "count=$mediaCallbacks type=${link.type}")
+            }
+        }
+        IdlixPlayback.trace("loadLinks.enter", "build=${IdlixPlayback.BUILD_MARKER} repair=V2_DIAGNOSTICS casting=$isCasting")
         try {
             var contentType = "movie"
             var contentId = data
@@ -357,8 +366,15 @@ class IdlixProvider : MainAPI() {
             if (contentType !in setOf("movie", "episode") || !contentId.matches(Regex("[A-Za-z0-9_-]+"))) return IdlixPlayback.reject(stage, "invalid_type_or_id")
             var page = refererUrl.toHttpUrlOrNull() ?: return IdlixPlayback.reject(stage, "invalid_referer")
             var base = mainUrl.toHttpUrlOrNull() ?: return IdlixPlayback.reject(stage, "invalid_origin")
-            if (page.scheme != base.scheme || page.host != base.host || page.port != base.port ||
-                page.username.isNotEmpty() || page.password.isNotEmpty()) return IdlixPlayback.reject(stage, "referer_origin_mismatch")
+            if (page.scheme != base.scheme || page.host != base.host || page.port != base.port) {
+                // Saved episode/movie data can already use z3 while mainUrl is z2.
+                val candidate = base.newBuilder().host(page.host).build()
+                if (IdlixPlayback.siteRedirect(base, candidate.toString()) == null ||
+                    !page.isHttps || page.port != 443) return IdlixPlayback.reject(stage, "referer_origin_mismatch")
+            }
+            if (page.username.isNotEmpty() || page.password.isNotEmpty()) return IdlixPlayback.reject(stage, "invalid_referer")
+            page = page.newBuilder().scheme(base.scheme).host(base.host).port(base.port).fragment(null).build()
+            refererUrl = page.toString()
             IdlixPlayback.trace("loadLinks.selected", "type=$contentType id=$contentId")
             var headers = mapOf(
                 "Referer" to refererUrl,
@@ -370,27 +386,35 @@ class IdlixProvider : MainAPI() {
             var targetPlayInfoUrl = "$mainUrl/api/watch/play-info/$contentType/$contentId"
 
             stage = "play_info"
+            var requestStarted = System.nanoTime()
+            IdlixPlayback.trace("play_info.request", "method=GET host=${base.host} attempt=1")
             var playInfoHttp = app.get(targetPlayInfoUrl, headers = headers, allowRedirects = false, timeout = 15, cacheTime = 0)
+            IdlixPlayback.trace("play_info.response", "http=${playInfoHttp.code} durationMs=${(System.nanoTime() - requestStarted) / 1_000_000}")
             // Discover a moved site using GET only. Never replay a claim or send a
             // session cookie to a redirect target; tokens are acquired afterwards.
             var redirects = 0
             while (playInfoHttp.code in setOf(301, 302, 303, 307, 308)) {
-                if (++redirects > 3) return IdlixPlayback.reject(stage, "redirect_limit")
+                if (++redirects > 3) IdlixPlayback.failure(stage, "redirect_limit")
                 val current = targetPlayInfoUrl.toHttpUrlOrNull()
                     ?: return IdlixPlayback.reject(stage, "invalid_endpoint")
-                val next = IdlixPlayback.siteRedirect(current, playInfoHttp.headers["Location"])
-                    ?: return IdlixPlayback.reject(stage, "unsafe_redirect")
+                val location = playInfoHttp.headers["Location"]
+                val next = IdlixPlayback.siteRedirect(current, location)
+                    ?: IdlixPlayback.failure(stage, "unsafe_redirect")
+                IdlixPlayback.trace("play_info.redirect", "http=${playInfoHttp.code} fromHost=${current.host} toHost=${next.host} hop=$redirects")
                 base = next.newBuilder().encodedPath("/").query(null).build()
                 page = page.newBuilder().scheme(base.scheme).host(base.host).port(base.port).build()
                 refererUrl = page.toString()
                 headers = headers + mapOf("Origin" to base.toString().trimEnd('/'), "Referer" to refererUrl)
                 targetPlayInfoUrl = next.toString()
+                requestStarted = System.nanoTime()
+                IdlixPlayback.trace("play_info.request", "method=GET host=${next.host} attempt=${redirects + 1}")
                 playInfoHttp = app.get(targetPlayInfoUrl, headers = headers, allowRedirects = false, timeout = 15, cacheTime = 0)
+                IdlixPlayback.trace("play_info.response", "http=${playInfoHttp.code} durationMs=${(System.nanoTime() - requestStarted) / 1_000_000}")
             }
-            IdlixPlayback.trace(stage, "http=${playInfoHttp.code}")
-            if (playInfoHttp.code != 200) {
-                return IdlixPlayback.reject(stage, "http_${playInfoHttp.code}")
-            }
+            val responseType = playInfoHttp.headers["Content-Type"]
+            val problem = IdlixPlayback.responseProblem(playInfoHttp.code, responseType, playInfoHttp.text)
+            IdlixPlayback.trace("play_info.response", "http=${playInfoHttp.code} type=${if (problem == null) "json_object" else problem}")
+            if (problem != null) IdlixPlayback.failure(stage, problem)
             val playInfoRes = AppUtils.parseJson<PlayInfoResponse>(playInfoHttp.text)
             // play-info sets the device/session cookie used to bind the gate and claim.
             // Carry the server-issued values locally, even if the app has no CookieJar.
@@ -400,20 +424,17 @@ class IdlixProvider : MainAPI() {
             if (playInfoRes.kind == "pentos") {
                 return Majorplay().resolveClaim(
                     AppUtils.parseJson<SessionClaimResponse>(playInfoHttp.text), refererUrl,
-                    subtitleCallback, { link ->
-                        callback(link)
-                        mediaCallbacks++
-                    }, sessionCookies, providerName = name
+                    subtitleCallback, emit, sessionCookies, providerName = name
                 )
             }
-            if (playInfoRes.kind != null && playInfoRes.kind != "gate") return IdlixPlayback.reject(stage, "unsupported_play_info")
+            if (playInfoRes.kind != null && playInfoRes.kind != "gate") IdlixPlayback.failure(stage, "unsupported_play_info")
             if (playInfoRes.verification != null) {
-                // Do not claim without the verification required by the server.
-                return IdlixPlayback.reject(stage, "interactive_verification_required")
+                IdlixPlayback.trace("verification.required", "mechanism=interactive supportedInline=false")
+                IdlixPlayback.failure(stage, "interactive_verification_required")
             }
-            val gateToken = playInfoRes.gateToken?.takeIf { it.isNotBlank() } ?: return IdlixPlayback.reject(stage, "missing_gate")
+            val gateToken = playInfoRes.gateToken?.takeIf { it.isNotBlank() } ?: IdlixPlayback.failure(stage, "missing_gate")
             val finalWaitMs = IdlixPlayback.waitMillis(playInfoRes.serverNow, playInfoRes.unlockAt,
-                playInfoRes.preroll?.countdownSec) ?: return IdlixPlayback.reject(stage, "wait_outside_budget")
+                playInfoRes.preroll?.countdownSec) ?: IdlixPlayback.failure(stage, "wait_outside_budget")
             stage = "gate.wait"
             IdlixPlayback.trace(stage, "waitMs=$finalWaitMs")
             delay(finalWaitMs)
@@ -433,26 +454,27 @@ class IdlixProvider : MainAPI() {
                 cacheTime = 0
             )
             IdlixPlayback.trace(stage, "http=${claimHttp.code}")
-            if (claimHttp.code != 200) return IdlixPlayback.reject(stage, "http_${claimHttp.code}")
+            IdlixPlayback.responseProblem(claimHttp.code, claimHttp.headers["Content-Type"],
+                claimHttp.text)?.let { IdlixPlayback.failure(stage, it) }
             val claimParsed = AppUtils.parseJson<SessionClaimResponse>(claimHttp.text)
             if (claimParsed.claim.isNullOrBlank()) return IdlixPlayback.reject(stage, "missing_claim")
             IdlixPlayback.trace("claim.identity", "videoId=${claimParsed.videoId} durationSec=${claimParsed.durationSec}")
             stage = "redeem_or_manifest"
-            return Majorplay().resolveClaim(claimParsed, refererUrl, subtitleCallback, { link ->
-                callback(link)
-                mediaCallbacks++
-                IdlixPlayback.trace("callback.media", "count=$mediaCallbacks source=${link.source} type=${link.type}")
-            },
+            return Majorplay().resolveClaim(claimParsed, refererUrl, subtitleCallback, emit,
                 sessionCookies + claimHttp.cookies, providerName = name)
         } catch (e: CancellationException) {
             IdlixPlayback.trace("loadLinks.cancelled", "stage=$stage callbacks=$mediaCallbacks")
             throw e
+        } catch (e: ErrorLoadingException) {
+            throw e
+        } catch (e: java.net.SocketTimeoutException) {
+            IdlixPlayback.failure(stage, "network_timeout")
         } catch (e: Exception) {
             // Exceptions may contain signed URLs: log the class, never session values.
             IdlixPlayback.trace("loadLinks.exception", "stage=$stage exception=${e.javaClass.simpleName}")
-            return false
+            IdlixPlayback.failure(stage, "request_or_contract_failure")
         } finally {
-            IdlixPlayback.trace("loadLinks.complete", "stage=$stage callbacks=$mediaCallbacks")
+            IdlixPlayback.trace("loadLinks.complete", "stage=$stage callbacks=$mediaCallbacks durationMs=${(System.nanoTime() - started) / 1_000_000}")
         }
     }
 

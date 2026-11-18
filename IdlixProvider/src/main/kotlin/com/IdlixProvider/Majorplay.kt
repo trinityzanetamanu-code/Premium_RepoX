@@ -60,7 +60,8 @@ class Majorplay : ExtractorApi() {
         val redeem = app.post(target, headers = safeHeaders, cookies = redeemCookies, requestBody = requestBodyData,
             allowRedirects = false, timeout = 15, cacheTime = 0)
         IdlixPlayback.trace("redeem.response", "http=${redeem.code}")
-        if (redeem.code != 200) return IdlixPlayback.reject("redeem", "http_${redeem.code}")
+        IdlixPlayback.responseProblem(redeem.code, redeem.headers["Content-Type"],
+            redeem.text)?.let { IdlixPlayback.failure("redeem", it) }
         val response = AppUtils.parseJson<NewMajorplayResponse>(redeem.text)
         if (response.code != "ok" || response.mode != "browser") return IdlixPlayback.reject("redeem", "invalid_response_contract")
         val master = response.url?.toHttpUrlOrNull() ?: return IdlixPlayback.reject("master", "invalid_url")
@@ -82,6 +83,7 @@ class Majorplay : ExtractorApi() {
         val manifestText = manifest.text.trimStart('\uFEFF', ' ', '\r', '\n')
         if (manifestText.length > 262_144 || !manifestText.startsWith("#EXTM3U") ||
             !(manifestText.contains("#EXT-X-STREAM-INF:") || manifestText.contains("#EXTINF:"))) return IdlixPlayback.reject("master", "not_hls")
+        IdlixPlayback.trace("playback.validation", "http=${manifest.code} type=hls identity=matched")
         IdlixPlayback.trace("master.valid", "videoId=$videoId hls=true bytes=${manifestText.length}")
 
         val seenSubtitles = hashSetOf<String>()
@@ -137,6 +139,50 @@ internal object IdlixPlayback {
     fun reject(stage: String, reason: String): Boolean {
         trace("$stage.reject", "reason=$reason callbacks=0")
         return false
+    }
+
+    /** Fixed diagnostic codes only: never include response bodies or session values. */
+    fun responseProblem(status: Int, contentType: String?, text: String): String? {
+        if (status in setOf(301, 302, 303, 307, 308)) return "redirect"
+        if (status == 401 || status == 403) return "authorization_required"
+        if (status == 429) return "rate_limited"
+        if (status !in 200..299) return "http_$status"
+        if (text.length > 262_144) return "response_too_large"
+        val body = text.trimStart('\uFEFF', ' ', '\r', '\n', '\t')
+        if (contentType.orEmpty().contains("text/html", true) || body.startsWith("<")) return "html_response"
+        if (body.isBlank()) return "empty_response"
+        return try {
+            val parser = mapper.factory.createParser(body)
+            parser.use {
+                val node = mapper.readTree<com.fasterxml.jackson.databind.JsonNode>(it)
+                when {
+                    node == null || !node.isObject -> "invalid_json_object"
+                    it.nextToken() != null -> "invalid_json"
+                    else -> null
+                }
+            }
+        } catch (_: java.io.IOException) {
+            "invalid_json"
+        }
+    }
+
+    fun failure(stage: String, reason: String): Nothing {
+        trace("$stage.reject", "reason=$reason")
+        val message = when (reason) {
+            "interactive_verification_required" -> "Idlix: layanan meminta verifikasi interaktif pada pemutar resminya. Verifikasi belum diselesaikan; tidak ada tautan yang diterbitkan."
+            "authorization_required" -> "Idlix: akses ditolak atau sesi memerlukan otorisasi ($stage)."
+            "network_timeout" -> "Idlix: waktu tunggu jaringan habis ($stage)."
+            "html_response" -> "Idlix: server mengirim halaman HTML, bukan respons playback ($stage)."
+            "rate_limited" -> "Idlix: batas permintaan server tercapai ($stage)."
+            else -> "Idlix: playback gagal pada $stage [$reason]."
+        }
+        // APIRepository also receives a safe, actionable error instead of false.
+        try {
+            com.lagradost.cloudstream3.CommonActivity.showToast(message)
+        } catch (_: Exception) {
+            // A headless/casting host may not have an Activity. Preserve the error.
+        }
+        throw ErrorLoadingException(message)
     }
 
     // From the media-host contract in Idlix's served 2znv4-qfvxuz6.js (not ad hosts).
