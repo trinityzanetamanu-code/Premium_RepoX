@@ -15,6 +15,8 @@ import com.lagradost.api.Log
 import okhttp3.HttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Cookie
+import com.lagradost.nicehttp.NiceResponse
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -44,6 +46,8 @@ class Majorplay : ExtractorApi() {
         sessionCookies: Map<String, String> = emptyMap(),
         providerName: String = "Idlix"
     ): Boolean {
+        if (session.verification != null) IdlixPlayback.failure("redeem", "interactive_verification_required")
+        if (session.kind != null && session.kind != "pentos") return IdlixPlayback.reject("redeem", "unsupported_claim")
         val claimToken = session.claim?.takeIf { it.isNotBlank() } ?: return IdlixPlayback.reject("redeem", "missing_claim")
         val page = effectiveReferer.toHttpUrlOrNull() ?: return IdlixPlayback.reject("redeem", "invalid_referer")
         val effectiveOrigin = page.newBuilder().encodedPath("/").query(null).fragment(null).build().toString().trimEnd('/')
@@ -64,7 +68,8 @@ class Majorplay : ExtractorApi() {
             redeem.text)?.let { IdlixPlayback.failure("redeem", it) }
         val response = AppUtils.parseJson<NewMajorplayResponse>(redeem.text)
         if (response.code != "ok" || response.mode != "browser") return IdlixPlayback.reject("redeem", "invalid_response_contract")
-        val master = response.url?.toHttpUrlOrNull() ?: return IdlixPlayback.reject("master", "invalid_url")
+        val master = response.url?.let(target.toHttpUrlOrNull()!!::resolve)
+            ?: return IdlixPlayback.reject("master", "invalid_url")
         val videoId = IdlixPlayback.videoId(master) ?: return IdlixPlayback.reject("master", "invalid_host_or_path_layout")
         if (session.videoId != null && session.videoId != videoId) return IdlixPlayback.reject("master", "claim_video_mismatch")
         if (response.videoId != null && response.videoId != videoId) return IdlixPlayback.reject("master", "redeem_video_mismatch")
@@ -130,7 +135,7 @@ data class NewMajorSubtitle(
 
 /** Idlix's served browser player rewrites t/pm on every request for the selected video. */
 internal object IdlixPlayback {
-    const val BUILD_MARKER = "IDLIX_PLAYBACK_V3_PROVIDER_ROUTE"
+    const val BUILD_MARKER = "IDLIX_PLAYBACK_V4_SESSION_CONTRACT"
     const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
 
     // Callers supply IDs, statuses and fixed reason codes, never credentials/full URLs.
@@ -141,11 +146,25 @@ internal object IdlixPlayback {
         return false
     }
 
+    /** Retain all Set-Cookie headers, including rotations and deletions.
+     * NiceResponse.cookies is a convenience projection, not a scoped cookie jar.
+     * This map is only used for the current origin's /api/watch/ endpoints.
+     */
+    fun mergeCookies(target: MutableMap<String, String>, response: NiceResponse) {
+        val origin = response.url.toHttpUrlOrNull() ?: return
+        val now = System.currentTimeMillis()
+        Cookie.parseAll(origin, response.headers).forEach { cookie ->
+            if (cookie.expiresAt <= now) target.remove(cookie.name)
+            else if (cookie.matches(origin)) target[cookie.name] = cookie.value
+        }
+    }
+
     /** Fixed diagnostic codes only: never include response bodies or session values. */
     fun responseProblem(status: Int, contentType: String?, text: String): String? {
         if (status in setOf(301, 302, 303, 307, 308)) return "redirect"
         if (status == 401 || status == 403) return "authorization_required"
         if (status == 429) return "rate_limited"
+        if (status == 410) return "session_expired"
         if (status !in 200..299) return "http_$status"
         if (text.length > 262_144) return "response_too_large"
         val body = text.trimStart('\uFEFF', ' ', '\r', '\n', '\t')
@@ -174,6 +193,7 @@ internal object IdlixPlayback {
             "network_timeout" -> "Idlix: waktu tunggu jaringan habis ($stage)."
             "html_response" -> "Idlix: server mengirim halaman HTML, bukan respons playback ($stage)."
             "rate_limited" -> "Idlix: batas permintaan server tercapai ($stage)."
+            "session_expired" -> "Idlix: sesi playback telah kedaluwarsa; buka ulang konten ($stage)."
             else -> "Idlix: playback gagal pada $stage [$reason]."
         }
         // APIRepository also receives a safe, actionable error instead of false.
@@ -204,6 +224,15 @@ internal object IdlixPlayback {
         "horizonacademy.site", "knowledgequest.store", "learnleapinstitute.site",
         "mindbloomcourses.website", "onlinestudy.online", "skillsprouthub.space"
     )
+    // Additional CDN origins declared by APK 0.1.54's media validator.
+    // Keep the web player's older origins too; do not accept arbitrary hosts.
+    private val appCdnDomains = setOf(
+        "akademivo.website", "aspireheightsacademy.digital", "belajarsmart.site",
+        "edubambu.store", "edusparkonline.quest", "eldrinlorekeeper.store",
+        "studihits.space", "horizonacademy.site", "knowledgequest.store",
+        "learnleapinstitute.site", "mindbloomcourses.website", "akademix.store",
+        "kelasnext.store", "skillsprouthub.space", "ruangskill.space"
+    )
 
     private fun secure(url: HttpUrl): Boolean = url.isHttps && url.port == 443 &&
         url.username.isEmpty() && url.password.isEmpty() && url.fragment == null
@@ -221,6 +250,7 @@ internal object IdlixPlayback {
         if (host == "e2e.majorplay.net") return true
         val prefix = host.substringBefore('.')
         val domain = host.substringAfter('.', "")
+        if (domain in appCdnDomains && prefix.matches(Regex("g[0-9]+"))) return true
         return domain in cdnDomains && (prefix in setOf("g1", "g2", "g3", "g5", "g6", "g7", "g8") ||
             prefix == if (domain in z4Domains) "z4" else "g4")
     }
@@ -244,8 +274,11 @@ internal object IdlixPlayback {
 
     fun redeemUrl(value: String?, origin: String): String? {
         val base = origin.toHttpUrlOrNull()?.takeIf(::secure) ?: return null
-        if (value == "/watch/session/redeem") return base.resolve("/api/watch/session/redeem")?.toString()
-        val url = value?.toHttpUrlOrNull()?.takeIf(::secure) ?: return null
+        val endpoint = value?.takeIf { it.isNotBlank() } ?: return null
+        val url = (if (endpoint == "/watch/session/redeem") base.resolve("/api/watch/session/redeem")
+            else base.resolve(endpoint))?.takeIf(::secure) ?: return null
+        if (url.host == base.host && url.query == null &&
+            url.encodedPath.trimEnd('/') == "/api/watch/session/redeem") return url.toString()
         return url.takeIf {
             (it.host == "majorplay.net" || it.host.endsWith(".majorplay.net")) &&
                 it.encodedPath.trimEnd('/') == "/api/play" && it.query == null
@@ -263,7 +296,8 @@ internal object IdlixPlayback {
 
     private val client = OkHttpClient.Builder()
         .followRedirects(false).followSslRedirects(false)
-        .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
+        .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(45, TimeUnit.SECONDS).retryOnConnectionFailure(false).build()
 
     fun interceptor(masterUrl: String): Interceptor {
         val master = masterUrl.toHttpUrlOrNull()
