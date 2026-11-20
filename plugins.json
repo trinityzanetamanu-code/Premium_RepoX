@@ -192,13 +192,13 @@
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/IdlixProvider.cs3",
         "status": 1,
-        "version": 9,
+        "version": 10,
         "name": "IdlixProvider",
         "internalName": "IdlixProvider",
         "authors": [
             "AdiManu"
         ],
-        "fileSize": 81629,
+        "fileSize": 81630,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -209,7 +209,7 @@
         ],
         "iconUrl": "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://idlixian.com&size=16",
         "apiVersion": 1,
-        "fileHash": "sha256-051bde45d583ec71f1a3c21a181891955535db866f93271df75501e441b508d7"
+        "fileHash": "sha256-b6a59aecc81a41b3557ba8248c806150f5cc4590ad09f59aff01fdc7096d4a76"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/IndoAsia.cs3",
