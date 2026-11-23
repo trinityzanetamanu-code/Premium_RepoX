@@ -2,6 +2,7 @@ package com.fourKHDHub
 
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addSimklId
@@ -9,6 +10,12 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.jsoup.nodes.Element
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Interceptor
+import okhttp3.ResponseBody.Companion.toResponseBody
+import java.io.IOException
+import java.util.Locale
+import java.util.MissingResourceException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -32,6 +39,17 @@ class FourKHDHub : MainAPI() {
         private const val SIMKL = "https://api.simkl.com"
         private const val SIMKL_CLIENT_ID = "39f470a9f2ec1aa2383269ca831bc7be0e47da48d6d708ccad9bed4e1a60993e"
         const val TMDBIMAGEBASEURL = "https://image.tmdb.org/t/p/original"
+        private const val AUDIO_FILTER_TAG = "fourkhdhub-original-audio:"
+        private const val MAX_PLAYLIST_SIZE = 512L * 1024
+        private const val MEDIA_TAG = "#EXT-X-MEDIA:"
+        private const val STREAM_TAG = "#EXT-X-STREAM-INF:"
+        private val HLS_ATTRIBUTE = Regex("""(?:^|,)([A-Z0-9-]+)=("[^"]*"|[^",]+)""")
+        private val LANGUAGE_CODE = Regex("[a-z]{2,3}")
+        private val ORIGINAL_LABEL = Regex("""\boriginal\b""", RegexOption.IGNORE_CASE)
+        private val ALTERNATE_AUDIO = Regex(
+            """\b(?:dub(?:bed|bing)?|commentary|descriptive|audio[ -]+description|describes-video|(?:non|not)[ -]+original)\b""",
+            RegexOption.IGNORE_CASE
+        )
 
     }
 
@@ -113,6 +131,7 @@ class FourKHDHub : MainAPI() {
         var tmdbPoster: String? = null
         var tmdbBackdrop: String? = null
         var tmdbActors: List<ActorData> = emptyList()
+        var originalLanguage: String? = null
 
         if (tmdbId != null) {
             val type = if (tvType == TvType.Movie) "movie" else "tv"
@@ -128,6 +147,15 @@ class FourKHDHub : MainAPI() {
                 tmdbOverview = tmdbJson.optString("overview").takeIf { it.isNotBlank() }
                 val date = tmdbJson.optString("release_date").ifBlank { tmdbJson.optString("first_air_date") }
                 tmdbYear = date.takeIf { it.isNotBlank() }?.substringBefore("-")?.toIntOrNull()
+                val originalTitle = tmdbJson.optString(if (isMovie) "original_title" else "original_name")
+                val titleKey = title.lowercase(Locale.ROOT).filter { it.isLetterOrDigit() }
+                if (year != null && year == tmdbYear && titleKey.isNotEmpty() &&
+                    listOfNotNull(tmdbTitle, originalTitle).any {
+                        it.lowercase(Locale.ROOT).filter { character -> character.isLetterOrDigit() } == titleKey
+                    }
+                ) {
+                    originalLanguage = languageCode(tmdbJson.optString("original_language"))
+                }
                 tmdbRating = tmdbJson.optDouble("vote_average").takeIf { it != 0.0 }
                 tmdbPoster = tmdbJson.optString("poster_path").takeIf { it.isNotBlank() }?.let { TMDBIMAGEBASEURL + it }
                 tmdbBackdrop = tmdbJson.optString("backdrop_path").takeIf { it.isNotBlank() }?.let { TMDBIMAGEBASEURL + it }
@@ -232,7 +260,7 @@ class FourKHDHub : MainAPI() {
                     }
                 }
 
-                tvSeriesEpisodes += newEpisode(hrefsList.distinct()) {
+                tvSeriesEpisodes += newEpisode(playbackData(hrefsList.distinct(), originalLanguage)) {
                     this.season = season
                     this.episode = episode
                     this.name = epName ?: "Episode $episode"
@@ -281,7 +309,7 @@ class FourKHDHub : MainAPI() {
                         }
                     }
 
-                    tvSeriesEpisodes += newEpisode(hrefList.distinct()) {
+                    tvSeriesEpisodes += newEpisode(playbackData(hrefList.distinct(), originalLanguage)) {
                         this.season = season
                         this.episode = nextEpisode
                         this.name = epName ?: "S${season.toString().padStart(2, '0')} – $fileTitle [$quality, $size]".trim()
@@ -337,7 +365,7 @@ class FourKHDHub : MainAPI() {
             val movieCastList = parseCredits(movieCreditsJsonText)
             val finalMovieActors = tmdbActors.ifEmpty { movieCastList }
 
-            newMovieLoadResponse(fixedTitle, url, TvType.Movie, hrefs) {
+            newMovieLoadResponse(fixedTitle, url, TvType.Movie, playbackData(hrefs, originalLanguage)) {
                 this.posterUrl = fixedPoster
                 this.backgroundPosterUrl = fixedBackdrop
                 // try { this.logoUrl = logoPath } catch(_:Throwable){}
@@ -356,19 +384,150 @@ class FourKHDHub : MainAPI() {
     private val LINK_REGEX =
         Regex("""https?://[^\s'",\]\[]+""", RegexOption.IGNORE_CASE)
 
+    private data class PlaybackData(val links: List<String>, val originalLanguage: String)
+
+    private fun playbackData(links: List<String>, originalLanguage: String?): Any =
+        if (originalLanguage == null) links else PlaybackData(links, originalLanguage)
+
+    private fun languageCode(value: String?): String? {
+        val tag = value?.trim()?.substringBefore('-')?.lowercase(Locale.ROOT) ?: return null
+        if (!LANGUAGE_CODE.matches(tag) || tag in setOf("und", "mul", "zxx")) return null
+        return try {
+            Locale.forLanguageTag(tag).getISO3Language().takeIf { it.isNotEmpty() }
+        } catch (_: MissingResourceException) {
+            null
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun linkWithOriginalAudio(link: ExtractorLink, originalLanguage: String?): ExtractorLink {
+        if (link.type != ExtractorLinkType.M3U8 || link.javaClass != ExtractorLink::class.java ||
+            link.extractorData != null || link.audioTracks.isNotEmpty() ||
+            (link.source != name && getApiFromNameNull(link.source) != null)
+        ) return link
+
+        // The player finds getVideoInterceptor() by ExtractorLink.source.
+        return ExtractorLink(
+            source = name,
+            name = link.name,
+            url = link.url,
+            referer = link.referer,
+            quality = link.quality,
+            headers = link.headers,
+            extractorData = AUDIO_FILTER_TAG + originalLanguage.orEmpty(),
+            type = link.type,
+        )
+    }
+
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        val data = extractorLink.extractorData?.takeIf { it.startsWith(AUDIO_FILTER_TAG) } ?: return null
+        val playlistUrl = extractorLink.url.toHttpUrlOrNull() ?: return null
+        val originalLanguage = data.removePrefix(AUDIO_FILTER_TAG).ifEmpty { null }
+
+        return Interceptor { chain ->
+            val request = chain.request()
+            val response = chain.proceed(request)
+            if (request.url != playlistUrl || response.code != 200) return@Interceptor response
+            val body = response.body ?: return@Interceptor response
+            val encoding = response.header("Content-Encoding")
+            if (body.contentLength() > MAX_PLAYLIST_SIZE ||
+                (encoding != null && !encoding.equals("identity", ignoreCase = true))
+            ) return@Interceptor response
+
+            val filtered = try {
+                val preview = response.peekBody(MAX_PLAYLIST_SIZE + 1)
+                if (preview.contentLength() > MAX_PLAYLIST_SIZE) null
+                else filterHlsAudio(preview.string(), originalLanguage)
+            } catch (_: IOException) {
+                null
+            } ?: return@Interceptor response
+
+            val replacement = filtered.toResponseBody(body.contentType())
+            body.close()
+            response.newBuilder()
+                .header("Content-Length", replacement.contentLength().toString())
+                .body(replacement)
+                .build()
+        }
+    }
+
+    private fun filterHlsAudio(playlist: String, originalLanguage: String?): String? {
+        val lines = playlist.lines()
+        if (lines.firstOrNull()?.trim() != "#EXTM3U") return null
+
+        val media = lines.indices.filter { lines[it].startsWith(MEDIA_TAG) }
+            .associateWith { index -> hlsAttributes(lines[index]) }
+            .filterValues { it["TYPE"] == "AUDIO" }
+        if (media.isEmpty()) return null
+
+        val groups = media.entries.groupBy { it.value["GROUP-ID"] }
+        val variants = lines.filter { it.startsWith(STREAM_TAG) }
+        if (variants.isEmpty() || groups.containsKey(null) || variants.any {
+                val audioGroup = hlsAttributes(it)["AUDIO"]
+                audioGroup.isNullOrBlank() || audioGroup !in groups
+            }
+        ) return null
+
+        val kept = mutableSetOf<Int>()
+        for (group in groups.values) {
+            val mainAudio = group.filter { (_, attributes) ->
+                !ALTERNATE_AUDIO.containsMatchIn(attributes["NAME"].orEmpty()) &&
+                    !ALTERNATE_AUDIO.containsMatchIn(attributes["CHARACTERISTICS"].orEmpty())
+            }
+            val original = mainAudio.filter { ORIGINAL_LABEL.containsMatchIn(it.value["NAME"].orEmpty()) }
+            val selected = if (original.isNotEmpty()) {
+                original.singleOrNull()?.takeIf {
+                    val language = languageCode(it.value["LANGUAGE"])
+                    originalLanguage == null || language == null || language == originalLanguage
+                }
+            } else if (originalLanguage != null && mainAudio.all { languageCode(it.value["LANGUAGE"]) != null }) {
+                mainAudio.singleOrNull { languageCode(it.value["LANGUAGE"]) == originalLanguage }
+            } else null
+            if (selected == null || selected.value["URI"].isNullOrBlank()) return null
+            kept += selected.key
+        }
+
+        if (kept.size == media.size) return null
+        return lines.mapIndexedNotNull { index, line ->
+            when {
+                index in kept -> defaultHlsAudio(line, media.getValue(index))
+                index in media -> null
+                else -> line
+            }
+        }.joinToString("\n")
+    }
+
+    private fun hlsAttributes(line: String): Map<String, String> =
+        HLS_ATTRIBUTE.findAll(line.substringAfter(':')).associate {
+            it.groupValues[1] to it.groupValues[2].removeSurrounding("\"")
+        }
+
+    private fun defaultHlsAudio(line: String, attributes: Map<String, String>): String {
+        val flags = listOf("DEFAULT", "AUTOSELECT")
+        val updated = HLS_ATTRIBUTE.replace(line.removePrefix(MEDIA_TAG)) { match ->
+            if (match.groupValues[1] in flags) match.value.substringBefore('=') + "=YES"
+            else match.value
+        }
+        return MEDIA_TAG + updated + flags.filterNot(attributes::containsKey).joinToString("") { ",$it=YES" }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val links = runCatching { AppUtils.tryParseJson<List<String>>(data) }.getOrNull()
+        val playback = if (data.startsWith('{')) AppUtils.tryParseJson<PlaybackData>(data) else null
+        val links = (playback?.links ?: AppUtils.tryParseJson<List<String>>(data))
             ?.asSequence()
             ?.filter { it.isNotBlank() }
             ?.distinct()
             ?.toList()
             ?: return false
 
+        val emit: (ExtractorLink) -> Unit = { link ->
+            callback(if (isCasting) link else linkWithOriginalAudio(link, playback?.originalLanguage))
+        }
         coroutineScope {
             links.map { raw -> async {
             try {
@@ -376,10 +535,10 @@ class FourKHDHub : MainAPI() {
                 if (resolved.isBlank()) return@async
                 when {
                     resolved.contains("hubcloud", ignoreCase = true) ->
-                        HubCloud().getUrl(resolved, null, subtitleCallback, callback)
+                        HubCloud().getUrl(resolved, null, subtitleCallback, emit)
                     resolved.contains("hblinks", ignoreCase = true) ->
-                        Hblinks().getUrl(resolved, null, subtitleCallback, callback)
-                    else -> loadExtractor(resolved, subtitleCallback, callback)
+                        Hblinks().getUrl(resolved, null, subtitleCallback, emit)
+                    else -> loadExtractor(resolved, subtitleCallback, emit)
                 }
             } catch (e: Exception) {
                 Log.e("Extractor", "Extractor failed: $raw — ${e.message}")
