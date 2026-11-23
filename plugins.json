@@ -484,6 +484,27 @@
         "fileHash": "sha256-d6addaf2bc3e85788847a6aea86a936aafce8e4cdbd44954ffdefc62a2fb3d05"
     },
     {
+        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Pencurimovie.cs3",
+        "status": 1,
+        "version": 8,
+        "name": "Pencurimovie",
+        "internalName": "Pencurimovie",
+        "authors": [
+            "phisher98"
+        ],
+        "fileSize": 13048,
+        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
+        "language": "id",
+        "tvTypes": [
+            "Movie",
+            "Anime",
+            "Cartoon"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=pencurimovie.sbs&sz=256",
+        "apiVersion": 1,
+        "fileHash": "sha256-8e30ae3d5ade23f33494557eb29cefb42ac2722d68bc16d982b9cedcb20497d5"
+    },
+    {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/PODJAV.cs3",
         "status": 1,
         "version": 9,
