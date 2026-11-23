@@ -94,7 +94,7 @@ internal class MultiSource(private val tmdbKey: String,
             job.ensureActive(); sourceJob.ensureActive()
             if (active && validUrl(l.url) && urls.add(l.url)) {
                 link(labeled(group, l))
-                if (group != "FourKHDHub") preferredReady.complete(Unit)
+                if (group == "Moviebox" || group == "OppaDrama") preferredReady.complete(Unit)
             }
         } }
         fun emitSub(sourceJob: Job): (SubtitleFile)->Unit = { s -> synchronized(lock) {
@@ -139,15 +139,21 @@ internal class MultiSource(private val tmdbKey: String,
                 val request = selected.await()
                 if (MediaIdentity.valid(request)) fourK(request, subtitle, emitLink)
             }
-            joinAll(preferredDone, fourKJob)
+            val pencurimovieJob = launchSource("Pencurimovie", PENCURIMOVIE_TIMEOUT_MS) { subtitle, emitLink ->
+                val request = selected.await()
+                if (MediaIdentity.valid(request)) PencurimovieSource().resolve(request, subtitle, emitLink)
+            }
+            joinAll(preferredDone, fourKJob, pencurimovieJob)
             currentCoroutineContext().ensureActive()
             synchronized(lock) { urls.isNotEmpty() }
         } finally { synchronized(lock) { active=false } }
     }
     companion object {
         private const val PREFERRED_SOURCE_HEAD_START_MS = 8_000L
+        private const val PENCURIMOVIE_TIMEOUT_MS = 35_000L
 
-        fun isAdditional(link: ExtractorLink): Boolean = link.source in setOf("FourKHDHub", "OppaDrama")
+        fun isAdditional(link: ExtractorLink): Boolean =
+            link.source in setOf("FourKHDHub", "OppaDrama", "Pencurimovie")
         /** Native media client retains resolver headers, Range and segment requests. */
         fun additionalInterceptor(): okhttp3.Interceptor = okhttp3.Interceptor { chain -> chain.proceed(chain.request()) }
     }
@@ -225,6 +231,134 @@ internal object MediaIdentity {
         val season = Regex("(?i)(?:season|s)\\s*(\\d+)\\b").find(title)?.groupValues?.get(1)?.toIntOrNull()
             ?: c.season ?: 1 // unnumbered catalog is season one only; never assume requested season.
         a.absUrl("href").takeIf { it.isNotBlank() }?.let { Episode(it,season,number) }
+    }
+}
+
+/** Finds the matching Pencurimovie page and delegates its iframes to CloudStream. */
+private class PencurimovieSource {
+    private val releaseYear = Regex("""\b(?:19|20)\d{2}\b""")
+    private val titleYear = Regex("""\(((?:19|20)\d{2})\)\s*$""")
+    private val seasonNumber = Regex("""(?i)\bseason\s*0*(\d+)\b""")
+    private val episodeNumber = Regex("""(?i)\bepisode\s*0*(\d+)\b""")
+
+    suspend fun resolve(
+        request: MediaIdentity.Request,
+        sub: (SubtitleFile) -> Unit,
+        link: (ExtractorLink) -> Unit,
+    ) {
+        val titles = request.titles.filter(String::isNotBlank).distinctBy(MediaIdentity::normalize)
+        val titleKeys = titles.map(MediaIdentity::normalize).toSet()
+        val visited = hashSetOf<String>()
+        val matches = linkedMapOf<String, Document>()
+
+        for (title in titles.take(6)) {
+            val search = getPage(BASE_URL + "/?s=" + URLEncoder.encode(title, "UTF-8")) ?: continue
+            for (card in search.select("div.ml-item a[href]").take(30)) {
+                val cardTitle = card.attr("oldtitle").ifBlank { card.attr("title") }
+                    .ifBlank { card.selectFirst(".mli-info h2, h2, h3")?.text().orEmpty() }
+                if (MediaIdentity.normalize(MediaIdentity.catalogTitle(cardTitle)) !in titleKeys) continue
+                val candidateUrl = catalogUrl(card.absUrl("href")) ?: continue
+                val path = catalogPath(candidateUrl)
+                if (!visited.add(path)) continue
+                val detail = getPage(candidateUrl) ?: continue
+                val candidate = catalogEntry(detail) ?: continue
+                if (MediaIdentity.matches(request, candidate)) {
+                    matches[catalogPath(detail.location())] = detail
+                }
+            }
+            if (matches.isNotEmpty()) break
+        }
+
+        val detail = matches.values.singleOrNull() ?: return
+        val playerPage = if (request.type == 2) {
+            val episode = MediaIdentity.episode(request, episodes(detail)) ?: return
+            getPage(episode.url) ?: return
+        } else {
+            detail
+        }
+        val pageUrl = playerPage.location().toHttpUrlOrNull() ?: return
+        val mirrors = playerPage.select("div.movieplay iframe").mapNotNull { iframe ->
+            sequenceOf(iframe.attr("data-src"), iframe.attr("src"))
+                .map(String::trim)
+                .filter { it.isNotEmpty() && !it.startsWith("#") }
+                .mapNotNull(pageUrl::resolve)
+                .firstOrNull { it.username.isEmpty() && it.password.isEmpty() && it != pageUrl }
+                ?.toString()
+        }.distinct()
+        coroutineScope {
+            val slots = Semaphore(4)
+            mirrors.map { url ->
+                launch {
+                    slots.withPermit {
+                        sourceCatching { loadExtractor(url, pageUrl.toString(), sub, link) }
+                            .onFailure { Log.d("Pencurimovie", "Mirror failed: " + it.javaClass.simpleName) }
+                    }
+                }
+            }.joinAll()
+        }
+    }
+
+    private fun catalogUrl(url: String): String? = url.toHttpUrlOrNull()?.takeIf {
+        it.username.isEmpty() && it.password.isEmpty() &&
+            (it.host == "pencurimovie.sbs" || it.host.endsWith(".pencurimovie.sbs"))
+    }?.newBuilder()?.scheme("https")?.fragment(null)?.build()?.toString()
+
+    private fun catalogPath(url: String): String =
+        url.toHttpUrlOrNull()?.encodedPath?.trimEnd('/').orEmpty()
+
+    private suspend fun getPage(url: String): Document? = sourceCatching {
+        val response = app.get(url, timeout = 8)
+        val location = catalogUrl(response.url ?: url)
+        if (response.code == 200 && location != null) Jsoup.parse(response.textLarge, location) else null
+    }.getOrNull()
+
+    private fun catalogEntry(doc: Document): MediaIdentity.Candidate? {
+        val heading = doc.selectFirst("div.mvic-desc h3")?.text()?.trim()?.takeIf(String::isNotEmpty)
+            ?: return null
+        val type = if (doc.selectFirst("div.tvseason") != null ||
+            catalogPath(doc.location()).startsWith("/series/")) 2 else 1
+        val release = doc.selectFirst("div.mvic-info p:contains(Release)")?.text()
+        val year = release?.let { releaseYear.find(it)?.value?.toIntOrNull() }
+            ?: titleYear.find(heading)?.groupValues?.get(1)?.toIntOrNull()
+
+        val infoLinks = doc.select("div.mvic-info a[href]").mapNotNull { it.absUrl("href").toHttpUrlOrNull() }
+        val tmdbKind = if (type == 1) "movie" else "tv"
+        val tmdb = infoLinks.firstNotNullOfOrNull { url ->
+            val segments = url.pathSegments
+            if (url.host in TMDB_HOSTS && segments.firstOrNull() == tmdbKind) {
+                segments.getOrNull(1)?.substringBefore('-')?.takeIf { TMDB_ID.matches(it) }
+            } else null
+        }
+        val imdb = infoLinks.firstNotNullOfOrNull { url ->
+            val segments = url.pathSegments
+            if (url.host in IMDB_HOSTS && segments.firstOrNull() == "title") {
+                segments.getOrNull(1)?.takeIf { IMDB_ID.matches(it) }
+            } else null
+        }
+        return MediaIdentity.Candidate(
+            doc.location(), listOf(MediaIdentity.catalogTitle(heading)), year, type, tmdb, imdb
+        )
+    }
+
+    private fun episodes(doc: Document): List<MediaIdentity.Episode> =
+        doc.select("div.tvseason").flatMap { group ->
+            val season = group.selectFirst("strong")?.text()?.let {
+                seasonNumber.find(it)?.groupValues?.get(1)?.toIntOrNull()
+            } ?: return@flatMap emptyList()
+            group.select("div.les-content a[href]").mapNotNull { anchor ->
+                val episode = episodeNumber.find(anchor.text())?.groupValues?.get(1)?.toIntOrNull()
+                    ?: return@mapNotNull null
+                val url = catalogUrl(anchor.absUrl("href")) ?: return@mapNotNull null
+                MediaIdentity.Episode(url, season, episode)
+            }
+        }.distinctBy { Triple(catalogPath(it.url), it.season, it.number) }
+
+    private companion object {
+        const val BASE_URL = "https://ww21.pencurimovie.sbs"
+        val TMDB_HOSTS = setOf("themoviedb.org", "www.themoviedb.org")
+        val IMDB_HOSTS = setOf("imdb.com", "www.imdb.com")
+        val TMDB_ID = Regex("""\d+""")
+        val IMDB_ID = Regex("""tt\d+""")
     }
 }
 
