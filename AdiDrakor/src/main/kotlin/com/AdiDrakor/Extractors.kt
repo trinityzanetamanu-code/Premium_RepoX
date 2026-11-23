@@ -88,10 +88,14 @@ internal class MultiSource(private val tmdbKey: String,
         val subs=hashSetOf<String>()
         var active=true
         val job=currentCoroutineContext().job
+        val preferredReady = CompletableDeferred<Unit>()
         fun validUrl(url: String): Boolean = sourceCatching { val u=URI(url); u.scheme in setOf("http","https") && !u.host.isNullOrBlank() && u.userInfo==null }.getOrDefault(false)
         fun emit(group: String, sourceJob: Job): (ExtractorLink)->Unit = { l -> synchronized(lock) {
             job.ensureActive(); sourceJob.ensureActive()
-            if(active && validUrl(l.url) && urls.add(l.url)) link(labeled(group,l))
+            if (active && validUrl(l.url) && urls.add(l.url)) {
+                link(labeled(group, l))
+                if (group != "FourKHDHub") preferredReady.complete(Unit)
+            }
         } }
         fun emitSub(sourceJob: Job): (SubtitleFile)->Unit = { s -> synchronized(lock) {
             job.ensureActive(); sourceJob.ensureActive()
@@ -99,23 +103,50 @@ internal class MultiSource(private val tmdbKey: String,
         } }
         // Metadata hydration is independent of Moviebox and shared by the additional sources.
         val selected=async(Dispatchers.IO) { if(MediaIdentity.valid(r)) metadata(r) else r }
-        val tasks=listOf<Pair<String,suspend ((SubtitleFile)->Unit,(ExtractorLink)->Unit)->Unit>>(
-            "Moviebox" to { s,l -> moviebox(s,l) },
-            "FourKHDHub" to { s,l -> val v=selected.await(); if(MediaIdentity.valid(v)) fourK(v,s,l) },
-            "OppaDrama" to { s,l -> val v=selected.await(); if(MediaIdentity.valid(v)) oppa(v,s,l) })
+        val (movieboxTimeout, fourKTimeout, oppaTimeout) = timeouts
+        fun launchSource(
+            name: String,
+            timeout: Long,
+            resolve: suspend ((SubtitleFile) -> Unit, (ExtractorLink) -> Unit) -> Unit,
+        ) = launch(Dispatchers.IO) {
+            try {
+                val completed = withTimeoutOrNull(timeout) {
+                    val sourceJob = currentCoroutineContext().job
+                    resolve(emitSub(sourceJob), emit(name, sourceJob))
+                    true
+                }
+                if (completed == null) Log.d("MultiSource", "$name timeout")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.d("MultiSource", "$name " + e.javaClass.simpleName)
+            }
+        }
+
         try {
-            tasks.mapIndexed { i,(name,task) -> launch(Dispatchers.IO) {
-                try {
-                    val completed=withTimeoutOrNull(timeouts[i]) { val sourceJob=currentCoroutineContext().job; task(emitSub(sourceJob),emit(name,sourceJob)); true }
-                    if(completed==null) com.lagradost.api.Log.d("MultiSource", "$name timeout")
-                } catch(e: CancellationException) { throw e }
-                catch(e: Exception) { com.lagradost.api.Log.d("MultiSource", "$name ${e.javaClass.simpleName}") }
-            } }.joinAll()
+            val movieboxJob = launchSource("Moviebox", movieboxTimeout, moviebox)
+            val oppaJob = launchSource("OppaDrama", oppaTimeout) { subtitle, emitLink ->
+                val request = selected.await()
+                if (MediaIdentity.valid(request)) oppa(request, subtitle, emitLink)
+            }
+            val preferredDone = launch {
+                joinAll(movieboxJob, oppaJob)
+                preferredReady.complete(Unit)
+            }
+            // Give the preferred sources a head start while keeping the fallback inside the player timeout.
+            withTimeoutOrNull(PREFERRED_SOURCE_HEAD_START_MS) { preferredReady.await() }
+            val fourKJob = launchSource("FourKHDHub", fourKTimeout) { subtitle, emitLink ->
+                val request = selected.await()
+                if (MediaIdentity.valid(request)) fourK(request, subtitle, emitLink)
+            }
+            joinAll(preferredDone, fourKJob)
             currentCoroutineContext().ensureActive()
             synchronized(lock) { urls.isNotEmpty() }
         } finally { synchronized(lock) { active=false } }
     }
     companion object {
+        private const val PREFERRED_SOURCE_HEAD_START_MS = 8_000L
+
         fun isAdditional(link: ExtractorLink): Boolean = link.source in setOf("FourKHDHub", "OppaDrama")
         /** Native media client retains resolver headers, Range and segment requests. */
         fun additionalInterceptor(): okhttp3.Interceptor = okhttp3.Interceptor { chain -> chain.proceed(chain.request()) }
