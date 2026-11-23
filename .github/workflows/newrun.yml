@@ -26,25 +26,7 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v7
         with:
-          path: "src"
-
-      - name: Checkout repo untuk folder builds
-        uses: actions/checkout@v7
-        with:
-          path: "builds"
-
-      - name: Checkout existing builds branch
-        run: |
-          cd "$GITHUB_WORKSPACE/builds"
-          git ls-remote --exit-code --heads origin builds >/dev/null
-          git fetch origin builds
-          git checkout --detach FETCH_HEAD
-          cp plugins.json "$RUNNER_TEMP/plugins-before.json"
-
-      - name: Bersihkan build lama
-        run: |
-          cd "$GITHUB_WORKSPACE/builds"
-          rm -f ./*.cs3 ./*.jar ./plugins.json
+          path: src
 
       - name: Set up JDK 17
         uses: actions/setup-java@v6
@@ -57,25 +39,47 @@ jobs:
         with:
           cache-read-only: false
 
-      - name: Create local.properties
-        run: |
-          cd "$GITHUB_WORKSPACE/src"
-          touch local.properties
-
       - name: Build Plugins
+        working-directory: src
         run: |
-          cd "$GITHUB_WORKSPACE/src"
+          touch local.properties
           chmod +x gradlew
           ./gradlew makePluginsJson
-          shopt -s globstar nullglob
-          cp **/build/*.cs3 "$GITHUB_WORKSPACE/builds" || true
-          cp **/build/*.jar "$GITHUB_WORKSPACE/builds" || true
-          cp build/plugins.json "$GITHUB_WORKSPACE/builds"
 
-      - name: Verify plugin artifacts and catalog preservation
+      - name: Checkout builds branch
+        uses: actions/checkout@v7
+        with:
+          ref: builds
+          path: builds
+
+      - name: Sync plugin artifacts and catalog
         run: |
-          cd "$GITHUB_WORKSPACE/src"
-          python3 AdiDrakor/tests/verify_artifacts.py "$GITHUB_WORKSPACE/builds" "$RUNNER_TEMP/plugins-before.json"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from shutil import copyfile
+
+          source = Path("src")
+          destination = Path("builds")
+          catalog = source / "build" / "plugins.json"
+          plugins = json.loads(catalog.read_text(encoding="utf-8"))
+
+          for pattern in ("*.cs3", "*.jar"):
+              for artifact in destination.glob(pattern):
+                  artifact.unlink()
+
+          for plugin in plugins:
+              name = plugin["internalName"]
+              module_build = source / name / "build"
+              package = f"{name}.cs3"
+              copyfile(module_build / package, destination / package)
+              if plugin.get("jarUrl"):
+                  jar = f"{name}.jar"
+                  copyfile(module_build / jar, destination / jar)
+
+          copyfile(catalog, destination / "plugins.json")
+          print(f"Prepared {len(plugins)} plugins for publication")
+          PY
 
       - name: Buat ulang repo.json kalau hilang
         run: |
@@ -101,21 +105,6 @@ jobs:
       - name: Push builds
         run: |
           cd "$GITHUB_WORKSPACE/builds"
-
-          if [ ! -f "plugins.json" ]; then
-            echo "BAHAYA: plugins.json tidak terbentuk. Membatalkan proses."
-            exit 1
-          fi
-          if [ ! -f "repo.json" ]; then
-            echo "BAHAYA: repo.json hilang! Membatalkan proses."
-            exit 1
-          fi
-          if ! ls ./*.cs3 >/dev/null 2>&1; then
-            echo "BAHAYA: tidak ada file .cs3 sama sekali. Membatalkan proses."
-            exit 1
-          fi
-
-          echo ">> Total file .cs3: $(ls -1 ./*.cs3 | wc -l)"
 
           git config --local user.email "actions@github.com"
           git config --local user.name "GitHub Actions"

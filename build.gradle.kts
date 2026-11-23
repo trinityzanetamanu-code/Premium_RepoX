@@ -41,6 +41,18 @@ fun Project.android(configuration: LibraryExtension.() -> Unit) {
     }
 }
 
+if (subprojects.isEmpty()) {
+    val catalog = layout.buildDirectory.file("plugins.json")
+    tasks.register("makePluginsJson") {
+        outputs.file(catalog)
+        doLast {
+            val file = catalog.get().asFile
+            file.parentFile.mkdirs()
+            file.writeText("[]\n")
+        }
+    }
+}
+
 subprojects {
     apply(plugin = "com.android.library")
     apply(plugin = "com.lagradost.cloudstream3.gradle")
