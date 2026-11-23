@@ -155,7 +155,7 @@
         "authors": [
             "aldry84"
         ],
-        "fileSize": 39931,
+        "fileSize": 72035,
         "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
         "language": "id",
         "tvTypes": [
@@ -165,7 +165,7 @@
         ],
         "iconUrl": "https://www.google.com/s2/favicons?domain=4khdhub.one&sz=256",
         "apiVersion": 1,
-        "fileHash": "sha256-70a0ad06e884fa9f820e51bf22ed6fe321ab46c85f45e2c472c7460274fcba95"
+        "fileHash": "sha256-a579a0fed4388ee53ec555ffb7c21f77fbfc18d4f9cd86d0155be30855e7642c"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/FreeReels.cs3",
@@ -565,27 +565,6 @@
         "iconUrl": "https://v-mps.crazymaplestudios.com/images/211d3420-d721-11f0-84ad-6b5693b490dc.png",
         "apiVersion": 1,
         "fileHash": "sha256-091e2c87c195b7f8b1466445afea419e85e68821a44c5ac25ec87bf6083781b5"
-    },
-    {
-        "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/RiveStream.cs3",
-        "status": 1,
-        "version": 11,
-        "name": "RiveStream",
-        "internalName": "RiveStream",
-        "authors": [
-            "aldry84"
-        ],
-        "fileSize": 114669,
-        "repositoryUrl": "https://github.com/trinityzanetamanu-code/Premium_RepoX",
-        "language": "id",
-        "tvTypes": [
-            "AsianDrama",
-            "TvSeries",
-            "Movie"
-        ],
-        "iconUrl": "https://www.rivestream.app/icons/icon-192x192.png",
-        "apiVersion": 1,
-        "fileHash": "sha256-457363ad73c13350323549fdd8cf79c5ccad05ddf2808e181a24720c3d171ffe"
     },
     {
         "url": "https://raw.githubusercontent.com/trinityzanetamanu-code/Premium_RepoX/builds/Sflix.cs3",
