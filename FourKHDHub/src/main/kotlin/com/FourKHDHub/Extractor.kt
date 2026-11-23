@@ -166,7 +166,7 @@ class Hubdrive : ExtractorApi() {
 }
 
 
-class HubCloud : ExtractorApi() {
+open class HubCloud : ExtractorApi() {
 
     override val name = "Hub-Cloud"
     override var mainUrl: String = runBlocking {
