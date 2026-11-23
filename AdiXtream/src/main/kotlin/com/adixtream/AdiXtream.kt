@@ -222,11 +222,11 @@ open class AdiXtream : MainAPI() {
 
     private val movieboxEngine by lazy { AdiXtreamMovieboxEngine(name,tmdbApiKey) }
 
-    private val multiSource by lazy { com.adixtream.sources.MultiSource(tmdbApiKey) }
+    private val multiSource by lazy { MultiSource(tmdbApiKey) }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): okhttp3.Interceptor =
-        if (com.adixtream.sources.MultiSource.isAdditional(extractorLink))
-            com.adixtream.sources.MultiSource.additionalInterceptor()
+        if (MultiSource.isAdditional(extractorLink))
+            MultiSource.additionalInterceptor()
         else movieboxEngine.getVideoInterceptor(extractorLink)
 
     override suspend fun loadLinks(
@@ -238,7 +238,7 @@ open class AdiXtream : MainAPI() {
         val item = com.lagradost.cloudstream3.utils.AppUtils.tryParseJson<XtreamLinkData>(data) ?: return false
         val id = item.tmdbId.takeIf { it.matches(Regex("[0-9]+")) } ?: return false
         val titles = listOfNotNull(item.title,item.originalTitle) + item.alternativeTitles
-        return multiSource.resolve(com.adixtream.sources.MediaIdentity.Request(titles,item.year,if(item.isTvSeries) 2 else 1,item.season,item.episode,id),
+        return multiSource.resolve(MediaIdentity.Request(titles,item.year,if(item.isTvSeries) 2 else 1,item.season,item.episode,id),
             subtitleCallback,callback) { sourceSubtitle,sourceLink ->
             movieboxEngine.resolve(
             listOfNotNull(item.title, item.originalTitle) + item.alternativeTitles, item.year, if (item.isTvSeries) 2 else 1, item.season, item.episode,

@@ -306,11 +306,11 @@ open class AdiFilmSemi : TmdbProvider() {
 
     private val movieboxEngine by lazy { AdiFilmSemiMovieboxEngine(name,apiKey) }
 
-    private val multiSource by lazy { com.michat88.sources.MultiSource(apiKey) }
+    private val multiSource by lazy { MultiSource(apiKey) }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): okhttp3.Interceptor =
-        if (com.michat88.sources.MultiSource.isAdditional(extractorLink))
-            com.michat88.sources.MultiSource.additionalInterceptor()
+        if (MultiSource.isAdditional(extractorLink))
+            MultiSource.additionalInterceptor()
         else movieboxEngine.getVideoInterceptor(extractorLink)
 
     override suspend fun loadLinks(
@@ -323,7 +323,7 @@ open class AdiFilmSemi : TmdbProvider() {
         val id = item.id?.toString() ?: return false
         val type = when(item.type) { "movie" -> 1; "tv" -> 2; else -> return false }
         val titles = listOfNotNull(item.title,item.orgTitle,item.jpTitle) + item.alternativeTitles
-        return multiSource.resolve(com.michat88.sources.MediaIdentity.Request(titles,item.airedYear ?: item.year,type,item.season,item.episode,id,item.imdbId,seasonYear=item.year),
+        return multiSource.resolve(MediaIdentity.Request(titles,item.airedYear ?: item.year,type,item.season,item.episode,id,item.imdbId,seasonYear=item.year),
             subtitleCallback,callback) { sourceSubtitle,sourceLink ->
             movieboxEngine.resolve(
             listOfNotNull(item.title, item.orgTitle, item.jpTitle) + item.alternativeTitles, item.airedYear ?: item.year, type, item.season, item.episode,
