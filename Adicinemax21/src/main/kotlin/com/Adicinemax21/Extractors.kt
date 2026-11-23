@@ -252,7 +252,10 @@ private class PencurimovieSource {
         val matches = linkedMapOf<String, Document>()
 
         for (title in titles.take(6)) {
-            val search = getPage(BASE_URL + "/?s=" + URLEncoder.encode(title, "UTF-8")) ?: continue
+            val searchPath = "/?s=" + URLEncoder.encode(title, "UTF-8")
+            val search = getPage(BASE_URL + searchPath)
+                ?: getPage(LEGACY_BASE_URL + searchPath)
+                ?: continue
             for (card in search.select("div.ml-item a[href]").take(30)) {
                 val cardTitle = card.attr("oldtitle").ifBlank { card.attr("title") }
                     .ifBlank { card.selectFirst(".mli-info h2, h2, h3")?.text().orEmpty() }
@@ -300,7 +303,7 @@ private class PencurimovieSource {
 
     private fun catalogUrl(url: String): String? = url.toHttpUrlOrNull()?.takeIf {
         it.username.isEmpty() && it.password.isEmpty() &&
-            (it.host == "pencurimovie.sbs" || it.host.endsWith(".pencurimovie.sbs"))
+            CATALOG_DOMAINS.any { domain -> it.host == domain || it.host.endsWith(".$domain") }
     }?.newBuilder()?.scheme("https")?.fragment(null)?.build()?.toString()
 
     private fun catalogPath(url: String): String =
@@ -354,7 +357,9 @@ private class PencurimovieSource {
         }.distinctBy { Triple(catalogPath(it.url), it.season, it.number) }
 
     private companion object {
-        const val BASE_URL = "https://ww21.pencurimovie.sbs"
+        const val BASE_URL = "https://ww44.pencurimovie.baby"
+        const val LEGACY_BASE_URL = "https://ww21.pencurimovie.sbs"
+        val CATALOG_DOMAINS = setOf("pencurimovie.baby", "pencurimovie.sbs")
         val TMDB_HOSTS = setOf("themoviedb.org", "www.themoviedb.org")
         val IMDB_HOSTS = setOf("imdb.com", "www.imdb.com")
         val TMDB_ID = Regex("""\d+""")
